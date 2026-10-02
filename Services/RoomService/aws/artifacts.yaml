@@ -1,0 +1,48 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private versioned release storage for the Cortex Command room server, retained independently of the running server.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    ref: Services/RoomService/README.md
+    must: Keep source archives private. Bucket and versions survive stack deletion for recovery.
+Resources:
+  Releases:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Keep immutable service releases available for deployment and rollback.
+        must: Block public access, encrypt storage, preserve release versions.
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      VersioningConfiguration: {Status: Enabled}
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+  TransportPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Release uploads and instance downloads must use TLS.
+        must: Do not permit anonymous public access.
+    Properties:
+      Bucket: !Ref Releases
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource: [!GetAtt Releases.Arn, !Sub '${Releases.Arn}/*']
+            Condition: {Bool: {'aws:SecureTransport': false}}
+Outputs:
+  ArtifactBucket:
+    Value: !Ref Releases

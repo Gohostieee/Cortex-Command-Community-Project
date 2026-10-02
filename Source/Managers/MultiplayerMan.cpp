@@ -86,10 +86,14 @@ struct MultiplayerMan::Impl {
 	char Name[32] = "Player", Room[64] = "Cortex room", HostAddress[256] = "127.0.0.1:8000", Password[64] = "";
 	char ServiceAddress[256] = "", JoinCode[32] = "";
 	bool Online = true;
+	std::string DefaultService;
 	Impl() {
 		std::string endpoint;
+		std::ifstream bundled("MultiplayerService.txt"); std::getline(bundled, DefaultService);
+		if (!DefaultService.empty() && DefaultService.back() == '\r') DefaultService.pop_back();
 		std::ifstream personal(System::GetUserdataDirectory() + "MultiplayerService.txt"); std::getline(personal, endpoint);
-		if (endpoint.empty()) { std::ifstream bundled("MultiplayerService.txt"); std::getline(bundled, endpoint); }
+		if (!endpoint.empty() && endpoint.back() == '\r') endpoint.pop_back();
+		if (endpoint.empty()) endpoint = DefaultService;
 		if (const char* configured = std::getenv("CCCP_MP_SERVICE")) endpoint = configured;
 		std::string host; uint16_t port;
 		if (Address(endpoint, host, port, 8001)) std::snprintf(ServiceAddress, sizeof(ServiceAddress), "%s", endpoint.c_str());
@@ -626,8 +630,13 @@ void MultiplayerMan::Impl::Draw() {
 	if (!Error.empty()) { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.68f, 0.32f, 1)); ImGui::TextWrapped("%s", Error.c_str()); ImGui::PopStyleColor(); ImGui::Separator(); }
 	if (State == Mode::Idle) {
 		ImGui::InputText("Player name", Name, sizeof(Name));
-		ImGui::Checkbox("Join with room codes", &Online);
-		if (Online && ImGui::TreeNode("Connection settings")) { ImGui::InputText("Room service", ServiceAddress, sizeof(ServiceAddress)); ImGui::TextWrapped("Use the same service address as your friends. The game remembers it for future sessions."); ImGui::TreePop(); }
+		ImGui::Checkbox("Use room codes", &Online);
+		if (Online && ImGui::TreeNode("Connection settings")) {
+			ImGui::InputText("Server IP or hostname", ServiceAddress, sizeof(ServiceAddress));
+			if (ImGui::Button("Save server address")) { std::string host; uint16_t port; if (Address(ServiceAddress, host, port, 8001)) { SaveService(); Error.clear(); } else Error = "Enter the server IP or hostname, optionally followed by :port."; }
+			if (!DefaultService.empty()) { ImGui::SameLine(); if (ImGui::Button("Use default server")) { std::snprintf(ServiceAddress, sizeof(ServiceAddress), "%s", DefaultService.c_str()); SaveService(); Error.clear(); } }
+			ImGui::TextWrapped("Use the same server as your friends. Port 8001 is used when you leave out the port."); ImGui::TreePop();
+		}
 		if (Online && !ServiceAddress[0]) ImGui::TextWrapped("Configure your room service address in Connection settings.");
 		if (ImGui::BeginTabBar("mp-tabs")) {
 			if (ImGui::BeginTabItem("Join")) {

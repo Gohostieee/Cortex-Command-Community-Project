@@ -1,0 +1,27 @@
+name: Room service
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/multiplayer-rebuild]
+    paths:
+      - Services/RoomService/**
+      - Source/System/Multiplayer*
+      - Tests/MultiplayerRelayTests.cpp
+      - .github/workflows/room-service.yml
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build standalone server and transport tests
+        run: |
+          cmake -S Services/RoomService -B "$RUNNER_TEMP/rooms" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/rooms" -j 2
+      - name: Check four-player relayed connections
+        run: |
+          "$RUNNER_TEMP/rooms/cc-room-service" --bind 127.0.0.1 --port 38997 --max-rooms 8 &
+          service_pid=$!
+          trap 'kill "$service_pid" 2>/dev/null || true' EXIT
+          "$RUNNER_TEMP/rooms/relay-tests" 38997

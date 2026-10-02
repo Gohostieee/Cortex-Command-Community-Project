@@ -1,6 +1,8 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay)
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [string]$ServiceAddress = '', [string]$GameDirectory = '')
 $ErrorActionPreference = 'Stop'
+if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
+$gameRoot = if ($GameDirectory) { (Resolve-Path -LiteralPath $GameDirectory).Path } else { $taskRoot }
 Push-Location $taskRoot
 try {
     $devShell = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat'
@@ -13,9 +15,13 @@ try {
     if ($LASTEXITCODE) { throw 'Multiplayer protocol/transport tests failed.' }
     if ($Smoke) {
         if ($Relay) { & ./Services/RoomService/Build.ps1 -Test }
-        & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
-        if ($LASTEXITCODE) { throw 'Game build failed.' }
-        if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
+        if (!$GameDirectory) {
+            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
+            if ($LASTEXITCODE) { throw 'Game build failed.' }
+            if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
+        }
+        if (!(Test-Path -LiteralPath (Join-Path $gameRoot 'Cortex Command.exe')) -or !(Test-Path -LiteralPath (Join-Path $gameRoot 'Data'))) { throw 'GameDirectory must contain the built game and Data folder.' }
+        New-Item -ItemType Directory -Path (Join-Path $gameRoot 'build-mp') -Force | Out-Null
         $previousSettings = $env:CCCP_SETTINGSPATH
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
@@ -28,13 +34,13 @@ try {
         $roomService = $null
         try {
             if ($Relay) {
-                $env:CCCP_MP_SERVICE = '127.0.0.1:38997'
-                $codeFile = Join-Path $taskRoot 'build-mp/room-code.txt'
+                $env:CCCP_MP_SERVICE = if ($ServiceAddress) { $ServiceAddress } else { '127.0.0.1:38997' }
+                $codeFile = Join-Path $gameRoot 'build-mp/room-code.txt'
                 if (Test-Path -LiteralPath $codeFile) { Remove-Item -LiteralPath $codeFile }
-                $roomService = Start-Process -FilePath (Join-Path $taskRoot 'build-mp/cc-room-service.exe') -ArgumentList '--bind 127.0.0.1 --port 38997 --max-rooms 8' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput 'build-mp/native-relay-service.log' -RedirectStandardError 'build-mp/native-relay-service-error.log' -PassThru
+                if (!$ServiceAddress) { $roomService = Start-Process -FilePath (Join-Path $taskRoot 'build-mp/cc-room-service.exe') -ArgumentList '--bind 127.0.0.1 --port 38997 --max-rooms 8' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput 'build-mp/native-relay-service.log' -RedirectStandardError 'build-mp/native-relay-service-error.log' -PassThru }
             } else { $env:CCCP_MP_SERVICE = $null }
             foreach ($role in $roles) {
-                $settings = Join-Path $taskRoot "build-mp/$role-settings.ini"
+                $settings = Join-Path $gameRoot "build-mp/$role-settings.ini"
                 @"
 SettingsMan
     ResolutionX = 960
@@ -55,13 +61,13 @@ SettingsMan
                     $roomCode = (Get-Content -LiteralPath $codeFile -Raw).Trim()
                 }
                 $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
-                $instances += Start-Process -FilePath (Join-Path $taskRoot 'Cortex Command.exe') -ArgumentList $argument -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru
+                $instances += Start-Process -FilePath (Join-Path $gameRoot 'Cortex Command.exe') -ArgumentList $argument -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
             }
             $deadline = [DateTime]::UtcNow.AddSeconds(150)
             while (@($instances | Where-Object { !$_.HasExited }).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Seconds 1 }
             foreach ($instance in $instances) { if (!$instance.HasExited) { throw 'Native multiplayer verification timed out.' }; if ($instance.ExitCode) { throw "Game instance exited with $($instance.ExitCode)." } }
             foreach ($role in $roles) {
-                $log = Get-Content -LiteralPath "build-mp/$role-smoke.log"
+                $log = Get-Content -LiteralPath (Join-Path $gameRoot "build-mp/$role-smoke.log")
                 $log
                 if (!($log -match '^PASS:') -or ($log -match '^FAIL:')) { throw "$role native verification failed." }
             }
