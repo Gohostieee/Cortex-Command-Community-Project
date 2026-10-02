@@ -57,11 +57,14 @@ On Windows with Visual Studio 2022 C++ tools and the repository dependencies ins
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -ServiceAddress 54.164.52.173:8001
+.\Tests\RunMultiplayerCursorTests.ps1
 ```
 
 The standalone suite checks serialization bounds, every mapped action, movement and button recovery, duplicate/reordered/wrapped inputs, control expiry, frame repair and heavier-loss recovery, 20,000 malformed packet bodies, real UDP frame delivery, passwords, LAN discovery replies, four-player transport capacity, rejection of a fifth player, disconnects, and repeated shutdown/startup. Meson also registers `multiplayer-tests` for builds on other platforms.
 
 The native smoke test builds the complete Windows x64 game and runs a real host and one to three guests with isolated settings. It exercises two different activities and both stream sizes, returns to the lobby, reconnects every original guest slot, checks each remote actor's movement and firing, verifies GUI navigation and text routing, chat, and looping-sound replay/stop, and captures the actual OpenGL output. Logs and screenshots are written to ignored `build-mp/` files. Smoke flags are opt-in test hooks and are not used by normal rooms.
+
+The cursor check renders twelve menu, lobby, connection, session, and gameplay states through the actual game renderer. It asserts that foreground cursor geometry exists when menus are visible and disappears during gameplay and after closing the menu, and captures each OpenGL view. This check reproduced the original missing pointer (`software=0 rendered=0`) and passed after enabling the menu's software cursor. Opening the multiplayer menu also releases captured mouse input. The opt-in `CCCP_MPSMOKE_CURSOR=1` fixture does not start or join network rooms; it is separate from the live multiplayer smoke test.
 
 The local two-instance direct combat run received approximately 25–30 FPS at 640 × 360. The four-instance direct run measured approximately 15–23 FPS at 960 × 540. The four-instance local relay run passed for every guest at about 20 FPS at its second-match verification checkpoints. Windows clients also passed the relay suite against the native Linux service.
 

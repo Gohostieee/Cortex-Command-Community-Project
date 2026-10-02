@@ -97,6 +97,7 @@ struct MultiplayerMan::Impl {
 		if (const char* configured = std::getenv("CCCP_MP_SERVICE")) endpoint = configured;
 		std::string host; uint16_t port;
 		if (Address(endpoint, host, port, 8001)) std::snprintf(ServiceAddress, sizeof(ServiceAddress), "%s", endpoint.c_str());
+		if (const char* verify = std::getenv("CCCP_MPSMOKE_CURSOR"); verify && std::string(verify) == "1") { CursorVerification = UI = true; std::ofstream("build-mp/cursor-smoke.log") << "START\n"; }
 	}
 	void SaveService() { if (!Smoke && !std::getenv("CCCP_MP_SERVICE")) { std::ofstream file(System::GetUserdataDirectory() + "MultiplayerService.txt"); file << ServiceAddress << '\n'; } }
 	int Port = 8000, Quality = 0, BandwidthMbps = 24, Difficulty = 50, Gold = 5000;
@@ -115,6 +116,18 @@ struct MultiplayerMan::Impl {
 	uint64_t BytesReceived = 0;
 	float FPS = 0;
 	bool Smoke = false, SmokeCapture = false;
+	bool CursorVerification = false;
+	size_t CursorStage = 0;
+	int CursorFrames = 0;
+	struct CursorCase { const char* Name; Mode State; bool UI, Playing, Visible; };
+	static constexpr std::array<CursorCase, 12> CursorCases{{
+		{"menu", Mode::Idle, true, false, true}, {"main-menu", Mode::Idle, false, false, false},
+		{"host-lobby", Mode::Host, true, false, true}, {"host-gameplay", Mode::Host, false, true, false},
+		{"host-session", Mode::Host, true, true, true}, {"host-resume", Mode::Host, false, true, false},
+		{"guest-lobby", Mode::Client, true, false, true}, {"guest-gameplay", Mode::Client, false, true, false},
+		{"guest-session", Mode::Client, true, true, true}, {"connecting", Mode::Connecting, false, false, true},
+		{"reconnecting", Mode::Reconnecting, false, false, true}, {"closed-menu", Mode::Idle, false, false, false}
+	}};
 	bool SmokeReconnected = false, SmokeCapturedHost = false;
 	int SmokeStage = 0;
 	int SmokeRejoins = 0;
@@ -255,7 +268,7 @@ struct MultiplayerMan::Impl {
 
 MultiplayerMan::MultiplayerMan(): m_Impl(std::make_unique<Impl>()) {}
 MultiplayerMan::~MultiplayerMan() = default;
-void MultiplayerMan::Open() { m_Impl->UI = true; }
+void MultiplayerMan::Open() { m_Impl->UI = true; g_UInputMan.TrapMousePos(false); }
 void MultiplayerMan::Update() { m_Impl->Tick(); }
 void MultiplayerMan::DrawUI() { m_Impl->Draw(); }
 void MultiplayerMan::Stop() { m_Impl->Stop(); }
@@ -280,13 +293,24 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	return started;
 }
 void MultiplayerMan::CaptureVerificationFrame() {
-	auto& impl = *m_Impl; if (!impl.SmokeCapture) return; if (++impl.SmokeCaptureDelay < 3) return; impl.SmokeCapture = false; impl.SmokeCaptureDelay = 0;
+	auto& impl = *m_Impl;
+	if (impl.CursorVerification) {
+		if (++impl.CursorFrames < 3) return;
+		const auto& test = Impl::CursorCases[impl.CursorStage];
+		const bool drawn = ImGui::GetForegroundDrawList()->VtxBuffer.Size > 0;
+		std::ofstream log("build-mp/cursor-smoke.log", std::ios::app);
+		log << test.Name << ": expected=" << test.Visible << " software=" << ImGui::GetIO().MouseDrawCursor << " rendered=" << drawn << '\n';
+		impl.SmokeCapture = true; impl.SmokeCaptureDelay = 2;
+		if (drawn != test.Visible || ImGui::GetIO().MouseDrawCursor != test.Visible) { log << "FAIL: cursor visibility in " << test.Name << '\n'; System::SetQuit(); }
+	}
+	if (!impl.SmokeCapture) return; if (++impl.SmokeCaptureDelay < 3) return; impl.SmokeCapture = false; impl.SmokeCaptureDelay = 0;
 	int viewport[4]; glGetIntegerv(GL_VIEWPORT, viewport); int alignment; glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	std::vector<uint8_t> pixels(size_t(viewport[2]) * viewport[3] * 3); glReadPixels(viewport[0], viewport[1], viewport[2], viewport[3], GL_RGB, GL_UNSIGNED_BYTE, pixels.data()); glPixelStorei(GL_PACK_ALIGNMENT, alignment);
 	const size_t pitch = size_t(viewport[2]) * 3; for (int row = 0; row < viewport[3] / 2; ++row) std::swap_ranges(pixels.begin() + row * pitch, pixels.begin() + (row + 1) * pitch, pixels.begin() + (viewport[3] - row - 1) * pitch);
 	SDL_Surface* surface = SDL_CreateSurfaceFrom(viewport[2], viewport[3], SDL_PIXELFORMAT_RGB24, pixels.data(), static_cast<int>(pitch));
-	const auto path = std::string("build-mp/") + impl.SmokeRole + "-stage" + std::to_string(impl.SmokeStage) + ".png";
+	const auto path = impl.CursorVerification ? std::string("build-mp/cursor-") + Impl::CursorCases[impl.CursorStage].Name + ".png" : std::string("build-mp/") + impl.SmokeRole + "-stage" + std::to_string(impl.SmokeStage) + ".png";
 	if (surface) { impl.Verify(IMG_SavePNG(surface, path.c_str()) ? "SCREENSHOT: " + path : "FAIL: screenshot"); SDL_DestroySurface(surface); }
+	if (impl.CursorVerification && !System::IsSetToQuit()) { impl.CursorFrames = 0; if (++impl.CursorStage == Impl::CursorCases.size()) { std::ofstream("build-mp/cursor-smoke.log", std::ios::app) << "PASS: rendered cursor in menu, lobbies, session and connection screens; hidden during gameplay and after closing\n"; impl.CursorVerification = false; impl.State = Impl::Mode::Idle; impl.UI = impl.Playing = false; System::SetQuit(); } }
 }
 bool MultiplayerMan::IsUIOpen() const { return m_Impl->UI || m_Impl->State == Impl::Mode::Client || m_Impl->State == Impl::Mode::Connecting || m_Impl->State == Impl::Mode::Reconnecting; }
 bool MultiplayerMan::IsHostingMatch() const { return m_Impl->State == Impl::Mode::Host && m_Impl->Playing; }
@@ -606,6 +630,14 @@ void MultiplayerMan::Impl::HandleAudio(MP::Reader& reader) {
 }
 
 void MultiplayerMan::Impl::Draw() {
+	if (CursorVerification) {
+		const auto& test = CursorCases[CursorStage]; State = test.State; UI = test.UI; Playing = test.Playing;
+		if (Activities.empty()) LoadActivities();
+		RoomName = "Cursor verification"; Players[0].Name = "Host"; Players[0].Token = 1; Players[0].Connected = Players[0].Ready = true;
+		const auto* viewport = ImGui::GetMainViewport(); ImGui::GetIO().MousePos = ImVec2(viewport->Pos.x + viewport->Size.x / 2 - 280, viewport->Pos.y + viewport->Size.y / 2);
+	}
+	// The engine hides SDL's cursor and draws its legacy pointer behind these panels.
+	ImGui::GetIO().MouseDrawCursor = UI || State == Mode::Connecting || State == Mode::Reconnecting;
 	if (State == Mode::Client && Playing && !Texture) { const auto* viewport = ImGui::GetMainViewport(); ImGui::GetBackgroundDrawList()->AddRectFilled(viewport->Pos, ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y), IM_COL32(0, 0, 0, 255)); ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x / 2, viewport->Pos.y + viewport->Size.y / 2), ImGuiCond_Always, ImVec2(0.5f, 0.5f)); ImGui::Begin("Loading##mp", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs); ImGui::Text("The host is loading the scene..."); ImGui::Text("Esc: session menu"); ImGui::End(); }
 	if (State == Mode::Client && Playing && Texture) {
 		const auto* viewport = ImGui::GetMainViewport(); const float scale = std::min(viewport->Size.x / TextureWidth, viewport->Size.y / TextureHeight);
