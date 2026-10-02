@@ -9,7 +9,7 @@
 namespace RTE::MP {
 enum class Delivery { Control, Input, Frame, Audio };
 struct TransportEvent {
-	enum class Type { Connected, Disconnected, Failed, Data, Discovered };
+	enum class Type { Connected, Disconnected, Failed, Data, Discovered, RoomCode, ServiceStatus };
 	Type Kind{};
 	std::string Address, Error;
 	std::vector<uint8_t> Data;
@@ -24,6 +24,11 @@ public:
 	Transport& operator=(const Transport&) = delete;
 	bool Start(bool host, uint16_t port, const std::string& password, std::string& error);
 	bool Connect(const std::string& host, uint16_t port, const std::string& password, std::string& error);
+	bool ConnectRelay(bool hostRoom, const std::string& service, uint16_t port, const std::string& code, const std::string& password, std::string& error);
+	bool ReconnectRelay(std::string& error);
+	bool IsRelayReady() const;
+	int RelaySlot() const;
+	std::string RoomCode() const;
 	void Stop();
 	std::vector<TransportEvent> Poll(size_t budget = 2048);
 	bool Send(const std::string& address, std::span<const uint8_t> data, Delivery delivery);

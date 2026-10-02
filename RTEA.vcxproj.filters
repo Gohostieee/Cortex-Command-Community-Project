@@ -1295,6 +1295,9 @@
     <ClInclude Include="Source\System\MultiplayerProtocol.h">
       <Filter>System</Filter>
     </ClInclude>
+    <ClInclude Include="Source\System\MultiplayerRelay.h">
+      <Filter>System</Filter>
+    </ClInclude>
     <ClInclude Include="Source\System\MultiplayerInput.h">
       <Filter>System</Filter>
     </ClInclude>

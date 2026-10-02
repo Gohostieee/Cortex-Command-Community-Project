@@ -2,6 +2,7 @@
 
 #include "MultiplayerTransport.h"
 #include "MultiplayerInput.h"
+#include "MultiplayerRelay.h"
 #include "ActivityMan.h"
 #include "AudioMan.h"
 #include "CameraMan.h"
@@ -39,8 +40,8 @@ using namespace RTE::MP;
 namespace {
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 uint64_t Token() { static std::mt19937_64 random(std::random_device{}()); uint64_t value; do value = random(); while (!value); return value; }
-bool Address(const std::string& text, std::string& host, uint16_t& port) {
-	const auto colon = text.find(':'); host = text.substr(0, colon); port = 8000;
+bool Address(const std::string& text, std::string& host, uint16_t& port, uint16_t defaultPort = 8000) {
+	const auto colon = text.find(':'); host = text.substr(0, colon); port = defaultPort;
 	if (host.empty() || host.size() > 253 || host.find_first_of(" \t\r\n/") != std::string::npos) return false;
 	if (colon != std::string::npos) { unsigned number = 0; const auto* start = text.data() + colon + 1; const auto parsed = std::from_chars(start, text.data() + text.size(), number); if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() || number == 0 || number > 65535) return false; port = static_cast<uint16_t>(number); }
 	return true;
@@ -83,6 +84,17 @@ struct MultiplayerMan::Impl {
 	char ChatText[193] = "";
 	uint64_t LastChatSent = 0;
 	char Name[32] = "Player", Room[64] = "Cortex room", HostAddress[256] = "127.0.0.1:8000", Password[64] = "";
+	char ServiceAddress[256] = "", JoinCode[32] = "";
+	bool Online = true;
+	Impl() {
+		std::string endpoint;
+		std::ifstream personal(System::GetUserdataDirectory() + "MultiplayerService.txt"); std::getline(personal, endpoint);
+		if (endpoint.empty()) { std::ifstream bundled("MultiplayerService.txt"); std::getline(bundled, endpoint); }
+		if (const char* configured = std::getenv("CCCP_MP_SERVICE")) endpoint = configured;
+		std::string host; uint16_t port;
+		if (Address(endpoint, host, port, 8001)) std::snprintf(ServiceAddress, sizeof(ServiceAddress), "%s", endpoint.c_str());
+	}
+	void SaveService() { if (!Smoke && !std::getenv("CCCP_MP_SERVICE")) { std::ofstream file(System::GetUserdataDirectory() + "MultiplayerService.txt"); file << ServiceAddress << '\n'; } }
 	int Port = 8000, Quality = 0, BandwidthMbps = 24, Difficulty = 50, Gold = 5000;
 	int ActivityIndex = 0, SceneIndex = 0;
 	bool Fog = false, Deploy = false, ClearOrbit = false;
@@ -106,6 +118,7 @@ struct MultiplayerMan::Impl {
 	std::string SmokeRole;
 	int SmokeCaptureDelay = 0;
 	uint64_t SmokeStarted = 0, SmokeStageTime = 0, Presented = 0, AudioReceived = 0;
+	uint64_t SmokeSecondStart = 0;
 	uint64_t SmokeLastStats = 0;
 	std::array<float, 4> SmokeActorStartX{};
 	std::array<bool, 4> SmokeActorSeen{}, SmokeActorMoved{}, SmokeFireSeen{};
@@ -152,18 +165,25 @@ struct MultiplayerMan::Impl {
 		Net.Send(Players[slot].Address, writer.Data, Delivery::Control); Lobby();
 	}
 	bool Host() {
-		if (Port < 1 || Port > 65535) { Error = "Choose a UDP port from 1 to 65535."; return false; }
-		Stop(); if (!Net.Start(true, static_cast<uint16_t>(Port), Password, Error)) return false;
+		std::string service; uint16_t servicePort = 8001;
+		if (Online && !Address(ServiceAddress, service, servicePort, 8001)) { Error = "Set the room service address under Connection settings."; return false; }
+		if (!Online && (Port < 1 || Port > 65535)) { Error = "Choose a UDP port from 1 to 65535."; return false; }
+		Stop(); if (!Net.Start(!Online, static_cast<uint16_t>(Port), Online ? "" : Password, Error)) return false;
+		if (Online && !Net.ConnectRelay(true, service, servicePort, "", Password, Error)) { Net.Stop(); return false; }
+		if (Online) SaveService();
 		State = Mode::Host; Session = Token(); RoomName = Room[0] ? Room : "Cortex room";
 		Players[0].Name = Name[0] ? Name : "Host"; Players[0].Token = Token(); Players[0].Connected = Players[0].Ready = true;
 		Error.clear(); UI = true; LoadActivities(); Lobby(); return true;
 	}
 	bool Join(bool retry = false) {
 		std::string host; uint16_t port;
-		if (!Address(HostAddress, host, port)) { Error = "Enter a hostname or IPv4 address, optionally followed by :port."; return false; }
+		if (Online) { if (!Address(ServiceAddress, host, port, 8001)) { Error = "Set the room service address under Connection settings."; return false; } if (Relay::NormalizeCode(JoinCode).empty()) { Error = "Enter the ten-character room code from your host."; return false; } }
+		else if (!Address(HostAddress, host, port)) { Error = "Enter a hostname or IPv4 address, optionally followed by :port."; return false; }
 		if (!retry) { Stop(); ConnectStarted = Now(); }
-		else Net.Stop();
-		if (!Net.Start(false, 0, "", Error) || !Net.Connect(host, port, Password, Error)) return false;
+		else if (!Online) Net.Stop();
+		if (Online && retry) { if (!Net.ReconnectRelay(Error)) return false; }
+		else { if (!Net.Start(false, 0, "", Error) || !(Online ? Net.ConnectRelay(false, host, port, JoinCode, Password, Error) : Net.Connect(host, port, Password, Error))) return false; }
+		if (Online) SaveService();
 		State = retry ? Mode::Reconnecting : Mode::Connecting; NextRetry = Now() + 3000; UI = true; return true;
 	}
 	void Hello(const std::string& address) {
@@ -194,6 +214,7 @@ struct MultiplayerMan::Impl {
 		if (State == Mode::Host) { MP::Writer writer(Kind::Chat, Session, Epoch); writer.U8(static_cast<uint8_t>(player)); writer.Text(message, 192); for (int i = 1; i < 4; ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control); }
 	}
 	bool StartGame() {
+		if (Online && !Net.IsRelayReady()) { Error = "Wait for the room service to connect before starting."; return false; }
 		if (Activities.empty() || Scenes.empty()) { Error = "Select an activity with a compatible scene."; return false; }
 		for (const auto& player: Players) if (player.Token && !player.Connected) { Error = "Wait for disconnected players to rejoin or release their slots before starting a new match."; return false; }
 		int count = 0; for (const auto& player: Players) { if (player.Connected) { if (!player.Ready) { Error = "Every connected player must be ready."; return false; } ++count; } }
@@ -235,7 +256,9 @@ void MultiplayerMan::Update() { m_Impl->Tick(); }
 void MultiplayerMan::DrawUI() { m_Impl->Draw(); }
 void MultiplayerMan::Stop() { m_Impl->Stop(); }
 bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smokeTest) {
-	auto& impl = *m_Impl; impl.UI = true;
+	auto& impl = *m_Impl; impl.UI = true; impl.Smoke = smokeTest;
+	impl.Online = std::getenv("CCCP_MP_SERVICE") != nullptr;
+	if (!host && impl.Online) std::snprintf(impl.JoinCode, sizeof(impl.JoinCode), "%s", address.c_str());
 	if (smokeTest) {
 		impl.SmokeRole = host ? "host" : "client";
 		if (const char* role = std::getenv("CCCP_MPSMOKE_ROLE"); role && (std::string(role) == "host" || std::string(role) == "client" || std::string(role) == "client2" || std::string(role) == "client3")) impl.SmokeRole = role;
@@ -441,6 +464,8 @@ void MultiplayerMan::Impl::Tick() {
 	std::erase_if(Sounds, [](const auto& entry) { return !entry.second->IsBeingPlayed(); });
 	for (const auto& event: Net.Poll()) {
 		if (event.Kind == TransportEvent::Type::Data) Receive(event);
+		else if (event.Kind == TransportEvent::Type::RoomCode) { Error.clear(); Verify("ROOM CODE: " + Relay::DisplayCode(event.Address)); if (Smoke && State == Mode::Host) { std::ofstream file("build-mp/room-code.txt"); file << event.Address; } }
+		else if (event.Kind == TransportEvent::Type::ServiceStatus) Error = event.Error;
 		else if (event.Kind == TransportEvent::Type::Connected) { if (State == Mode::Host) Pending[event.Address] = now; else if (State == Mode::Connecting || State == Mode::Reconnecting) Hello(event.Address); }
 		else if (event.Kind == TransportEvent::Type::Discovered) { MP::Reader reader(event.Data); Header header; std::string room; uint8_t count, playing; if (ReadHeader(reader, header) && header.Type == Kind::Announcement && reader.Text(room, 63) && reader.U8(count) && count <= 4 && reader.U8(playing) && playing <= 1 && reader.Done()) Discovered[event.Address] = room + " (" + std::to_string(count) + "/4" + (playing ? ", in game)" : ", lobby)"); }
 		else if (event.Kind == TransportEvent::Type::Failed) { Error = event.Error; if (State != Mode::Reconnecting) { Stop(); UI = true; } }
@@ -457,7 +482,7 @@ void MultiplayerMan::Impl::Tick() {
 		for (auto it = Pending.begin(); it != Pending.end();) { if (now - it->second > 5000) { Net.Close(it->first); it = Pending.erase(it); } else ++it; }
 		for (int i = 1; i < 4; ++i) {
 			auto& player = Players[i];
-			if (!Playing && player.Token && !player.Connected && now >= player.ReservedUntil) { if (player.Encoding.valid()) player.Encoding.wait(); player = Player(); Lobby(); }
+			if (!Playing && player.Token && !player.Connected && now >= player.ReservedUntil) { Net.Close(player.Address); if (player.Encoding.valid()) player.Encoding.wait(); player = Player(); Lobby(); }
 			if (player.Encoding.valid() && player.Encoding.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) { auto encoded = player.Encoding.get(); if (Playing && player.Connected) QueueFrame(player, std::move(encoded)); }
 			if (!player.Outgoing.empty() && now - player.LastFrame > FrameTimeoutMS) { player.Outgoing.clear(); player.NextPacket = 0; }
 			player.Budget = std::min(262144.0, player.Budget + elapsed * BandwidthMbps * 125000.0);
@@ -491,8 +516,8 @@ void MultiplayerMan::Impl::SmokeTick() {
 		if (!Playing && !Players[LocalSlot].Ready) SendReady(true, Players[LocalSlot].Team);
 		if (Playing && Presented >= 20 && SmokeStage == 0) { SmokeStage = 1; SmokeCapture = true; Verify("FRAMES: " + std::to_string(Presented) + " FPS: " + std::to_string(FPS)); }
 		if (!Playing && SmokeStage == 1) { SmokeStage = 2; SmokeCapture = true; Verify("LOBBY: returned from match"); }
-		if (Playing && SmokeStage == 2) { SmokeStage = 3; SmokeStageTime = now; }
-		if (SmokeStage == 3 && now - SmokeStageTime > 6000) { SmokeStage = 4; SmokeCapture = true; const bool chat = std::any_of(Chat.begin(), Chat.end(), [](const auto& line) { return line.find("Guest room chat test") != std::string::npos; }); Verify(std::string(SmokeLoopPlays >= 2 && SmokeLoopStopped && chat ? "PASS: " : "FAIL: audio replay, stop or chat missing. ") + "second match. frames=" + std::to_string(Presented) + " FPS=" + std::to_string(FPS) + " sounds=" + std::to_string(AudioReceived)); }
+		if (Playing && SmokeStage == 2) { SmokeStage = 3; SmokeStageTime = now; SmokeSecondStart = Presented; }
+		if (SmokeStage == 3 && now - SmokeStageTime > 6000 && Presented >= SmokeSecondStart + 20 && Texture) { SmokeStage = 4; SmokeCapture = true; const bool chat = std::any_of(Chat.begin(), Chat.end(), [](const auto& line) { return line.find("Guest room chat test") != std::string::npos; }); Verify(std::string(SmokeLoopPlays >= 2 && SmokeLoopStopped && chat ? "PASS: " : "FAIL: audio replay, stop or chat missing. ") + "second match. new frames=" + std::to_string(Presented - SmokeSecondStart) + " FPS=" + std::to_string(FPS) + " sounds=" + std::to_string(AudioReceived)); }
 	} else if (SmokeStage == 4 && State == Mode::Idle) System::SetQuit(true);
 }
 
@@ -601,30 +626,34 @@ void MultiplayerMan::Impl::Draw() {
 	if (!Error.empty()) { ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.68f, 0.32f, 1)); ImGui::TextWrapped("%s", Error.c_str()); ImGui::PopStyleColor(); ImGui::Separator(); }
 	if (State == Mode::Idle) {
 		ImGui::InputText("Player name", Name, sizeof(Name));
+		ImGui::Checkbox("Join with room codes", &Online);
+		if (Online && ImGui::TreeNode("Connection settings")) { ImGui::InputText("Room service", ServiceAddress, sizeof(ServiceAddress)); ImGui::TextWrapped("Use the same service address as your friends. The game remembers it for future sessions."); ImGui::TreePop(); }
+		if (Online && !ServiceAddress[0]) ImGui::TextWrapped("Configure your room service address in Connection settings.");
 		if (ImGui::BeginTabBar("mp-tabs")) {
 			if (ImGui::BeginTabItem("Join")) {
-				ImGui::InputText("Host address", HostAddress, sizeof(HostAddress)); ImGui::InputText("Room password", Password, sizeof(Password), ImGuiInputTextFlags_Password);
+				if (Online) ImGui::InputText("Room code", JoinCode, sizeof(JoinCode)); else ImGui::InputText("Host address", HostAddress, sizeof(HostAddress)); ImGui::InputText("Room password", Password, sizeof(Password), ImGuiInputTextFlags_Password);
 				if (ImGui::Button("Join room", ImVec2(140, 0))) Join();
-				ImGui::SameLine(); if (ImGui::Button("Find LAN rooms")) { Discovered.clear(); if (Net.Start(false, 0, "", Error)) Net.Discover(8000); }
+				if (!Online) { ImGui::SameLine(); if (ImGui::Button("Find LAN rooms")) { Discovered.clear(); if (Net.Start(false, 0, "", Error)) Net.Discover(8000); } }
 				for (const auto& [address, room]: Discovered) if (ImGui::Selectable((room + "##" + address).c_str())) { std::snprintf(HostAddress, sizeof(HostAddress), "%s", address.c_str()); }
-				ImGui::TextWrapped("Join with the host's address. LAN discovery searches UDP port 8000."); ImGui::EndTabItem();
+				ImGui::TextWrapped("%s", Online ? "Ask your host for their room code. No router setup is needed." : "Join with the host's address. LAN discovery searches UDP port 8000."); ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("Host")) {
-				ImGui::InputText("Room name", Room, sizeof(Room)); ImGui::InputInt("UDP port", &Port); ImGui::InputText("Room password", Password, sizeof(Password), ImGuiInputTextFlags_Password);
+				ImGui::InputText("Room name", Room, sizeof(Room)); if (!Online) ImGui::InputInt("UDP port", &Port); ImGui::InputText("Room password", Password, sizeof(Password), ImGuiInputTextFlags_Password);
 				ImGui::Combo("Stream quality", &Quality, "640 x 360 (recommended)\0 960 x 540\0");
 				ImGui::SliderInt("Upload per guest (Mbps)", &BandwidthMbps, 6, 48);
 				if (ImGui::Button("Create room", ImVec2(140, 0))) Host();
-				ImGui::TextWrapped("You play as the host. Internet guests need your public address and this UDP port forwarded to your computer."); ImGui::EndTabItem();
+				ImGui::TextWrapped("%s", Online ? "Create a room and share its code. You run the match; the room service connects your friends." : "You play as the host. Internet guests need your public address and this UDP port forwarded to your computer."); ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
 		}
 		if (ImGui::Button("Back to main menu")) { Net.Stop(); UI = false; }
 	} else if (State == Mode::Connecting || State == Mode::Reconnecting) {
 		ImGui::Text("%s", State == Mode::Connecting ? "Connecting to the host..." : "Reconnecting...");
-		ImGui::TextWrapped("%s", HostAddress); if (ImGui::Button("Cancel")) { Stop(); UI = true; }
+		ImGui::TextWrapped("%s", Online ? Relay::DisplayCode(Relay::NormalizeCode(JoinCode)).c_str() : HostAddress); if (ImGui::Button("Cancel")) { Stop(); UI = true; }
 	} else {
 		ImGui::Text("%s", RoomName.c_str());
-		if (State == Mode::Host) { ImGui::Text("Hosting on UDP port %d", Port); for (const auto& address: Net.LocalAddresses(static_cast<uint16_t>(Port))) { ImGui::Text("LAN address: %s", address.c_str()); ImGui::SameLine(); if (ImGui::SmallButton(("Copy##" + address).c_str())) ImGui::SetClipboardText(address.c_str()); } }
+		if (Online) { const auto code = Relay::DisplayCode(Net.RoomCode()); ImGui::Text("Room code: %s", code.empty() ? "Connecting..." : code.c_str()); if (!code.empty()) { ImGui::SameLine(); if (ImGui::SmallButton("Copy code")) ImGui::SetClipboardText(code.c_str()); } ImGui::Text("%s", Net.IsRelayReady() ? "Connected through room service" : "Waiting for room service..."); }
+		else if (State == Mode::Host) { ImGui::Text("Hosting on UDP port %d", Port); for (const auto& address: Net.LocalAddresses(static_cast<uint16_t>(Port))) { ImGui::Text("LAN address: %s", address.c_str()); ImGui::SameLine(); if (ImGui::SmallButton(("Copy##" + address).c_str())) ImGui::SetClipboardText(address.c_str()); } }
 		else ImGui::Text("Connected to %s | %d ms", ServerAddress.c_str(), Net.Ping(ServerAddress));
 		ImGui::Separator();
 		if (ImGui::BeginTable("Players", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
@@ -633,7 +662,7 @@ void MultiplayerMan::Impl::Draw() {
 				if (player.Token && !Playing && (State == Mode::Host || i == LocalSlot)) { ImGui::SetNextItemWidth(100); if (ImGui::BeginCombo("##team", ("Team " + std::to_string(player.Team + 1)).c_str())) { for (uint8_t team = 0; team < 4; ++team) if ((AvailableTeams & (1 << team)) && ImGui::Selectable(("Team " + std::to_string(team + 1)).c_str(), player.Team == team)) { if (State == Mode::Host) { Players[i].Team = team; Players[i].Ready = i == 0; Lobby(); } else SendReady(false, team); } ImGui::EndCombo(); } }
 				else if (player.Token) ImGui::Text("Team %d", player.Team + 1);
 				ImGui::TableNextColumn(); ImGui::Text("%s", !player.Token ? "Available" : !player.Connected ? "Reconnecting" : Playing ? "Playing" : player.Ready ? "Ready" : "Not ready");
-				if (State == Mode::Host && !Playing && player.Token && !player.Connected) { ImGui::SameLine(); if (ImGui::SmallButton("Release slot")) { if (Players[i].Encoding.valid()) Players[i].Encoding.wait(); Players[i] = Player(); Lobby(); } }
+				if (State == Mode::Host && !Playing && player.Token && !player.Connected) { ImGui::SameLine(); if (ImGui::SmallButton("Release slot")) { Net.Close(Players[i].Address); if (Players[i].Encoding.valid()) Players[i].Encoding.wait(); Players[i] = Player(); Lobby(); } }
 				ImGui::PopID();
 			}
 			ImGui::EndTable();

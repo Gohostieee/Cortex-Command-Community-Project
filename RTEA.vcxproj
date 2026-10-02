@@ -839,6 +839,7 @@
     <ClInclude Include="Source\Managers\ActivityMan.h" />
     <ClInclude Include="Source\Managers\MultiplayerMan.h" />
     <ClInclude Include="Source\System\MultiplayerProtocol.h" />
+    <ClInclude Include="Source\System\MultiplayerRelay.h" />
     <ClInclude Include="Source\System\MultiplayerInput.h" />
     <ClInclude Include="Source\System\MultiplayerTransport.h" />
     <ClInclude Include="Source\Managers\AudioMan.h" />

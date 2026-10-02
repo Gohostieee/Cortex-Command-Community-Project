@@ -1,4 +1,4 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1)
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $taskRoot
@@ -12,18 +12,27 @@ try {
     & ./build-mp/MultiplayerTests.exe
     if ($LASTEXITCODE) { throw 'Multiplayer protocol/transport tests failed.' }
     if ($Smoke) {
+        if ($Relay) { & ./Services/RoomService/Build.ps1 -Test }
         & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
         if ($LASTEXITCODE) { throw 'Game build failed.' }
         if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
         $previousSettings = $env:CCCP_SETTINGSPATH
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
+        $previousService = $env:CCCP_MP_SERVICE
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
         $roles = @('host', 'client')
         if ($Guests -ge 2) { $roles += 'client2' }
         if ($Guests -ge 3) { $roles += 'client3' }
         $instances = @()
+        $roomService = $null
         try {
+            if ($Relay) {
+                $env:CCCP_MP_SERVICE = '127.0.0.1:38997'
+                $codeFile = Join-Path $taskRoot 'build-mp/room-code.txt'
+                if (Test-Path -LiteralPath $codeFile) { Remove-Item -LiteralPath $codeFile }
+                $roomService = Start-Process -FilePath (Join-Path $taskRoot 'build-mp/cc-room-service.exe') -ArgumentList '--bind 127.0.0.1 --port 38997 --max-rooms 8' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput 'build-mp/native-relay-service.log' -RedirectStandardError 'build-mp/native-relay-service-error.log' -PassThru
+            } else { $env:CCCP_MP_SERVICE = $null }
             foreach ($role in $roles) {
                 $settings = Join-Path $taskRoot "build-mp/$role-settings.ini"
                 @"
@@ -39,7 +48,13 @@ SettingsMan
 "@ | Set-Content -LiteralPath $settings
                 $env:CCCP_SETTINGSPATH = $settings
                 $env:CCCP_MPSMOKE_ROLE = $role
-                $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } else { '-mp-smoke-client 127.0.0.1:38998' }
+                if ($Relay -and $role -ne 'host') {
+                    $codeDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                    while (!(Test-Path -LiteralPath $codeFile) -and [DateTime]::UtcNow -lt $codeDeadline) { Start-Sleep -Milliseconds 200 }
+                    if (!(Test-Path -LiteralPath $codeFile)) { throw 'Host did not receive a room code.' }
+                    $roomCode = (Get-Content -LiteralPath $codeFile -Raw).Trim()
+                }
+                $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
                 $instances += Start-Process -FilePath (Join-Path $taskRoot 'Cortex Command.exe') -ArgumentList $argument -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru
             }
             $deadline = [DateTime]::UtcNow.AddSeconds(150)
@@ -52,9 +67,11 @@ SettingsMan
             }
         } finally {
             foreach ($instance in $instances) { if (!$instance.HasExited) { Stop-Process -Id $instance.Id } }
+            if ($roomService -and !$roomService.HasExited) { Stop-Process -Id $roomService.Id }
             $env:CCCP_SETTINGSPATH = $previousSettings
             $env:CCCP_MPSMOKE_ROLE = $previousSmokeRole
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
+            $env:CCCP_MP_SERVICE = $previousService
         }
     }
 } finally { Pop-Location }

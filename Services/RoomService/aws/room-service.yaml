@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cortex Command invitation-code broker and UDP relay on one EC2 instance with a stable address and no inbound administration ports.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    ref: Services/RoomService/README.md
+    must: Rooms are ephemeral. Replacement or restart disconnects matches. Keep the source artifact private and select player access explicitly.
+Parameters:
+  ArtifactBucket:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+    Description: Existing private S3 bucket in this region containing the source archive.
+  ArtifactKey:
+    Type: String
+    AllowedPattern: '[a-zA-Z0-9/_.-]+'
+  ArtifactSha256:
+    Type: String
+    AllowedPattern: '[a-f0-9]{64}'
+  PlayersCIDR:
+    Type: String
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+    Description: Explicit IPv4 range permitted to play. Use your test network range for private testing.
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge]
+  MaxRooms:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 1000
+  MaxMbps:
+    Type: Number
+    Default: 800
+    MinValue: 1
+    MaxValue: 10000
+  ServicePort:
+    Type: Number
+    Default: 8001
+    MinValue: 1024
+    MaxValue: 65535
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Isolate relay infrastructure from existing projects.
+        must: This stack owns the network; do not attach unrelated resources.
+    Properties:
+      CidrBlock: 10.79.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-network'}]
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Public UDP players and package downloads require internet connectivity.
+        must: No NAT gateway or load balancer is required for this single server.
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Attach the stack gateway before enabling public routes.
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref Gateway
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Public subnet supports the stable relay address.
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.79.0.0/25
+      AvailabilityZone: !Select [0, !GetAZs '']
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Dedicated route table avoids modifying existing networking.
+    Properties:
+      VpcId: !Ref VPC
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Relay traffic and initial package installation need a public route.
+    Properties:
+      RouteTableId: !Ref Routes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Gateway
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Only the relay subnet uses this route table.
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref Routes
+  Firewall:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Expose one UDP gameplay port, with administration through SSM.
+        must: No inbound SSH or HTTP; player CIDR is an explicit deployment choice.
+    Properties:
+      GroupDescription: Room relay UDP access and outbound package/SSM HTTPS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: !Ref ServicePort
+          ToPort: !Ref ServicePort
+          CidrIp: !Ref PlayersCIDR
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  Role:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Permit SSM administration and reading this exact release archive.
+        must: No account credentials or unrelated bucket access on the instance.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: release-download
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactKey}'
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Provide temporary role credentials to bootstrap and SSM.
+    Properties:
+      Roles: [!Ref Role]
+  Server:
+    Type: AWS::EC2::Instance
+    DependsOn: [InternetRoute, SubnetRoutes]
+    CreationPolicy:
+      ResourceSignal: {Count: 1, Timeout: PT20M}
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: One Linux relay suffices initially; host computers run game simulation.
+        must: IMDSv2 required; encrypted disk; service unprivileged; readiness includes actual UDP tests.
+        mutability: Replacement interrupts every room. Plan upgrades outside active matches.
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Release
+        Version: !GetAtt Release.LatestVersionNumber
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Profile
+      CreditSpecification: {CPUCredits: standard}
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled, HttpPutResponseHopLimit: 1}
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 16, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref Subnet
+          GroupSet: [!Ref Firewall]
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-relay'}]
+  Release:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: A new release creates a launch-template version and replaces the instance so bootstrap actually reruns.
+        must: Review replacements before upgrades; every active room is interrupted.
+    Properties:
+      VersionDescription: !Ref ArtifactSha256
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            trap 'rc=$?; /opt/aws/bin/cfn-signal -e "$rc" --stack "${AWS::StackName}" --resource Server --region "${AWS::Region}"; exit "$rc"' EXIT
+            dnf install -y gcc-c++ cmake make aws-cfn-bootstrap
+            mkdir -p /opt/cc-room/source
+            aws s3 cp 's3://${ArtifactBucket}/${ArtifactKey}' /opt/cc-room/source.tar.gz --region '${AWS::Region}'
+            echo '${ArtifactSha256}  /opt/cc-room/source.tar.gz' | sha256sum --check -
+            tar -xzf /opt/cc-room/source.tar.gz -C /opt/cc-room/source
+            cmake -S /opt/cc-room/source/Services/RoomService -B /opt/cc-room/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build /opt/cc-room/build -j 2
+            /opt/cc-room/build/cc-room-service --bind 127.0.0.1 --port 38997 --max-rooms 8 > /var/log/cc-room-bootstrap-test.log 2>&1 &
+            test_pid=$!
+            /opt/cc-room/build/relay-tests 38997
+            kill "$test_pid"
+            wait "$test_pid" || true
+            cmake --install /opt/cc-room/build --prefix /usr/local
+            useradd --system --no-create-home --shell /sbin/nologin cc-room
+            cat > /etc/systemd/system/cc-room.service <<'UNIT'
+            [Unit]
+            Description=Cortex Command room broker and relay
+            After=network-online.target
+            Wants=network-online.target
+            [Service]
+            User=cc-room
+            Group=cc-room
+            StateDirectory=cc-room
+            WorkingDirectory=/var/lib/cc-room
+            ExecStart=/usr/local/bin/cc-room-service --port ${ServicePort} --max-rooms ${MaxRooms} --max-mbps ${MaxMbps} --metrics-file /var/lib/cc-room/metrics.json
+            Restart=on-failure
+            RestartSec=3
+            NoNewPrivileges=true
+            ProtectSystem=strict
+            ProtectHome=true
+            PrivateTmp=true
+            ReadWritePaths=/var/lib/cc-room
+            MemoryMax=1G
+            TasksMax=64
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now cc-room
+            sleep 2
+            systemctl is-active --quiet cc-room
+  PublicAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Keep player configuration stable across server restarts or replacement.
+        must: This address is billable; stack deletion releases it.
+    Properties:
+      Domain: vpc
+  AddressAttachment:
+    Type: AWS::EC2::EIPAssociation
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Map the stable endpoint to this server only.
+    Properties:
+      InstanceId: !Ref Server
+      AllocationId: !GetAtt PublicAddress.AllocationId
+Outputs:
+  ServiceAddress:
+    Description: Put this in MultiplayerService.txt in each distributed game build.
+    Value: !Sub '${PublicAddress}:${ServicePort}'
+  InstanceId:
+    Description: Use SSM Session Manager for logs and administration.
+    Value: !Ref Server
