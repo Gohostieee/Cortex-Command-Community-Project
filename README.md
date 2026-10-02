@@ -11,6 +11,10 @@ Stay up to date in our [Discord channel](https://discord.gg/TSU6StNQUG).
 # Installing the Game
 If you just want to play the latest version of the game you can get it from our [website](https://cortex-command-community.github.io/downloads).
 
+## Multiplayer edition
+
+This fork restores up to four-player multiplayer with invitation codes and a bundled AWS relay address. Download the Windows x64 multiplayer package from [this fork's releases](https://github.com/Gohostieee/Cortex-Command-Community-Project/releases/latest), extract it, and open **Cortex Command.exe → Multiplayer**. The host creates a room and shares its code; guests join and ready up. Hosts do not forward router ports. Change the server under **Connection settings → Server IP or hostname → Save server address**. See [the multiplayer guide](Documentation/Multiplayer.md) for controls and match setup, or [the service guide](Services/RoomService/README.md) for operating your own relay.
+
 # Getting Mods
 You can get mods from our [mod portal](https://cccp.mod.io).
 
