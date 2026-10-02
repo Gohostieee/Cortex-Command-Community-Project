@@ -8,6 +8,7 @@
 #include "Vector.h"
 #include "InputScheme.h"
 #include "Gamepad.h"
+#include "MultiplayerProtocol.h"
 #include "allegro/keyboard.h"
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_events.h>
@@ -72,6 +73,10 @@ namespace RTE {
 
 		/// Resets the changed states for keyboard and mouse events.
 		void EndFrame();
+
+		/// Applies one authenticated remote player's controls for the simulation step.
+		void SetRemoteInput(int player, const MP::InputState& input);
+		void ClearRemoteInput(int player);
 #pragma endregion
 
 #pragma region Control Scheme and Input Mapping Handling
@@ -82,7 +87,7 @@ namespace RTE {
 		/// Gets the currently used input device of the specified player.
 		/// @param whichPlayer Which player to get input device for.
 		/// @return A number value representing the currently used input device of this player. See InputDevice enumeration for values.
-		int GetInputDevice(int whichPlayer) const { return m_ControlScheme.at(whichPlayer).GetDevice(); }
+		int GetInputDevice(int whichPlayer) const { return whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active ? m_RemoteInputs[whichPlayer].State.Snapshot.Device : m_ControlScheme.at(whichPlayer).GetDevice(); }
 
 		/// Access a specific player's control scheme.
 		/// @param whichPlayer Which player to get the scheme for.
@@ -505,6 +510,13 @@ namespace RTE {
 		std::string m_TextInput; //!< Buffer for passing text input from SDL event handling to the GUI.
 
 		bool m_OverrideInput; //!< If true then this instance operates in multiplayer mode and the input is overridden by network input.
+		struct RemoteInput {
+			bool Active = false;
+			MP::InputState State{};
+			Vector Position;
+			std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS> Buttons{}, Changes{};
+		};
+		std::array<RemoteInput, 4> m_RemoteInputs{};
 
 		std::array<InputScheme, Players::MaxPlayerCount> m_ControlScheme; //!< Which control scheme is being used by each player.
 		const Icon* m_DeviceIcons[InputDevice::DEVICE_COUNT]; //!< The Icons representing all different devices.

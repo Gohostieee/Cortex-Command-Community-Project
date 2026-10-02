@@ -1,4 +1,5 @@
 #include "GameActivity.h"
+#include "MultiplayerMan.h"
 
 #include "CameraMan.h"
 #include "PresetMan.h"
@@ -755,7 +756,7 @@ int GameActivity::Start() {
 		////////////////////////////////////
 		// GUI split screen setup
 		// If there are split screens, set up the GUIs to draw and their mouses to point correctly
-		if (g_FrameMan.GetScreenCount() > 1) {
+		if (g_FrameMan.GetScreenCount() > 1 && !g_MultiplayerMan.IsHostingMatch()) {
 			// Screen 1 Always upper left corner
 			if (ScreenOfPlayer(player) == 0) {
 				m_pEditorGUI[player]->SetPosOnScreen(0, 0);
@@ -1547,7 +1548,7 @@ void GameActivity::Update() {
 			// Interpolate the LZ altitude to the height of the highest terrain point at the player-chosen X
 			float prevHeight = m_LandingZone[player].m_Y;
 
-			float viewOffset = g_FrameMan.GetPlayerScreenHeight() / 4;
+			float viewOffset = g_FrameMan.GetPlayerFrameBufferHeight(ScreenOfPlayer(player)) / 4;
 			m_LandingZone[player].m_Y = 0.0f;
 			if (g_SceneMan.GetTerrain() && g_SceneMan.GetTerrain()->GetOrbitDirection() == Directions::Down) {
 				m_LandingZone[player].m_Y = g_SceneMan.GetSceneHeight();
@@ -1675,7 +1676,7 @@ void GameActivity::Update() {
 
 		// Start LZ picking mode if a purchase was made
 		if (m_pBuyGUI[player]->PurchaseMade()) {
-			m_LZCursorWidth[player] = std::min(m_pBuyGUI[player]->GetDeliveryWidth(), g_FrameMan.GetPlayerScreenWidth() - 24);
+			m_LZCursorWidth[player] = std::min(m_pBuyGUI[player]->GetDeliveryWidth(), g_FrameMan.GetPlayerFrameBufferWidth(ScreenOfPlayer(player)) - 24);
 			m_pBuyGUI[player]->SetEnabled(false);
 			//            SwitchToPrevActor(player, team, m_Brain[player]);
 			// Start selecting the landing zone

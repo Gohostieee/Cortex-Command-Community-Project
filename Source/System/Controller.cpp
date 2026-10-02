@@ -115,17 +115,17 @@ float Controller::GetDigitalAimSpeed() const {
 }
 
 bool Controller::IsMouseControlled() const {
-	return m_Player != Players::NoPlayer && g_UInputMan.GetControlScheme(m_Player)->GetDevice() == InputDevice::DEVICE_MOUSE_KEYB;
+	return m_Player != Players::NoPlayer && g_UInputMan.GetInputDevice(m_Player) == InputDevice::DEVICE_MOUSE_KEYB;
 }
 
 bool Controller::IsKeyboardOnlyControlled() const {
-	return m_Player != Players::NoPlayer && g_UInputMan.GetControlScheme(m_Player)->GetDevice() == InputDevice::DEVICE_KEYB_ONLY;
+	return m_Player != Players::NoPlayer && g_UInputMan.GetInputDevice(m_Player) == InputDevice::DEVICE_KEYB_ONLY;
 }
 
 bool Controller::IsGamepadControlled() const {
 	bool isGamepadControlled = false;
 	if (m_Player != Players::NoPlayer) {
-		InputDevice inputDevice = g_UInputMan.GetControlScheme(m_Player)->GetDevice();
+		InputDevice inputDevice = static_cast<InputDevice>(g_UInputMan.GetInputDevice(m_Player));
 		if (inputDevice >= InputDevice::DEVICE_GAMEPAD_1 && inputDevice <= InputDevice::DEVICE_GAMEPAD_4) {
 			isGamepadControlled = true;
 		}

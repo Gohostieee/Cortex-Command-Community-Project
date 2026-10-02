@@ -1,4 +1,5 @@
 sources += files(
+'MultiplayerTransport.cpp',
 'Base64/base64.cpp',
 'MicroPather/micropather.cpp',
 'Semver200/Semver200_comparator.cpp',

@@ -152,24 +152,22 @@ void AudioMan::Update() {
 		// TODO: This coefficient should probably move to SettingsMan and be loaded from ini. That way this effect can be lessened or even turned off entirely by users. 0.35 is a good default value though.
 		globalPitch = timeScale + (1.0F - timeScale) * 0.35F;
 
-		SetGlobalPitch(globalPitch);
+		if (!m_StreamListenerActive) SetGlobalPitch(globalPitch);
 
-		if (!g_ActivityMan.ActivityPaused()) {
+		if (m_StreamListenerActive || !g_ActivityMan.ActivityPaused()) {
 			const Activity* currentActivity = g_ActivityMan.GetActivity();
-			uint8_t currentActivityHumanCount = m_IsInMultiplayerMode ? 1 : currentActivity->GetHumanCount();
+			uint8_t currentActivityHumanCount = m_StreamListenerActive || m_IsInMultiplayerMode ? 1 : currentActivity->GetHumanCount();
 
 			if (m_CurrentActivityHumanPlayerPositions.size() != currentActivityHumanCount) {
 				status = status == FMOD_OK ? m_AudioSystem->set3DNumListeners(currentActivityHumanCount) : status;
 			}
 
 			m_CurrentActivityHumanPlayerPositions.clear();
+			if (m_StreamListenerActive) m_CurrentActivityHumanPlayerPositions.push_back(std::make_unique<const Vector>(m_StreamListenerPosition));
 			for (int player = Players::PlayerOne; player < Players::MaxPlayerCount && m_CurrentActivityHumanPlayerPositions.size() < currentActivityHumanCount; player++) {
 				if (currentActivity->PlayerActive(player) && currentActivity->PlayerHuman(player)) {
 					int screen = currentActivity->ScreenOfPlayer(player);
 					Vector humanPlayerPosition = g_CameraMan.GetScrollTarget(screen);
-					if (IsInMultiplayerMode()) {
-						humanPlayerPosition += (Vector(static_cast<float>(g_FrameMan.GetPlayerFrameBufferWidth(screen)), static_cast<float>(g_FrameMan.GetPlayerFrameBufferHeight(screen))) / 2);
-					}
 					m_CurrentActivityHumanPlayerPositions.push_back(std::make_unique<const Vector>(humanPlayerPosition));
 				}
 			}
@@ -206,11 +204,10 @@ void AudioMan::SetGlobalPitch(float pitch, bool includeImmobileSounds, bool incl
 	if (!m_AudioEnabled) {
 		return;
 	}
+	m_GlobalPitch = std::clamp(pitch, 0.125F, 8.0F);
 	if (m_IsInMultiplayerMode) {
 		RegisterSoundEvent(-1, SOUND_SET_GLOBAL_PITCH, nullptr);
 	}
-
-	m_GlobalPitch = std::clamp(pitch, 0.125F, 8.0F);
 
 	m_SFXChannelGroup->setPitch(m_GlobalPitch);
 
@@ -306,7 +303,7 @@ void AudioMan::RegisterSoundEvent(int player, NetworkSoundState state, const Sou
 		std::vector<NetworkSoundData> soundDataVector;
 
 		if (state == SOUND_SET_GLOBAL_PITCH) {
-			NetworkSoundData soundData;
+			NetworkSoundData soundData{};
 			soundData.State = state;
 			soundData.Pitch = m_GlobalPitch;
 			soundDataVector.push_back(soundData);
@@ -320,12 +317,14 @@ void AudioMan::RegisterSoundEvent(int player, NetworkSoundState state, const Sou
 				if (result != FMOD_OK) {
 					continue;
 				}
-				NetworkSoundData soundData;
+				NetworkSoundData soundData{};
 				soundData.State = state;
 				soundData.SoundFileHash = soundContainer->GetSoundDataForSound(sound)->SoundFile.GetHash();
 				soundData.Channel = playingChannel;
 				soundData.Immobile = soundContainer->IsImmobile();
 				soundData.AttenuationStartDistance = soundContainer->GetAttenuationStartDistance();
+				soundData.CustomPanValue = soundContainer->GetCustomPanValue();
+				soundData.PanningStrengthMultiplier = soundContainer->GetPanningStrengthMultiplier();
 				soundData.Loops = soundContainer->GetLoopSetting();
 				soundData.Priority = soundContainer->GetPriority();
 				soundData.AffectedByGlobalPitch = soundContainer->IsAffectedByGlobalPitch();

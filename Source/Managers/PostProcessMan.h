@@ -144,6 +144,7 @@ namespace RTE {
 		std::shared_ptr<RenderTarget> GetPostProcessColorBuffer() { return m_PostProcessFramebuffer; }
 
 		GLuint GetPaletteTexture() { return m_Palette8Texture; }
+		void DrawViewEffects(const std::list<PostEffect>& effects, int width, int height);
 
 	protected:
 		std::list<PostEffect> m_PostScreenEffects; //!< List of effects to apply at the end of each frame. This list gets cleared out and re-filled each frame.

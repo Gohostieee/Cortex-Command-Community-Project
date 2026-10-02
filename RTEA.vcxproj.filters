@@ -1288,4 +1288,26 @@
       <Filter>System\Semver200</Filter>
     </None>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Managers\MultiplayerMan.h">
+      <Filter>Managers</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\System\MultiplayerProtocol.h">
+      <Filter>System</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\System\MultiplayerInput.h">
+      <Filter>System</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\System\MultiplayerTransport.h">
+      <Filter>System</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Source\Managers\MultiplayerMan.cpp">
+      <Filter>Managers</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\System\MultiplayerTransport.cpp">
+      <Filter>System</Filter>
+    </ClCompile>
+  </ItemGroup>
 </Project>

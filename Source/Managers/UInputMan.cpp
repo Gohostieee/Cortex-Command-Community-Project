@@ -1,4 +1,6 @@
 #include "UInputMan.h"
+#include "MultiplayerMan.h"
+#include "MultiplayerInput.h"
 #include "Constants.h"
 #include "SceneMan.h"
 #include "ActivityMan.h"
@@ -136,6 +138,8 @@ void UInputMan::LoadDeviceIcons() {
 }
 
 Vector UInputMan::AnalogMoveValues(int whichPlayer) {
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return Vector();
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return Vector(m_RemoteInputs[whichPlayer].State.Snapshot.MoveX, m_RemoteInputs[whichPlayer].State.Snapshot.MoveY);
 	Vector moveValues(0, 0);
 	InputDevice device = m_ControlScheme.at(whichPlayer).GetDevice();
 	if (device >= InputDevice::DEVICE_GAMEPAD_1) {
@@ -154,6 +158,8 @@ Vector UInputMan::AnalogMoveValues(int whichPlayer) {
 }
 
 Vector UInputMan::AnalogAimValues(int whichPlayer) {
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return Vector();
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return Vector(m_RemoteInputs[whichPlayer].State.Snapshot.AimX, m_RemoteInputs[whichPlayer].State.Snapshot.AimY);
 	InputDevice device = m_ControlScheme.at(whichPlayer).GetDevice();
 
 	Vector aimValues(0, 0);
@@ -191,7 +197,7 @@ Vector UInputMan::GetMenuDirectional(int whichPlayer) {
 		return allInput;
 	}
 	Vector playerInput(0, 0);
-	InputDevice device = m_ControlScheme.at(whichPlayer).GetDevice();
+	InputDevice device = static_cast<InputDevice>(GetInputDevice(whichPlayer));
 
 	switch (device) {
 		case InputDevice::DEVICE_KEYB_ONLY:
@@ -351,6 +357,7 @@ bool UInputMan::AllPlayerInputDevicesKnown(const std::vector<int>& humanPlayers)
 }
 
 Vector UInputMan::GetAbsoluteMousePosition(int whichPlayer) const {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return m_RemoteInputs[whichPlayer].Position;
 	if (!m_EnableMultiMouseKeyboard || (whichPlayer == Players::NoPlayer)) {
 		return m_MouseStates.at(0).position;
 	} else if (m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB) {
@@ -362,6 +369,7 @@ Vector UInputMan::GetAbsoluteMousePosition(int whichPlayer) const {
 }
 
 void UInputMan::SetAbsoluteMousePosition(const Vector& pos, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) { m_RemoteInputs[whichPlayer].Position = pos; return; }
 	if (whichPlayer == Players::NoPlayer || !m_EnableMultiMouseKeyboard) {
 		m_MouseStates.at(0).position = pos;
 	} else if (m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB) {
@@ -372,6 +380,8 @@ void UInputMan::SetAbsoluteMousePosition(const Vector& pos, int whichPlayer) {
 }
 
 Vector UInputMan::GetMouseMovement(int whichPlayer) const {
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return Vector();
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return Vector(m_RemoteInputs[whichPlayer].State.MouseDX, m_RemoteInputs[whichPlayer].State.MouseDY);
 	if (whichPlayer == Players::NoPlayer || (m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB && !m_EnableMultiMouseKeyboard)) {
 		return m_MouseStates.at(0).relativeMotion;
 	} else if (m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB) {
@@ -383,6 +393,7 @@ Vector UInputMan::GetMouseMovement(int whichPlayer) const {
 }
 
 void UInputMan::SetMouseValueMagnitude(float magCap, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) { auto& input = m_RemoteInputs[whichPlayer].State.Snapshot; Vector aim(input.AimX, input.AimY); aim.SetMagnitude(magCap); input.AimX = aim.GetX(); input.AimY = aim.GetY(); return; }
 	if (whichPlayer != Players::NoPlayer && m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB) {
 		if (!m_EnableMultiMouseKeyboard) {
 			m_MouseStates[0].analogAim.SetMagnitude(m_MouseTrapRadius * magCap);
@@ -395,6 +406,7 @@ void UInputMan::SetMouseValueMagnitude(float magCap, int whichPlayer) {
 }
 
 void UInputMan::SetMouseValueAngle(float angle, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) { auto& input = m_RemoteInputs[whichPlayer].State.Snapshot; Vector aim(input.AimX, input.AimY); aim.SetAbsRadAngle(angle); input.AimX = aim.GetX(); input.AimY = aim.GetY(); return; }
 	if (whichPlayer != Players::NoPlayer && m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB) {
 		if (!m_EnableMultiMouseKeyboard) {
 			m_MouseStates[0].analogAim.SetAbsRadAngle(angle);
@@ -407,6 +419,7 @@ void UInputMan::SetMouseValueAngle(float angle, int whichPlayer) {
 }
 
 void UInputMan::SetMousePos(const Vector& newPos, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) { m_RemoteInputs[whichPlayer].Position = newPos; return; }
 	// Only mess with the mouse if the original mouse position is not above the screen and may be grabbing the title bar of the game window
 	if (!m_DisableMouseMoving && !m_TrapMousePos && ((whichPlayer == Players::NoPlayer) || (m_ControlScheme.at(whichPlayer).GetDevice() == InputDevice::DEVICE_MOUSE_KEYB && !m_EnableMultiMouseKeyboard))) {
 		SDL_WarpMouseInWindow(g_WindowMan.GetWindow(), newPos.GetFloorIntX(), newPos.GetFloorIntY());
@@ -416,6 +429,9 @@ void UInputMan::SetMousePos(const Vector& newPos, int whichPlayer) {
 }
 
 const std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS>& UInputMan::GetMouseState(int whichPlayer) const {
+	static const std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS> released{};
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return released;
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return m_RemoteInputs[whichPlayer].Buttons;
 	if (whichPlayer == Players::NoPlayer || !m_EnableMultiMouseKeyboard) {
 		return m_MouseStates.at(0).state;
 	}
@@ -429,6 +445,9 @@ const std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS>& UInputMan::GetMouseStat
 	return m_MouseStates.at(0).state;
 }
 const std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS>& UInputMan::GetMouseChange(int whichPlayer) const {
+	static const std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS> unchanged{};
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return unchanged;
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return m_RemoteInputs[whichPlayer].Changes;
 	if (whichPlayer == Players::NoPlayer || !m_EnableMultiMouseKeyboard) {
 		return m_MouseStates.at(0).change;
 	}
@@ -450,6 +469,8 @@ void UInputMan::ClearMouseButtons() {
 }
 
 int UInputMan::MouseWheelMovedByPlayer(int player) const {
+	if (player == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return 0;
+	if (player > 0 && player < 4 && m_RemoteInputs[player].Active) return m_RemoteInputs[player].State.WheelDelta;
 	if (player == Players::NoPlayer || player < Players::PlayerOne || player >= Players::MaxPlayerCount || !m_EnableMultiMouseKeyboard) {
 		return m_MouseStates.at(0).wheelChange;
 	}
@@ -473,6 +494,7 @@ bool UInputMan::AnyMouseButtonPress(SDL_MouseID mouseID) const {
 }
 
 void UInputMan::TrapMousePos(bool trap, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return;
 	if (whichPlayer == Players::NoPlayer) {
 		m_TrapMousePos = trap;
 		SDL_SetWindowRelativeMouseMode(g_WindowMan.GetWindow(), trap);
@@ -488,6 +510,7 @@ void UInputMan::TrapMousePos(bool trap, int whichPlayer) {
 }
 
 void UInputMan::ForceMouseWithinBox(int x, int y, int width, int height, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return;
 	// Only mess with the mouse if the original mouse position is not above the screen and may be grabbing the title bar of the game window.
 	int rightMostPos = m_PlayerScreenMouseBounds.x + m_PlayerScreenMouseBounds.w;
 	int bottomMostPos = m_PlayerScreenMouseBounds.y + m_PlayerScreenMouseBounds.h;
@@ -528,6 +551,7 @@ void UInputMan::ForceMouseWithinBox(int x, int y, int width, int height, int whi
 }
 
 void UInputMan::ForceMouseWithinPlayerScreen(bool force, int whichPlayer) {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return;
 	float resMultiplier = g_WindowMan.GetResMultiplier();
 
 	if (force && (whichPlayer >= Players::PlayerOne && whichPlayer < Players::MaxPlayerCount)) {
@@ -655,6 +679,11 @@ bool UInputMan::AnyJoyButtonPress(int whichJoy) const {
 }
 
 bool UInputMan::GetInputElementState(int whichPlayer, int whichElement, InputState whichState) {
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return false;
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active && whichElement >= 0 && whichElement < MP::InputCount) {
+		const auto& input = m_RemoteInputs[whichPlayer].State; const uint64_t mask = uint64_t(1) << whichElement;
+		return ((whichState == InputState::Held ? input.Snapshot.Held | input.Pressed : whichState == InputState::Pressed ? input.Pressed : input.Released) & mask) != 0;
+	}
 	bool elementState = false;
 	InputDevice device = m_ControlScheme.at(whichPlayer).GetDevice();
 	const InputMapping* element = &(m_ControlScheme.at(whichPlayer).GetInputMappings()->at(whichElement));
@@ -703,6 +732,11 @@ bool UInputMan::GetMenuButtonState(int whichButton, InputState whichState) {
 }
 
 bool UInputMan::GetKeyboardButtonState(SDL_Scancode scancodeToTest, InputState whichState, int whichPlayer, SDL_KeyboardID keyboardID) const {
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) {
+		const auto key = std::find(MP::GUIKeys.begin(), MP::GUIKeys.end(), scancodeToTest); if (key == MP::GUIKeys.end()) return false;
+		const uint64_t mask = uint64_t(1) << (MP::GUIKeyFirst + std::distance(MP::GUIKeys.begin(), key)); const auto& input = m_RemoteInputs[whichPlayer].State;
+		return ((whichState == InputState::Held ? input.Snapshot.Held | input.Pressed : whichState == InputState::Pressed ? input.Pressed : input.Released) & mask) != 0;
+	}
 	if (m_DisableKeyboard && (scancodeToTest >= SDL_SCANCODE_0 && scancodeToTest < SDL_SCANCODE_ESCAPE)) {
 		return false;
 	}
@@ -749,6 +783,11 @@ bool UInputMan::GetKeyboardButtonState(SDL_Scancode scancodeToTest, InputState w
 }
 
 bool UInputMan::GetMouseButtonState(int whichPlayer, int whichButton, InputState whichState, SDL_MouseID mouseID) const {
+	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return false;
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active && whichButton >= 1 && whichButton <= 3) {
+		const auto& input = m_RemoteInputs[whichPlayer].State; const uint8_t mask = uint8_t(1 << (whichButton - 1));
+		return ((whichState == InputState::Held ? input.Snapshot.MouseHeld | input.MousePressed : whichState == InputState::Pressed ? input.MousePressed : input.MouseReleased) & mask) != 0;
+	}
 	if (whichButton < MouseButtons::MOUSE_LEFT || whichButton >= MouseButtons::MAX_MOUSE_BUTTONS) {
 		return false;
 	}
@@ -1037,6 +1076,7 @@ int UInputMan::Update() {
 }
 
 void UInputMan::EndFrame() {
+	for (auto& remote: m_RemoteInputs) { remote.State.Pressed = remote.State.Released = 0; remote.State.MousePressed = remote.State.MouseReleased = 0; remote.State.MouseDX = remote.State.MouseDY = remote.State.WheelDelta = 0; remote.Changes.fill(false); }
 	m_LastDeviceWhichControlledGUICursor = InputDevice::DEVICE_KEYB_ONLY;
 
 	for (auto& [keyboardID, keyboard] : m_KeyboardStates) {
@@ -1057,14 +1097,29 @@ void UInputMan::EndFrame() {
 	}
 }
 
+void UInputMan::SetRemoteInput(int player, const MP::InputState& input) {
+	if (player < 1 || player >= 4) return;
+	auto& remote = m_RemoteInputs[player]; const auto* activity = g_ActivityMan.GetActivity(); const int screen = activity ? activity->ScreenOfPlayer(player) : player;
+	const float multiplier = g_WindowMan.GetResMultiplier();
+	const float width = g_FrameMan.GetPlayerFrameBufferWidth(screen) * multiplier, height = g_FrameMan.GetPlayerFrameBufferHeight(screen) * multiplier;
+	if (!remote.Active) remote.Position = Vector(width / 2, height / 2);
+	remote.Active = true; remote.State = input;
+	remote.Position.SetXY(std::clamp(remote.Position.GetX() + input.MouseDX * multiplier, 0.0f, std::max(0.0f, width - 1)), std::clamp(remote.Position.GetY() + input.MouseDY * multiplier, 0.0f, std::max(0.0f, height - 1)));
+	for (int i = 0; i < 3; ++i) { const bool held = (input.Snapshot.MouseHeld & (1 << i)) || (input.MousePressed & (1 << i)); remote.Changes[i + 1] = held != remote.Buttons[i + 1] || ((input.MousePressed | input.MouseReleased) & (1 << i)); remote.Buttons[i + 1] = held; }
+}
+
+void UInputMan::ClearRemoteInput(int player) { if (player > 0 && player < 4) m_RemoteInputs[player] = {}; }
+
 void UInputMan::HandleSpecialInput() {
+	const bool hosting = g_MultiplayerMan.IsHostingMatch();
+	if (hosting && (KeyPressed(SDLK_ESCAPE) || ElementPressed(0, InputElements::INPUT_START))) { g_MultiplayerMan.Open(); TrapMousePos(false); return; }
 	// If we launched into editor directly, skip the logic and quit quickly.
 	if (g_ActivityMan.IsSetToLaunchIntoEditor() && KeyPressed(SDLK_ESCAPE)) {
 		System::SetQuit();
 		return;
 	}
 
-	if (g_ActivityMan.IsInActivity()) {
+	if (!hosting && g_ActivityMan.IsInActivity()) {
 		const GameActivity* gameActivity = dynamic_cast<GameActivity*>(g_ActivityMan.GetActivity());
 		// Don't allow pausing and returning to main menu when running in server mode to not disrupt the simulation for the clients
 		if (AnyStartPress(false) && (!gameActivity || !gameActivity->IsBuyGUIVisible(-1))) {
@@ -1099,7 +1154,7 @@ void UInputMan::HandleSpecialInput() {
 			g_PerformanceMan.ShowPerformanceStats(!g_PerformanceMan.IsShowingPerformanceStats());
 		} else if (KeyPressed(SDLK_F2)) {
 			g_PresetMan.QuickReloadEntityPreset();
-		} else if (KeyPressed(SDLK_F9)) {
+		} else if (!hosting && KeyPressed(SDLK_F9)) {
 			g_ActivityMan.LoadAndLaunchGame("AutoSave");
 		} else if (g_PerformanceMan.IsShowingPerformanceStats()) {
 			if (KeyHeld(SDLK_1)) {
@@ -1137,7 +1192,7 @@ void UInputMan::HandleSpecialInput() {
 			} else {
 				RTEError::ShowMessageBox("Cannot Save Game - This Activity Does Not Allow QuickSaving!");
 			}
-		} else if (KeyPressed(SDLK_F9)) {
+		} else if (!hosting && KeyPressed(SDLK_F9)) {
 			g_ActivityMan.LoadAndLaunchGame("QuickSave");
 		} else if (KeyPressed(SDLK_F10)) {
 			g_ConsoleMan.ClearLog();

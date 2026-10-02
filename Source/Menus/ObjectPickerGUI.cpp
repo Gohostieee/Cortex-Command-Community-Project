@@ -98,7 +98,7 @@ int ObjectPickerGUI::Create(Controller* controller, int whichModuleSpace, const 
 	m_ObjectsList->SetAlternateDrawMode(true);
 	m_ObjectsList->SetMultiSelect(false);
 
-	int stretchAmount = g_FrameMan.GetPlayerScreenHeight() - m_ParentBox->GetHeight();
+	int stretchAmount = g_FrameMan.GetPlayerFrameBufferHeight(g_ActivityMan.GetActivity()->ScreenOfPlayer(m_Controller->GetPlayer())) - m_ParentBox->GetHeight();
 	if (stretchAmount != 0) {
 		m_ParentBox->SetSize(m_ParentBox->GetWidth(), m_ParentBox->GetHeight() + stretchAmount);
 		m_GroupsList->SetSize(m_GroupsList->GetWidth(), m_GroupsList->GetHeight() + stretchAmount);

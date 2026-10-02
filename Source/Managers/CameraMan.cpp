@@ -220,8 +220,8 @@ void CameraMan::Update(int screenId) {
 	Vector oldOffset(screen.Offset);
 
 	Vector offsetTarget;
-	offsetTarget.SetX(screen.ScrollTarget.GetX() - static_cast<float>(g_WindowMan.GetResX() / (g_FrameMan.GetVSplit() ? 4 : 2)));
-	offsetTarget.SetY(screen.ScrollTarget.GetY() - static_cast<float>(g_WindowMan.GetResY() / (g_FrameMan.GetHSplit() ? 4 : 2)));
+	offsetTarget.SetX(screen.ScrollTarget.GetX() - static_cast<float>(g_FrameMan.GetPlayerFrameBufferWidth(screenId)) / 2);
+	offsetTarget.SetY(screen.ScrollTarget.GetY() - static_cast<float>(g_FrameMan.GetPlayerFrameBufferHeight(screenId)) / 2);
 	// Take the occlusion of the screens into account so that the scroll target is still centered on the terrain-visible portion of the screen.
 	offsetTarget -= (screen.ScreenOcclusion / 2);
 

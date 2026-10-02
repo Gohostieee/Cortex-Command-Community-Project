@@ -84,6 +84,7 @@ namespace RTE {
 		/// Makes the AudioMan object ready for use.
 		/// @return Whether the audio system was initialized successfully. If not, no audio will be available.
 		bool Initialize();
+		void SetStreamListener(const Vector& position, bool enabled) { m_StreamListenerPosition = position; m_StreamListenerActive = enabled; }
 #pragma endregion
 
 #pragma region Destruction
@@ -329,6 +330,8 @@ namespace RTE {
 
 		bool m_AudioEnabled; //!< Bool to tell whether audio is enabled or not.
 		std::vector<std::unique_ptr<const Vector>> m_CurrentActivityHumanPlayerPositions; //!< The stored positions of each human player in the current activity. Only filled when there's an activity running.
+		Vector m_StreamListenerPosition;
+		bool m_StreamListenerActive = false;
 		std::unordered_map<int, float> m_SoundChannelMinimumAudibleDistances; //!<  An unordered map of sound channel indices to floats representing each Sound Channel's minimum audible distances. This is necessary to keep safe data in case the SoundContainer is destroyed while the sound is still playing, as happens often with TDExplosives.
 
 		bool m_MuteMaster; //!< Whether all the audio is muted.

@@ -460,7 +460,7 @@ bool BuyMenuGUI::SaveAllLoadoutsToFile() {
 void BuyMenuGUI::SetEnabled(bool enable) {
 	if (enable && m_MenuEnabled != ENABLED && m_MenuEnabled != ENABLING) {
 		// If we're not split screen horizontally, then stretch out the layout for all the relevant controls
-		int stretchAmount = g_FrameMan.GetPlayerScreenHeight() - m_pParentBox->GetHeight();
+		int stretchAmount = g_FrameMan.GetPlayerFrameBufferHeight(g_ActivityMan.GetActivity()->ScreenOfPlayer(m_pController->GetPlayer())) - m_pParentBox->GetHeight();
 		if (stretchAmount != 0) {
 			m_pParentBox->SetSize(m_pParentBox->GetWidth(), m_pParentBox->GetHeight() + stretchAmount);
 			m_pShopList->SetSize(m_pShopList->GetWidth(), m_pShopList->GetHeight() + stretchAmount);

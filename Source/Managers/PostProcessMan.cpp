@@ -408,6 +408,19 @@ void PostProcessMan::DrawDotGlowEffects() {
 	}
 }
 
+void PostProcessMan::DrawViewEffects(const std::list<PostEffect>& effects, int width, int height) {
+	rlDrawRenderBatchActive(); rlDisableDepthTest(); rlEnableColorBlend();
+	rlSetBlendFactorsSeparate(GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_FUNC_ADD, GL_FUNC_ADD); rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+	m_PostProcessShader->Begin();
+	m_PostProcessShader->SetMatrix4f(m_PostProcessShader->GetProjectionUniform(), glm::ortho(0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, c_NearDepth, c_FarDepth));
+	m_PostProcessShader->SetVector4f(m_PostProcessShader->GetColorUniform(), glm::vec4(1));
+	for (const auto& effect: effects) if (effect.m_Bitmap) {
+		const auto strength = static_cast<unsigned char>(effect.m_Strength);
+		DrawTexturePro(g_GLResourceMan.GetStaticTextureFromBitmap(effect.m_Bitmap), Rectangle(0, 0, effect.m_Bitmap->w, effect.m_Bitmap->h), Rectangle(effect.m_Pos.GetFloorIntX(), effect.m_Pos.GetFloorIntY(), effect.m_Bitmap->w, effect.m_Bitmap->h), Vector2(effect.m_Bitmap->w / 2, effect.m_Bitmap->h / 2), effect.m_Angle, {strength, strength, strength, 255});
+	}
+	rlDrawRenderBatchActive(); m_PostProcessShader->End(); rlSetBlendMode(RL_BLEND_ALPHA); rlEnableDepthTest();
+}
+
 void PostProcessMan::DrawPostScreenEffects() {
 	int effectPosX = 0;
 	int effectPosY = 0;

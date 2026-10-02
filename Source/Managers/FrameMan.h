@@ -339,6 +339,8 @@ namespace RTE {
 
 		std::shared_ptr<BITMAP> m_PlayerScreen8; //!< Intermediary split screen bitmap.
 		std::shared_ptr<RenderTarget> m_PlayerScreen; //!< Intermediary split screen bitmap.
+		std::array<std::shared_ptr<RenderTarget>, 4> m_RemoteScreens;
+		std::array<std::shared_ptr<BITMAP>, 4> m_RemoteScreenGUIs;
 		int m_PlayerScreenWidth; //!< Width of the screen of each player. Will be smaller than resolution only if the screen is split.
 		int m_PlayerScreenHeight; //!< Height of the screen of each player. Will be smaller than resolution only if the screen is split.
 

@@ -1,4 +1,5 @@
 #include "WindowMan.h"
+#include "MultiplayerMan.h"
 #include "RTEError.h"
 #include "SDL3/SDL.h"
 #include "SettingsMan.h"
@@ -807,6 +808,7 @@ void WindowMan::UploadFrame() {
 	}
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+	g_MultiplayerMan.CaptureVerificationFrame();
 	Present();
 	TracyGpuCollect;
 	FrameMark;

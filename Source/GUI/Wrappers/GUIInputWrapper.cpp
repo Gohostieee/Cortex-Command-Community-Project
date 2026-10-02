@@ -4,6 +4,7 @@
 #include "WindowMan.h"
 #include "FrameMan.h"
 #include "UInputMan.h"
+#include "MultiplayerMan.h"
 #include "Timer.h"
 #include <SDL3/SDL.h>
 #include <iostream>
@@ -23,9 +24,8 @@ GUIInputWrapper::GUIInputWrapper(int whichPlayer, bool keyJoyMouseCursor) :
 }
 
 void GUIInputWrapper::ConvertKeyEvent(SDL_Scancode sdlKey, int guilibKey, float elapsedS) {
-	int nKeys;
-	const bool* sdlKeyState = SDL_GetKeyboardState(&nKeys);
-	if (sdlKeyState[sdlKey]) {
+	const int keyboardPlayer = g_MultiplayerMan.IsRemotePlayer(m_Player) ? m_Player : Players::NoPlayer;
+	if (g_UInputMan.KeyHeld(sdlKey, keyboardPlayer)) {
 		if (m_KeyHoldDuration[guilibKey] < 0) {
 			m_KeyboardBuffer[guilibKey] = GUIInput::Pushed;
 			m_KeyHoldDuration[guilibKey] = 0;
@@ -49,6 +49,9 @@ void GUIInputWrapper::ConvertKeyEvent(SDL_Scancode sdlKey, int guilibKey, float 
 void GUIInputWrapper::Update() {
 	float keyElapsedTime = static_cast<float>(m_KeyTimer->GetElapsedRealTimeS());
 	m_KeyTimer->Reset();
+	if (m_Player == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) {
+		memset(m_KeyboardBuffer, 0, sizeof(m_KeyboardBuffer)); memset(m_ScanCodeState, 0, sizeof(m_ScanCodeState)); m_KeyHoldDuration.fill(-1); m_TextInput.clear(); m_HasTextInput = false; ClearMouseState(); return;
+	}
 
 	UpdateKeyboardInput(keyElapsedTime);
 	UpdateMouseInput();
@@ -66,12 +69,14 @@ void GUIInputWrapper::Update() {
 
 void GUIInputWrapper::StartTextInput() {
 	GUIInput::StartTextInput();
+	if (g_MultiplayerMan.IsRemotePlayer(m_Player)) { g_MultiplayerMan.SetTextInputActive(m_Player, true); return; }
 	SDL_StartTextInput(g_WindowMan.GetWindow());
 }
 
 void GUIInputWrapper::StopTextInput() {
 	GUIInput::StopTextInput();
 	if (m_TextInputActive <= 0) {
+		if (g_MultiplayerMan.IsRemotePlayer(m_Player)) { g_MultiplayerMan.SetTextInputActive(m_Player, false); return; }
 		SDL_StopTextInput(g_WindowMan.GetWindow());
 	}
 }
@@ -80,15 +85,17 @@ void GUIInputWrapper::UpdateKeyboardInput(float keyElapsedTime) {
 	// Clear the keyboard buffer, we need it to check for changes.
 	memset(m_KeyboardBuffer, 0, sizeof(uint8_t) * GUIInput::Constants::KEYBOARD_BUFFER_SIZE);
 	memset(m_ScanCodeState, 0, sizeof(uint8_t) * GUIInput::Constants::KEYBOARD_BUFFER_SIZE);
+	const bool remote = g_MultiplayerMan.IsRemotePlayer(m_Player);
+	const int keyboardPlayer = remote ? m_Player : Players::NoPlayer;
 
 	for (size_t k = 0; k < GUIInput::Constants::KEYBOARD_BUFFER_SIZE; ++k) {
-		if (g_UInputMan.KeyPressed(static_cast<SDL_Scancode>(k))) {
+		if (g_UInputMan.KeyPressed(static_cast<SDL_Scancode>(k), keyboardPlayer)) {
 			m_ScanCodeState[k] = GUIInput::Pushed;
 			uint8_t keyName = static_cast<uint8_t>(SDL_GetKeyFromScancode(static_cast<SDL_Scancode>(k), NULL, false));
 			m_KeyboardBuffer[keyName] = GUIInput::Pushed;
 		}
 	}
-	m_HasTextInput = g_UInputMan.GetTextInput(m_TextInput);
+	m_HasTextInput = remote ? g_MultiplayerMan.TakeTextInput(m_Player, m_TextInput) : g_UInputMan.GetTextInput(m_TextInput);
 
 	ConvertKeyEvent(SDL_SCANCODE_SPACE, ' ', keyElapsedTime);
 	ConvertKeyEvent(SDL_SCANCODE_BACKSPACE, GUIInput::Key_Backspace, keyElapsedTime);
@@ -108,7 +115,7 @@ void GUIInputWrapper::UpdateKeyboardInput(float keyElapsedTime) {
 	ConvertKeyEvent(SDL_SCANCODE_PAGEDOWN, GUIInput::Key_PageDown, keyElapsedTime);
 
 	m_Modifier = GUIInput::ModNone;
-	SDL_Keymod keyShifts = SDL_GetModState();
+	SDL_Keymod keyShifts = remote ? SDL_KMOD_NONE : SDL_GetModState();
 
 	if (keyShifts & SDL_KMOD_SHIFT) {
 		m_Modifier |= GUIInput::ModShift;

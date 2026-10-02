@@ -261,6 +261,10 @@ cccpelf = executable(
 
 
 #### Installing #####
+multiplayer_tests = executable('multiplayer-tests', ['Tests/MultiplayerTests.cpp', 'Source/System/MultiplayerTransport.cpp'],
+  include_directories: include_directories('Source/System'), dependencies: [raknet_dep, dependency('threads')], cpp_args: ['-DNOMINMAX'], build_by_default: false)
+test('multiplayer protocol and UDP transport', multiplayer_tests, timeout: 30)
+
 base_exclude_files = [
   'Base.rte/Settings.ini',
   'Launch Actor Editor.bat',

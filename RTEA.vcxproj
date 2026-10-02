@@ -837,6 +837,10 @@
     <ClInclude Include="Source\Renderer\raylib\rlutil.h" />
     <ClInclude Include="Source\Managers\AchievementMan.h" />
     <ClInclude Include="Source\Managers\ActivityMan.h" />
+    <ClInclude Include="Source\Managers\MultiplayerMan.h" />
+    <ClInclude Include="Source\System\MultiplayerProtocol.h" />
+    <ClInclude Include="Source\System\MultiplayerInput.h" />
+    <ClInclude Include="Source\System\MultiplayerTransport.h" />
     <ClInclude Include="Source\Managers\AudioMan.h" />
     <ClInclude Include="Source\Managers\ConsoleMan.h" />
     <ClInclude Include="Source\Managers\FrameMan.h" />
@@ -1368,6 +1372,8 @@
     <ClCompile Include="Source\System\Writer.cpp" />
     <ClCompile Include="Source\Managers\AchievementMan.cpp" />
     <ClCompile Include="Source\Managers\ActivityMan.cpp" />
+    <ClCompile Include="Source\Managers\MultiplayerMan.cpp" />
+    <ClCompile Include="Source\System\MultiplayerTransport.cpp" />
     <ClCompile Include="Source\Managers\AudioMan.cpp" />
     <ClCompile Include="Source\Managers\ConsoleMan.cpp" />
     <ClCompile Include="Source\Managers\FrameMan.cpp" />

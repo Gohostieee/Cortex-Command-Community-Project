@@ -1,4 +1,5 @@
 #include "FrameMan.h"
+#include "MultiplayerMan.h"
 
 #include "SDL3/SDL_surface.h"
 #include "WindowMan.h"
@@ -63,6 +64,8 @@ FrameMan::~FrameMan() {
 }
 
 void FrameMan::Clear() {
+	m_RemoteScreens.fill(nullptr);
+	m_RemoteScreenGUIs.fill(nullptr);
 	m_HSplit = false;
 	m_VSplit = false;
 	m_TwoPlayerVSplit = false;
@@ -269,6 +272,7 @@ float FrameMan::GetResolutionMultiplier() const {
 }
 
 Vector FrameMan::GetMiddleOfPlayerScreen(int whichPlayer) {
+	if (g_MultiplayerMan.IsHostingMatch() && whichPlayer >= 0) { const int screen = g_ActivityMan.GetActivity()->ScreenOfPlayer(whichPlayer); return Vector(GetPlayerFrameBufferWidth(screen) / 2, GetPlayerFrameBufferHeight(screen) / 2); }
 	Vector middleOfPlayerScreen;
 
 	if (whichPlayer == -1) {
@@ -288,10 +292,12 @@ Vector FrameMan::GetMiddleOfPlayerScreen(int whichPlayer) {
 }
 
 int FrameMan::GetPlayerFrameBufferWidth(int whichPlayer) const {
+	if (g_MultiplayerMan.IsHostingMatch()) return g_MultiplayerMan.ViewWidth(whichPlayer);
 	return m_PlayerScreenWidth;
 }
 
 int FrameMan::GetPlayerFrameBufferHeight(int whichPlayer) const {
+	if (g_MultiplayerMan.IsHostingMatch()) return g_MultiplayerMan.ViewHeight(whichPlayer);
 	return m_PlayerScreenHeight;
 }
 
@@ -820,6 +826,8 @@ void FrameMan::Draw() {
 
 	// Count how many split screens we'll need
 	int screenCount = (m_HSplit ? 2 : 1) * (m_VSplit ? 2 : 1);
+	const bool networkHost = g_MultiplayerMan.IsHostingMatch();
+	if (networkHost && g_ActivityMan.GetActivity()) screenCount = g_ActivityMan.GetActivity()->GetHumanCount();
 	RTEAssert(screenCount <= 1 || m_PlayerScreen, "Splitscreen surface not ready when needed!");
 
 	g_PostProcessMan.ClearScreenPostEffects();
@@ -837,15 +845,28 @@ void FrameMan::Draw() {
 		rlSetBlendMode(RL_BLEND_ALPHA);
 		rlEnableDepthTest();
 
-		m_PlayerScreen->Begin(true, 1.0f);
+		const int networkPlayer = networkHost && pActivity ? pActivity->PlayerOfScreen(playerScreen) : -1;
+		const bool remoteScreen = networkHost && playerScreen > 0 && networkPlayer > 0;
+		if (remoteScreen && !g_MultiplayerMan.WantsFrame(networkPlayer)) { g_CameraMan.Update(playerScreen); g_SceneMan.Update(playerScreen); continue; }
+		std::shared_ptr<RenderTarget> screenTarget = networkHost ? m_BackBuffer : m_PlayerScreen;
+		BITMAP* networkGUI = m_BackBuffer8.get();
+		if (remoteScreen) {
+			const int width = g_MultiplayerMan.ViewWidth(playerScreen), height = g_MultiplayerMan.ViewHeight(playerScreen);
+			if (!m_RemoteScreens[playerScreen] || m_RemoteScreens[playerScreen]->GetSize().w != width || m_RemoteScreens[playerScreen]->GetSize().h != height) {
+				m_RemoteScreens[playerScreen] = std::make_shared<RenderTarget>(FloatRect(0, 0, width, height), FloatRect(0, 0, width, height));
+				m_RemoteScreenGUIs[playerScreen] = std::shared_ptr<BITMAP>(create_bitmap_ex(8, width, height), BitmapDeleter());
+			}
+			screenTarget = m_RemoteScreens[playerScreen]; networkGUI = m_RemoteScreenGUIs[playerScreen].get();
+		}
+		screenTarget->Begin(true, 1.0f);
 		backgroundShader.Begin();
 		backgroundShader.Enable();
 		rlSetUniformSampler(backgroundShader.GetUniformLocation("rtePalette"), g_PostProcessMan.GetPaletteTexture());
 		backgroundShader.SetInt("drawMasked", 1);
 
 		// rlSetUniformSampler(backgroundShader.GetUniformLocation("rtePalette"), g_PostProcessMan.GetPaletteTexture());
-		BITMAP* drawScreen = (screenCount == 1) ? m_BackBuffer8.get() : m_PlayerScreen8.get();
-		BITMAP* drawScreenGUI = (screenCount == 1) ? m_BackBuffer8.get() : m_PlayerScreen8.get();
+		BITMAP* drawScreen = networkHost ? networkGUI : (screenCount == 1) ? m_BackBuffer8.get() : m_PlayerScreen8.get();
+		BITMAP* drawScreenGUI = drawScreen;
 		// Need to clear the backbuffers because Scene background layers can be too small to fill the whole backbuffer or drawn masked resulting in artifacts from the previous frame.
 		clear_to_color(drawScreenGUI, ColorKeys::g_MaskColor);
 		// If in online multiplayer mode clear to mask color otherwise the scene background layers will get drawn over.
@@ -889,33 +910,42 @@ void FrameMan::Draw() {
 		Vector screenOffset;
 
 		// If we are dealing with split screens, then deal with the fact that we need to draw the player screens to different locations on the final buffer
-		if (screenCount > 1) {
+		if (screenCount > 1 && !networkHost) {
 			UpdateScreenOffsetForSplitScreen(playerScreen, screenOffset);
 		}
 
 		DrawScreenFlash(playerScreen, drawScreenGUI);
 
 		// Draw the intermediate draw splitscreen to the appropriate spot on the back buffer
-		blit(drawScreen, m_BackBuffer8.get(), 0, 0, screenOffset.GetFloorIntX(), screenOffset.GetFloorIntY(), drawScreen->w, drawScreen->h);
-		m_PlayerScreen->End();
+		if (remoteScreen) {
+			g_GLResourceMan.UpdateDynamicBitmap(drawScreenGUI, true);
+			rlZDepth(c_GuiDepth - 1.0f);
+			DrawTexture(g_GLResourceMan.GetStaticTextureFromBitmap(drawScreenGUI), 0, 0, {255, 255, 255, 255});
+			rlDrawRenderBatchActive();
+			backgroundShader.End();
+			g_PostProcessMan.DrawViewEffects(screenRelativeEffects, drawScreen->w, drawScreen->h);
+			g_MultiplayerMan.CaptureFrame(networkPlayer, screenTarget->GetFramebuffer(), drawScreen->w, drawScreen->h, targetPos.GetX(), targetPos.GetY());
+			rlZDepth(0);
+		} else blit(drawScreen, m_BackBuffer8.get(), 0, 0, screenOffset.GetFloorIntX(), screenOffset.GetFloorIntY(), drawScreen->w, drawScreen->h);
+		screenTarget->End();
 		backgroundShader.End();
-		if (screenCount > 1) {
+		if (screenCount > 1 && !networkHost) {
 			m_BackBuffer->Begin(false);
 			DrawTextureRec(m_PlayerScreen->GetColorTexture(), {0, 0, static_cast<float>(m_PlayerScreen8->w), -static_cast<float>(m_PlayerScreen8->h)}, {screenOffset.m_X, screenOffset.m_Y}, {255, 255, 255, 255});
 			m_BackBuffer->End();
 		}
-		g_PostProcessMan.AdjustEffectsPosToPlayerScreen(playerScreen, drawScreen, screenOffset, screenRelativeEffects, screenRelativeGlowBoxes);
+		if (!remoteScreen) g_PostProcessMan.AdjustEffectsPosToPlayerScreen(playerScreen, drawScreen, screenOffset, screenRelativeEffects, screenRelativeGlowBoxes);
 	}
 
 	// Clears the pixels that have been revealed from the unseen layers
 	g_SceneMan.ClearSeenPixels();
 
 	// Draw separating lines for split-screens
-	if (m_HSplit) {
+	if (m_HSplit && !networkHost) {
 		hline(m_BackBuffer8.get(), 0, (m_BackBuffer8->h / 2) - 1, m_BackBuffer8->w - 1, m_AlmostBlackColor);
 		hline(m_BackBuffer8.get(), 0, (m_BackBuffer8->h / 2), m_BackBuffer8->w - 1, m_AlmostBlackColor);
 	}
-	if (m_VSplit) {
+	if (m_VSplit && !networkHost) {
 		vline(m_BackBuffer8.get(), (m_BackBuffer8->w / 2) - 1, 0, m_BackBuffer8->h - 1, m_AlmostBlackColor);
 		vline(m_BackBuffer8.get(), (m_BackBuffer8->w / 2), 0, m_BackBuffer8->h - 1, m_AlmostBlackColor);
 	}
@@ -953,8 +983,8 @@ void FrameMan::DrawScreenText(int playerScreen, AllegroBitmap playerGUIBitmap) {
 		textPosY += 12;
 
 		if (!m_ScreenText[playerScreen].empty()) {
-			int bufferOrScreenWidth = GetPlayerScreenWidth();
-			int bufferOrScreenHeight = GetPlayerScreenHeight();
+			int bufferOrScreenWidth = GetPlayerFrameBufferWidth(playerScreen);
+			int bufferOrScreenHeight = GetPlayerFrameBufferHeight(playerScreen);
 
 			if (m_TextCentered[playerScreen]) {
 				textPosY = (bufferOrScreenHeight / 2) - 52;

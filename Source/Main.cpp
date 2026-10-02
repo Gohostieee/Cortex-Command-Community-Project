@@ -38,6 +38,7 @@
 #include "SettingsMan.h"
 #include "PresetMan.h"
 #include "UInputMan.h"
+#include "MultiplayerMan.h"
 #include "PerformanceMan.h"
 #include "FrameMan.h"
 #include "PostProcessMan.h"
@@ -87,6 +88,7 @@ void InitializeManagers() {
 	GUISound::Construct();
 	MusicMan::Construct();
 	UInputMan::Construct();
+	MultiplayerMan::Construct();
 	ConsoleMan::Construct();
 	SceneMan::Construct();
 	MovableMan::Construct();
@@ -130,6 +132,7 @@ void InitializeManagers() {
 /// Destroys all the managers and frees all loaded data before termination.
 /// </summary>
 void DestroyManagers() {
+	g_MultiplayerMan.Stop();
 	g_MetaMan.Destroy();
 	g_PerformanceMan.Destroy();
 	g_MovableMan.Destroy();
@@ -180,6 +183,7 @@ void HandleMainArgs(int argCount, char** argValue) {
 		if (currentArg == "-ext-validate") {
 			System::EnableExternalModuleValidationMode();
 		}
+		if (currentArg.starts_with("-mp-")) g_SettingsMan.SetSkipIntro(true);
 
 		if (!lastArg && !singleModuleSet && currentArg == "-module") {
 			std::string moduleToLoad = argValue[++i];
@@ -256,6 +260,7 @@ void RunMenuLoop() {
 		g_WindowMan.Update();
 
 		g_UInputMan.Update();
+		g_MultiplayerMan.Update();
 		g_TimerMan.Update();
 		g_TimerMan.UpdateSim();
 		g_AudioMan.Update();
@@ -269,18 +274,19 @@ void RunMenuLoop() {
 			g_WindowMan.CompleteResolutionChange();
 		}
 
-		if (g_MenuMan.Update()) {
+		if (g_MultiplayerMan.TakeLaunchRequest() || (!g_MultiplayerMan.IsUIOpen() && g_MenuMan.Update())) {
 			g_UInputMan.EndFrame();
 			break;
 		}
 
 		g_ConsoleMan.Update();
 
-		g_UInputMan.EndFrame();
 		g_WindowMan.GetScreenBuffer()->Begin();
 		g_MenuMan.Draw();
 		g_ConsoleMan.Draw(g_FrameMan.GetBackBuffer32());
 		g_WindowMan.GetScreenBuffer()->End();
+		g_MultiplayerMan.DrawUI();
+		g_UInputMan.EndFrame();
 		g_WindowMan.UploadFrame();
 	}
 
@@ -322,6 +328,7 @@ void RunGameLoop() {
 		g_WindowMan.ClearBackbuffer();
 
 		g_TimerMan.Update();
+		g_MultiplayerMan.Update();
 
 		// Simulation update, as many times as the fixed update step allows in the span since last frame draw.
 		while (g_TimerMan.TimeForSimUpdate()) {
@@ -338,6 +345,7 @@ void RunGameLoop() {
 			g_LuaMan.Update();
 
 			g_UInputMan.Update();
+			g_MultiplayerMan.ApplyInputs();
 
 			g_FrameMan.Update();
 
@@ -394,6 +402,7 @@ void RunGameLoop() {
 
 		g_FrameMan.Draw();
 		g_WindowMan.DrawPostProcessBuffer();
+		g_MultiplayerMan.DrawUI();
 		g_WindowMan.UploadFrame();
 
 		drawTotalTime = g_TimerMan.GetAbsoluteTime() - drawStartTime;
@@ -444,6 +453,12 @@ int main(int argc, char** argv) {
 	HandleMainArgs(argc, argv);
 
 	g_PresetMan.LoadAllDataModules();
+	for (int i = 1; i + 1 < argc; ++i) {
+		const std::string argument = argv[i];
+		if (argument == "-mp-host" || argument == "-mp-join" || argument == "-mp-smoke-host" || argument == "-mp-smoke-client") {
+			g_MultiplayerMan.StartRoom(argument == "-mp-host" || argument == "-mp-smoke-host", argv[++i], argument.starts_with("-mp-smoke-"));
+		}
+	}
 
 	if (!System::IsInExternalModuleValidationMode()) {
 		// Load the different input device icons. This can't be done during UInputMan::Create() because the icon presets don't exist so we need to do this after modules are loaded.
