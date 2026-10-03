@@ -15,9 +15,9 @@ function NativeHumanAI:Create(Owner)
 	Members.teamBlockState = Actor.NOTBLOCKED;
 	Members.SentryFacing = Owner.HFlipped;
 	Members.fire = false;
-	Members.groundContact = 5;
+	Members.groundContact = 1;
 	Members.flying = false;
-	Members.running = false;
+	Members.running = true;
 
 	Members.squadShoot = false;
 	Members.useMedikit = false;
@@ -29,9 +29,6 @@ function NativeHumanAI:Create(Owner)
 	Members.BlockedTimer = Timer();
 	Members.SquadShootTimer = Timer();
 	Members.SquadShootDelay = math.random(50,100);
-
-	Members.RunStateTimer = Timer();
-	Members.RunStateTimer:SetSimTimeLimitMS(math.random(2000,5000));
 
 	Members.AlarmTimer = Timer();
 	Members.AlarmTimer:SetSimTimeLimitMS(400);
@@ -86,7 +83,6 @@ function NativeHumanAI:Update(Owner)
 	-- Our jetpack might have thrust balancing enabled, so update for our current mass
 	if Owner.Jetpack then		
 		self.jetImpulseFactor = Owner.Jetpack:EstimateImpulse(false) * GetPPM() / TimerMan.DeltaTimeSecs;
-		self.jetBurstFactor = (Owner.Jetpack:EstimateImpulse(true) * GetPPM() / TimerMan.DeltaTimeSecs - self.jetImpulseFactor) * math.pow(TimerMan.DeltaTimeSecs, 2) * 0.5;
 	end
 
 	if self.isPlayerOwned then
@@ -239,7 +235,7 @@ function NativeHumanAI:Update(Owner)
 
 
 	-- check if the feet reach the ground
-	if self.AirTimer:IsPastSimMS(250) then
+	if self.AirTimer:IsPastSimMS(75) then
 		self.AirTimer:Reset();
 
 		local Origin = {};
@@ -252,14 +248,19 @@ function NativeHumanAI:Update(Owner)
 		if #Origin == 0 then
 			table.insert(Origin, Vector(Owner.Pos.X, Owner.Pos.Y) + Vector(0, 4 + ToMOSprite(Owner):GetSpriteHeight() + Owner.SpriteOffset.Y));
 		end
+		local grounded = false;
 		for i = 1, #Origin do
 			if SceneMan:GetTerrMatter(Origin[i].X, Origin[i].Y) ~= rte.airID then
-				self.groundContact = 3;
+				grounded = true;
 				break;
-			else
-				self.groundContact = self.groundContact - 1;
 			end
 		end
+		-- Running strides can lift both feet briefly while the body is still over ground.
+		if not grounded and math.abs(Owner.Vel.Y) < 3 then
+			grounded = SceneMan:CastStrengthRay(Owner.Pos, Vector(0, Owner.Height * 0.6), 5, Vector(), 2, rte.grassID, true);
+		end
+		-- Debounce empty ground checks, independently of how many feet remain.
+		self.groundContact = grounded and 1 or math.max(self.groundContact - 1, -1);
 
 		local newFlying = self.groundContact < 0;
 
@@ -336,13 +337,9 @@ function NativeHumanAI:Update(Owner)
 
 	local AlarmPoint = Owner:GetAlarmPoint();
 
-	-- If we currently have a target or are alerted, we walk. Otherwise we run
-	-- We also have a small random chance to walk for a lil bit
+	-- Travel promptly; slow down as soon as combat, crawling, or an alarm requires it.
 	local wasAlarmed = AlarmPoint.Largest > 0;
-	if wasAlarmed or self.RunStateTimer:IsPastSimTimeLimit() then
-		self.running = self.Target == nil and not wasAlarmed and math.random() < 0.6;
-		self.RunStateTimer:Reset();
-	end
+	self.running = not (self.Target or self.UnseenTarget or wasAlarmed) and self.proneState ~= AHuman.PRONE;
 
 	self.Ctrl:SetState(Controller.MOVE_FAST, self.running);
 
@@ -628,7 +625,8 @@ function NativeHumanAI:Update(Owner)
 		if self.jumpState == AHuman.PREJUMP then
 			self.jumpState = AHuman.UPJUMP;
 		elseif self.jumpState ~= AHuman.UPJUMP then	-- the jetpack is off
-			self.jumpState = AHuman.PREJUMP;
+			-- Air steering needs sustained thrust, not a fresh takeoff burst every pulse.
+			self.jumpState = self.flying and Owner.Jetpack.JetpackType == AEJetpack.Standard and self.deviceState ~= AHuman.DIGGING and AHuman.UPJUMP or AHuman.PREJUMP;
 		end
 	else
 		self.jumpState = AHuman.NOTJUMPING;

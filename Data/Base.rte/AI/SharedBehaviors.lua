@@ -375,6 +375,51 @@ function SharedBehaviors.UpdateAverageVel(Owner, AverageVel)
 	return AverageVel;
 end
 
+-- Match AEJetpack's local nozzle angle, including strafing and mirrored actors.
+function SharedBehaviors.GetJetDirection(Owner, aimAngle, flipped, lateralMove)
+	local pack = Owner.Jetpack;
+	local emitAngle;
+	if not pack.CanAdjustAngleWhileFiring and pack:IsEmitting() then
+		emitAngle = pack.EmitAngle;
+	else
+		local range = pack.JetAngleRange;
+		local strafe = (flipped and lateralMove == Actor.LAT_RIGHT) or (not flipped and lateralMove == Actor.LAT_LEFT);
+		local jetAngle = (aimAngle > 0 and aimAngle * range or -aimAngle * range * 0.5) - math.pi * 0.5 * range;
+		emitAngle = jetAngle * (strafe and -1 or 1) - math.pi * 0.5;
+	end
+	local direction = Vector(-1, 0):RadRotate(emitAngle);
+	if flipped then direction.X = -direction.X; end
+	return direction:RadRotate(Owner.RotAngle);
+end
+
+function SharedBehaviors.PredictJetPosition(AI, Owner, origin, aimAngle, flipped, lateralMove)
+	local pack = Owner.Jetpack;
+	local throttle = math.max(pack.ThrottleFactor, 0.1);
+	local startBurst = AI.jumpState == AHuman.NOTJUMPING and not (AI.flying and pack.JetpackType == AEJetpack.Standard and AI.deviceState ~= AHuman.DIGGING);
+	local canBurst = startBurst and pack:CanTriggerBurst();
+	local fuelTime = pack.JetTimeLeft / throttle;
+	if startBurst then
+		-- Burst consumption is measured in 60 Hz fuel units by AEJetpack::Burst.
+		fuelTime = fuelTime - (1000 / 60) * math.max(pack.TotalBurstSize, 2) * (canBurst and 1 or 0.5);
+	end
+	local time = math.max(TimerMan.AIDeltaTimeSecs, math.min(0.4, fuelTime * 0.001));
+	local mass = math.max(Owner.Mass, 0.1);
+	local direction = SharedBehaviors.GetJetDirection(Owner, aimAngle, flipped, lateralMove);
+	local gravity = SceneMan.GlobalAcc * GetPPM();
+	local coast = origin + Owner.Vel * (GetPPM() * time);
+	local acceleration = gravity + direction * (AI.jetImpulseFactor / mass);
+	local jumping = coast + acceleration * (time * time * 0.5);
+	local velocity = Owner.Vel + acceleration * (time / GetPPM());
+	if canBurst then
+		-- A burst changes velocity once; it is not an acceleration over one frame.
+		local burstVelocity = (pack:EstimateImpulse(true) - pack:EstimateImpulse(false)) * GetPPM() / mass;
+		jumping = jumping + direction * (burstVelocity * time);
+		velocity = velocity + direction * (burstVelocity / GetPPM());
+	end
+	local falling = AI.flying and coast + gravity * (time * time * 0.5) or coast;
+	return jumping, falling, time, velocity;
+end
+
 -- move to the next waypoint
 function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 	-- check if we have arrived
@@ -427,7 +472,8 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 	local digState = AHuman.NOTDIGGING;
 	local obstacleState = Actor.PROCEEDING;
 	local Obst = {R_LOW = 1, R_FRONT = 2, R_HIGH = 3, R_UP = 5, L_UP = 6, L_HIGH = 8, L_FRONT = 9, L_LOW = 10};
-	local Facings = {{aim=0, facing=0}, {aim=1.4, facing=1.4}, {aim=1.4, facing=math.pi-1.4}, {aim=0, facing=math.pi}};
+	local upwardAim = math.min(1.4, Owner.AimRange);
+	local Facings = {{aim=0, flipped=false}, {aim=upwardAim, flipped=false}, {aim=upwardAim, flipped=true}, {aim=0, flipped=true}};
 
 	local NeedsNewPath, Waypoint, HasMovePath, Dist, CurrDist;
 	NeedsNewPath = true;
@@ -526,14 +572,18 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 		end
 
 		if AI.refuel and Owner.Jetpack then
-			-- if jetpack is full or we are falling we can stop refuelling
-			if Owner.Jetpack.JetTimeLeft > Owner.Jetpack.JetTimeTotal * 0.98 or (AI.flying and Owner.Vel.Y < -3 and Owner.Jetpack.JetTimeLeft > AI.minBurstTime*2) then
+			local rechargeRatio = Owner.Jetpack.JetpackType == AEJetpack.JumpPack and 0.98 or 0.65;
+			local readyFuel = math.min(Owner.Jetpack.JetTimeTotal, math.max(Owner.Jetpack.JetTimeTotal * rechargeRatio, AI.minBurstTime * 2, Owner.Jetpack.JetTimeTotal * Owner.Jetpack.MinimumFuelRatio));
+			if Owner.Jetpack.JetTimeLeft >= readyFuel or (AI.flying and Owner.Vel.Y > 3 and Owner.Jetpack.JetTimeLeft > AI.minBurstTime * 2) then
 				AI.refuel = false;
 			elseif not AI.flying then
 				AI.jump = false;
-				AI.lateralMoveState = Actor.LAT_STILL;
+				StuckTimer:Reset(); -- recharge must not trigger random dislodging
 			end
-		elseif UpdatePathTimer:IsPastSimTimeLimit() then
+		end
+
+		-- Recharging suppresses takeoff, but must still allow walking and route updates.
+		if UpdatePathTimer:IsPastSimTimeLimit() then
 			UpdatePathTimer:Reset();
 
 			AI.deviceState = AHuman.STILL;
@@ -849,24 +899,8 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 											-- are we also flying
 											if AI.flying and Owner.Jetpack.JetpackType == AEJetpack.Standard then
 												-- predict jetpack movement when jumping and there is a target (check one direction)
-												local jetStrength = AI.jetImpulseFactor / Owner.Mass;
-												local t = math.min(0.4, Owner.Jetpack.JetTimeLeft*0.001);
-												local PixelVel = Owner.Vel * (GetPPM() * t);
-												local Accel = SceneMan.GlobalAcc * GetPPM();
-
-												-- a burst use 10x more fuel
-												if Owner.Jetpack:CanTriggerBurst() then
-													t = math.max(math.min(0.4, Owner.Jetpack.JetTimeLeft*0.001-TimerMan.AIDeltaTimeSecs*10), TimerMan.AIDeltaTimeSecs);
-												end
-
-												-- test jumping
-												local JetAccel = Accel + Vector(-jetStrength, 0):RadRotate(Owner.RotAngle+1.375*math.pi+Owner:GetAimAngle(false)*0.25);
-												local JumpPos = (Owner.Head and Owner.Head.Pos or Owner.Pos) + PixelVel + JetAccel * (t*t*0.5);
-
-												-- a burst add a one time boost to acceleration
-												if Owner.Jetpack:CanTriggerBurst() then
-													JumpPos = JumpPos + Vector(-AI.jetBurstFactor, 0):AbsRotateTo(JetAccel);
-												end
+												local origin = Owner.Head.Pos;
+												local JumpPos, FallPos = SharedBehaviors.PredictJetPosition(AI, Owner, origin, Owner:GetAimAngle(false), Owner.HFlipped, nextLatMove);
 
 												-- check for obstacles from the head
 												Trace = SceneMan:ShortestDistance((Owner.Head and Owner.Head.Pos or Owner.Pos), JumpPos, false);
@@ -876,9 +910,6 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 												else -- the ray hit terrain or start inside terrain: avoid
 													jumpScore = SceneMan:ShortestDistance(Waypoint.Pos, JumpPos, false).Largest * 2;
 												end
-
-												-- test falling
-												local FallPos = (Owner.Head and Owner.Head.Pos or Owner.Pos) + PixelVel + Accel * (t*t*0.5);
 
 												-- check for obstacles when falling/walking
 												local Trace = SceneMan:ShortestDistance((Owner.Head and Owner.Head.Pos or Owner.Pos), FallPos, false);
@@ -908,36 +939,28 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 												end
 											end
 
-											-- predict jetpack movement...
-											local jetStrength = (AI.jetImpulseFactor / Owner.Mass);
-											local t = math.min(0.4, Owner.Jetpack.JetTimeLeft*0.001);
-											local PixelVel = Owner.Vel * (GetPPM() * t);
-											local Accel = SceneMan.GlobalAcc * GetPPM();
-
-											-- a burst use 10x more fuel
-											if Owner.Jetpack:CanTriggerBurst() then
-												t = math.max(math.min(0.4, Owner.Jetpack.JetTimeLeft*0.001-TimerMan.AIDeltaTimeSecs*10), TimerMan.AIDeltaTimeSecs);
-											end
-
-											-- when jumping (check four directions)
-											for k, Face in pairs(Facings) do
-												local JetAccel = Vector(-jetStrength, 0):RadRotate(Owner.RotAngle+1.375*math.pi+Face.facing*0.25);
-												local JumpPos = Owner.Pos + PixelVel + (Accel + JetAccel) * (t*t*0.5);
-
-												-- a burst add a one time boost to acceleration
-												if Owner.Jetpack:CanTriggerBurst() then
-													JumpPos = JumpPos + Vector(-AI.jetBurstFactor, 0):AbsRotateTo(JetAccel);
-												end
-
-												-- check for obstacles from the head
-												Trace = SceneMan:ShortestDistance(Owner.Pos, JumpPos, false);
-												Facings[k].range = SceneMan:ShortestDistance(Waypoint.Pos, JumpPos, false).Magnitude;
-											end
-
-											-- when falling or walking
-											local FallPos = Owner.Pos + PixelVel;
+											-- Predict the aim that will actually be applied, then test head clearance.
+											local FallPos;
+											local desiredVelocityX = 0;
 											if AI.flying then
-												FallPos = FallPos + Accel * (t*t*0.5);
+												local direction = SharedBehaviors.GetJetDirection(Owner, 0, false, Actor.LAT_RIGHT);
+												local acceleration = math.abs(direction.X * AI.jetImpulseFactor / math.max(Owner.Mass, 0.1)) / GetPPM();
+												local speed = math.min(6, math.sqrt(2 * acceleration * math.abs(CurrDist.X) / GetPPM()));
+												desiredVelocityX = CurrDist.X < 0 and -speed or speed;
+											end
+											local headOffset = Owner.Head and SceneMan:ShortestDistance(Owner.Pos, Owner.Head.Pos, false) or Vector();
+											for k, Face in pairs(Facings) do
+												Face.nextAim = Owner:GetAimAngle(false) * 0.5 + Face.aim * 0.5;
+												local move = Face.flipped and Actor.LAT_LEFT or Actor.LAT_RIGHT;
+												local JumpPos, time, velocity;
+												JumpPos, FallPos, time, velocity = SharedBehaviors.PredictJetPosition(AI, Owner, Owner.Pos, Face.nextAim, Face.flipped, move);
+												local origin = Owner.Pos + headOffset;
+												local hit = Vector();
+												local blocked = SceneMan:CastObstacleRay(origin, JumpPos - Owner.Pos, hit, Vector(), Owner.ID, Owner.IgnoresWhichTeam, rte.grassID, 3) >= 0;
+												Face.range = SceneMan:ShortestDistance(Waypoint.Pos, JumpPos, false).Magnitude + (blocked and Owner.Height or 0);
+												if AI.flying then
+													Face.range = Face.range + math.abs(velocity.X - desiredVelocityX) * GetPPM() * 0.6;
+												end
 											end
 
 											-- check for obstacles when falling/walking
@@ -950,21 +973,18 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 											end
 
 											table.sort(Facings, function(A, B) return A.range < B.range end);
-											local delta = SceneMan:ShortestDistance(Waypoint.Pos, FallPos, false).Magnitude - Facings[1].range;
-											if delta < 1 then
+											local fallScore = SceneMan:ShortestDistance(Waypoint.Pos, FallPos, false).Magnitude;
+											if AI.flying then
+												fallScore = fallScore + math.abs(Owner.Vel.X - desiredVelocityX) * GetPPM() * 0.6;
+											end
+											local delta = fallScore - Facings[1].range;
+											local stopThreshold = AI.jump and AI.flying and Owner.Jetpack.JetpackType == AEJetpack.Standard and -2 or 1;
+											if delta < stopThreshold then
 												AI.jump = false;
 											elseif delta > deltaToJump or (AI.flying and Owner.Jetpack.JetpackType == AEJetpack.Standard) then
 												AI.jump = true;
-												nextAimAngle = Owner:GetAimAngle(false) * 0.5 + Facings[1].aim * 0.5; -- adjust jetpack nozzle direction
-												nextLatMove = Actor.LAT_STILL;
-
-												if Facings[1].facing > 1.4 then
-													if not Owner.HFlipped then
-														nextLatMove = Actor.LAT_LEFT;
-													end
-												elseif Owner.HFlipped then
-													nextLatMove = Actor.LAT_RIGHT;
-												end
+												nextAimAngle = Facings[1].nextAim;
+												nextLatMove = Facings[1].flipped and Actor.LAT_LEFT or Actor.LAT_RIGHT;
 											end
 										end
 									end
@@ -1009,6 +1029,22 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 		end
 
 		-- movement commands
+		if Waypoint and Owner.Jetpack and digState == AHuman.NOTDIGGING then
+			if not AI.flying and not Lower(Owner, Waypoint, Owner.Height * 0.5) then
+				local step = Vector(CurrDist and CurrDist.X or 0, 0):CapMagnitude(Owner.Height * 0.5);
+				if not SceneMan:CastStrengthRay(Owner.Pos, step, 5, Vector(), 2, rte.grassID, true) then
+					AI.jump = false; -- body clearance above flat ground is not a climb
+				end
+			elseif AI.flying and Lower(Waypoint, Owner, Owner.Height * 0.25) and Owner.Vel.Y < 0 then
+				AI.jump = false; -- let an ascending actor return to a lower destination
+			end
+			if Waypoint.Type == "last" and not AI.flying and CurrDist and CurrDist.Magnitude < Owner.Height * 2 then
+				AI.Ctrl:SetState(Controller.MOVE_FAST, false);
+			end
+		end
+		if AI.refuel and not AI.flying then
+			AI.jump = false;
+		end
 		if (AI.Target and AI.BehaviorName ~= "AttackTarget" and not AI.PickupHD) or (Owner.AIMode ~= Actor.AIMODE_SQUAD and (AI.BehaviorName == "ShootArea" or AI.BehaviorName == "FaceAlarm")) then
 			if Owner.aggressive then	-- the aggressive behavior setting makes the AI pursue waypoint at all times
 				AI.lateralMoveState = nextLatMove;

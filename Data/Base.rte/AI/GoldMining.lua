@@ -53,7 +53,8 @@ function GoldMining.Dig(AI, Owner, Abort)
 				local heading = SceneMan:ShortestDistance(Owner.Pos, target, true);
 				-- Excavate a direct tunnel through terrain our tool can remove. Use pathfinding
 				-- to navigate open terrain and go around obstacles stronger than the digger.
-				excavate = heading.Y >= -Owner.Height * 0.5 and SceneMan:CastStrengthRay(Owner.Pos, heading, 1, Vector(), 3, rte.doorID, true) and
+				-- Finish nearby ceiling remnants without routing back around a newly opened tunnel.
+				excavate = heading.Y >= -Owner.Height * 2 and SceneMan:CastStrengthRay(Owner.Pos, heading, 1, Vector(), 3, rte.doorID, true) and
 					not SceneMan:CastStrengthRay(Owner.Pos, heading, Owner.DigStrength + 1, Vector(), 3, rte.doorID, true);
 			end
 			resurvey = false;

@@ -65,6 +65,11 @@ owner, ai = miner();
 co = coroutine.create(HumanBehaviors.GoldDig);
 fixture.resume(co, ai, owner);
 assert(ai.NextGoTo ~= nil, "high targets bypassed jetpack navigation");
+target = Vector(500, 450);
+owner, ai = miner();
+co = coroutine.create(HumanBehaviors.GoldDig);
+fixture.resume(co, ai, owner);
+assert(ai.fire and ai.NextGoTo == nil, "a nearby ceiling remnant sends the miner into another route instead of excavation");
 function SceneMan:CastNotMaterialRay() return -1; end
 function SceneMan:CastStrengthRay() return false; end
 print("PASS: direct excavation and repositioning for close gold remnants");

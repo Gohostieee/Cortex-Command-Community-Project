@@ -62,7 +62,6 @@ function NativeCrabAI:Update(Owner)
 	-- Our jetpack might have thrust balancing enabled, so update for our current mass
 	if Owner.Jetpack then		
 		self.jetImpulseFactor = Owner.Jetpack:EstimateImpulse(false) * GetPPM() / TimerMan.DeltaTimeSecs;
-		self.jetBurstFactor = (Owner.Jetpack:EstimateImpulse(true) * GetPPM() / TimerMan.DeltaTimeSecs - self.jetImpulseFactor) * math.pow(TimerMan.DeltaTimeSecs, 2) * 0.5;
 	end
 
 	if self.isPlayerOwned then
@@ -346,7 +345,7 @@ function NativeCrabAI:Update(Owner)
 		if self.jumpState == ACrab.PREJUMP then
 			self.jumpState = ACrab.UPJUMP;
 		elseif self.jumpState ~= ACrab.UPJUMP then	-- the jetpack is off
-			self.jumpState = ACrab.PREJUMP;
+			self.jumpState = self.flying and Owner.Jetpack.JetpackType == AEJetpack.Standard and self.deviceState ~= AHuman.DIGGING and ACrab.UPJUMP or ACrab.PREJUMP;
 		end
 	else
 		self.jumpState = ACrab.NOTJUMPING;
