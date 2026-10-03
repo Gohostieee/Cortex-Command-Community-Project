@@ -107,6 +107,8 @@ namespace RTE {
 		/// Gets the scroll offset of this SceneLayer.
 		/// @return A Vector with the scroll offset.
 		Vector GetOffset() const { return m_Offset; }
+		Vector GetOriginOffset() const { return m_OriginOffset; }
+		bool GetDrawMasked() const { return m_DrawMasked; }
 
 		/// Sets the scroll offset of this SceneLayer. Observe that this offset will be modified by the scroll ratio before applied.
 		/// @param newOffset The new offset Vector.

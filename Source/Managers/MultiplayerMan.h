@@ -7,6 +7,8 @@
 #include <span>
 #include <string>
 
+struct BITMAP;
+
 #define g_MultiplayerMan MultiplayerMan::Instance()
 
 namespace RTE {
@@ -31,8 +33,12 @@ public:
 	bool TakeLaunchRequest();
 	int ViewWidth(int screen) const;
 	int ViewHeight(int screen) const;
-	bool WantsFrame(int player) const;
-	void CaptureFrame(int player, unsigned framebuffer, int width, int height, float cameraX, float cameraY);
+	bool WantsState(int player) const;
+	void BeginWorldCapture();
+	void BeginWorldTrails();
+	void EndWorldCapture();
+	void BeginGuestView(BITMAP* gui, float cameraX, float cameraY);
+	void EndGuestView(int player);
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_Impl;

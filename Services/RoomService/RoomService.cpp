@@ -93,9 +93,7 @@ class Service {
   const auto now = Now();
   if (kind == R::Kind::Route) {
    uint8_t destination, delivery;
-   if (connection.Code.empty() || !reader.U8(destination) || destination > 3 || !reader.U8(delivery) || delivery > 3 || reader.Remaining() < 20 || reader.Remaining() > 1400 || (connection.Slot == 0 ? destination == 0 : destination != 0)) { ++Dropped; return; }
-   Reader payload(reader.Rest()); Header header;
-   if (!ReadHeader(payload, header)) { ++Dropped; return; }
+   if (connection.Code.empty() || !reader.U8(destination) || destination > 3 || !reader.U8(delivery) || delivery > 3 || !R::ValidPayload(reader.Rest()) || (connection.Slot == 0 ? destination == 0 : destination != 0)) { ++Dropped; return; }
    auto room = Rooms.find(connection.Code); if (room == Rooms.end()) return;
    const auto& target = room->second.Members[destination].Address;
    if (target.empty()) return;

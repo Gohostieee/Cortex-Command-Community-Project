@@ -105,7 +105,10 @@ std::vector<TransportEvent> Transport::Poll(size_t budget) {
 						if (impl.Ready && reader.U8(slot) && slot <= 3 && (impl.HostRoom ? slot > 0 : slot == 0) && reader.Done()) { const bool up = kind == Relay::Kind::PeerUp; if (impl.Peers[slot] != up) { impl.Peers[slot] = up; events.push_back({up ? TransportEvent::Type::Connected : TransportEvent::Type::Disconnected, Relay::PeerAddress(slot), {}, {}}); } }
 					} else if (kind == Relay::Kind::Route) {
 						uint8_t slot, delivery;
-						if (impl.Ready && reader.U8(slot) && slot <= 3 && impl.Peers[slot] && reader.U8(delivery) && delivery <= 3 && reader.Remaining() <= 1400 && reader.Remaining() >= 20 && reader.Rest()[0] == MP::PacketID) { TransportEvent data{TransportEvent::Type::Data, Relay::PeerAddress(slot), {}, {}}; data.Data.assign(reader.Rest().begin(), reader.Rest().end()); events.push_back(std::move(data)); }
+						if (impl.Ready && reader.U8(slot) && slot <= 3 && impl.Peers[slot] && reader.U8(delivery) && delivery <= 3) {
+							const auto payload = Relay::UnwrapPayload(reader.Rest());
+							if (!payload.empty()) { TransportEvent data{TransportEvent::Type::Data, Relay::PeerAddress(slot), {}, {}}; data.Data.assign(payload.begin(), payload.end()); events.push_back(std::move(data)); }
+						}
 					} else if (kind == Relay::Kind::Error) { std::string message; if (reader.Text(message) && reader.Done()) events.push_back({TransportEvent::Type::Failed, impl.Central, message, {}}); }
 				}
 			} else if (event.Kind == TransportEvent::Type::Disconnected && event.Address == impl.Central) {
@@ -124,11 +127,19 @@ bool Transport::Send(const std::string& address, std::span<const uint8_t> data, 
 	if (!m_Impl->Peer || data.empty() || data.size() > 1400) return false;
 	std::vector<uint8_t> routed;
 	int slot = Relay::PeerSlot(address);
-	if (slot >= 0) { if (!m_Impl->Ready || !m_Impl->Peers[slot]) return false; Relay::Writer w(Relay::Kind::Route); w.U8(static_cast<uint8_t>(slot)); w.U8(static_cast<uint8_t>(delivery)); w.Bytes(data); routed = std::move(w.Data); data = routed; }
+	if (slot >= 0) {
+		if (!m_Impl->Ready || !m_Impl->Peers[slot]) return false;
+		const auto payload = Relay::WrapPayload(data); if (payload.empty()) return false;
+		// The v1 service exposes four lanes. Resources share its reliable audio
+		// lane while direct peers retain a separate resource lane.
+		if (delivery == Delivery::WorldResource) delivery = Delivery::Audio;
+		Relay::Writer w(Relay::Kind::Route); w.U8(static_cast<uint8_t>(slot)); w.U8(static_cast<uint8_t>(delivery)); w.Bytes(payload); routed = std::move(w.Data); data = routed;
+	}
 	PacketReliability reliability = RELIABLE_ORDERED; PacketPriority priority = HIGH_PRIORITY; char channel = 0;
 	if (delivery == Delivery::Input) { reliability = UNRELIABLE_SEQUENCED; priority = IMMEDIATE_PRIORITY; channel = 2; }
-	else if (delivery == Delivery::Frame) { reliability = UNRELIABLE; priority = MEDIUM_PRIORITY; channel = 1; }
+	else if (delivery == Delivery::State) { reliability = UNRELIABLE; priority = MEDIUM_PRIORITY; channel = 1; }
 	else if (delivery == Delivery::Audio) { priority = MEDIUM_PRIORITY; channel = 3; }
+	else if (delivery == Delivery::WorldResource) { priority = MEDIUM_PRIORITY; channel = 4; }
 	if (slot >= 0) channel = delivery == Delivery::Control ? 0 : static_cast<char>(static_cast<int>(delivery) * 4 + slot);
 	return m_Impl->Peer->Send(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()), priority, reliability, channel, ParseAddress(slot >= 0 ? m_Impl->Central : address), false) != 0;
 }

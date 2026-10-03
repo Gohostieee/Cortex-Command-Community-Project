@@ -7,7 +7,7 @@
 #include <vector>
 
 namespace RTE::MP {
-enum class Delivery { Control, Input, Frame, Audio };
+enum class Delivery { Control, Input, State, Audio, WorldResource };
 struct TransportEvent {
 	enum class Type { Connected, Disconnected, Failed, Data, Discovered, RoomCode, ServiceStatus };
 	Type Kind{};

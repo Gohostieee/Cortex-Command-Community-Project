@@ -1,3 +1,4 @@
+#include "MultiplayerWorld.h"
 #include "Arm.h"
 #include "HDFirearm.h"
 #include "ThrownDevice.h"
@@ -358,6 +359,7 @@ void Arm::Draw(BITMAP* targetBitmap, const Vector& targetPos, DrawMode mode, boo
 void Arm::DrawHand(BITMAP* targetBitmap, const Vector& targetPos, DrawMode mode) const {
 	Vector handPos(m_JointPos + m_HandCurrentOffset + (m_Recoiled ? m_RecoilOffset : Vector()) - targetPos);
 	handPos -= Vector(static_cast<float>(m_HandSpriteBitmap->w / 2), static_cast<float>(m_HandSpriteBitmap->h / 2));
+	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_HandSpriteBitmap, handPos + targetPos, Vector(), 0, 1, m_HFlipped, mode == g_DrawWhite);
 
 	if (!m_HFlipped) {
 		if (mode == DrawMode::g_DrawWhite) {

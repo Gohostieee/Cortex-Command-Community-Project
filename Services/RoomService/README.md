@@ -1,6 +1,6 @@
 # Cortex Command room service
 
-Runnable invitation-code broker and UDP relay. A host creates a ten-character code, displayed as `ABCDE-F2345`; guests enter it. Every game socket connects **outward** to this service, so hosts do not forward router ports. The host still runs physics, Lua, and rendering. The service needs no game assets, display, FMOD, or GPU.
+Runnable invitation-code broker and UDP relay. A host creates a ten-character code, displayed as `ABCDE-F2345`; guests enter it. Every game socket connects **outward** to this service, so hosts do not forward router ports. The host runs authoritative physics and Lua; every player renders their own view locally. The service needs no game assets, display, FMOD, or GPU.
 
 ## Run locally
 
@@ -71,10 +71,12 @@ AWS charges for compute, storage, public IPv4, and outgoing traffic. A fully use
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay
 ```
 
-The relay suite covers code normalization/malformed headers, passwords, invalid codes, four-player capacity, simultaneous sequenced inputs, exact reliable payloads, three independent frame streams, guest reconnect, host resume, room isolation, and host closure. All four game transports have incoming connections disabled. To check a deployed endpoint:
+The relay suite covers code normalization/malformed headers, passwords, invalid codes, four-player capacity, simultaneous sequenced inputs, exact reliable retained resources, three independent state streams, guest reconnect, host resume, room isolation, and host closure. All four game transports have incoming connections disabled. To check a deployed endpoint:
 
 ```powershell
 .\build-mp\relay-tests.exe 8001 YOUR-SERVICE-IP
 ```
 
 This creates temporary test rooms, sends actual UDP data, then closes them. The Windows relay suite passed against **54.164.52.173:8001** on 2026-10-02. The packaged Windows game was extracted into a fresh folder and a real host plus three guest processes passed two matches through this public AWS endpoint: both stream sizes, remote controls/GUI text, chat, sound replay/stop, reconnect, and actual OpenGL screenshots. Evidence is in ignored `build-mp/release-verification/` logs. These four game processes ran on one Windows computer and crossed the public internet to AWS; players on separate computers/networks remain a separate acceptance check. The fork's GitHub Linux check was blocked before execution by an account billing lock; the native Linux tests instead ran successfully on EC2.
+
+On 2026-10-03, the native local guest renderer passed this public relay with 640 × 360, 1280 × 720, and 1920 × 1080 guests. The four real game processes exercised two matches, all controls, GUI input, changing terrain, audio replay/stop, chat, every slot reconnecting, and lobby return with deliberate snapshot loss. Steady 1080p rendering measured approximately 70–78 FPS independently of roughly 16–18 state updates per second. The existing service stayed online; the new gameplay protocol uses the stable opaque transport carrier. Evidence is in ignored `build-mp/native-rendering-verification/wan/` logs.

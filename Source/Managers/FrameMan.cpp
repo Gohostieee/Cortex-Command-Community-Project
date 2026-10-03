@@ -1,5 +1,6 @@
 #include "FrameMan.h"
 #include "MultiplayerMan.h"
+#include "MultiplayerWorld.h"
 
 #include "SDL3/SDL_surface.h"
 #include "WindowMan.h"
@@ -64,7 +65,6 @@ FrameMan::~FrameMan() {
 }
 
 void FrameMan::Clear() {
-	m_RemoteScreens.fill(nullptr);
 	m_RemoteScreenGUIs.fill(nullptr);
 	m_HSplit = false;
 	m_VSplit = false;
@@ -847,16 +847,30 @@ void FrameMan::Draw() {
 
 		const int networkPlayer = networkHost && pActivity ? pActivity->PlayerOfScreen(playerScreen) : -1;
 		const bool remoteScreen = networkHost && playerScreen > 0 && networkPlayer > 0;
-		if (remoteScreen && !g_MultiplayerMan.WantsFrame(networkPlayer)) { g_CameraMan.Update(playerScreen); g_SceneMan.Update(playerScreen); continue; }
+		if (remoteScreen && !g_MultiplayerMan.WantsState(networkPlayer)) { g_CameraMan.Update(playerScreen); g_SceneMan.Update(playerScreen); continue; }
 		std::shared_ptr<RenderTarget> screenTarget = networkHost ? m_BackBuffer : m_PlayerScreen;
 		BITMAP* networkGUI = m_BackBuffer8.get();
 		if (remoteScreen) {
 			const int width = g_MultiplayerMan.ViewWidth(playerScreen), height = g_MultiplayerMan.ViewHeight(playerScreen);
-			if (!m_RemoteScreens[playerScreen] || m_RemoteScreens[playerScreen]->GetSize().w != width || m_RemoteScreens[playerScreen]->GetSize().h != height) {
-				m_RemoteScreens[playerScreen] = std::make_shared<RenderTarget>(FloatRect(0, 0, width, height), FloatRect(0, 0, width, height));
+			if (!m_RemoteScreenGUIs[playerScreen] || m_RemoteScreenGUIs[playerScreen]->w != width || m_RemoteScreenGUIs[playerScreen]->h != height) {
 				m_RemoteScreenGUIs[playerScreen] = std::shared_ptr<BITMAP>(create_bitmap_ex(8, width, height), BitmapDeleter());
 			}
-			screenTarget = m_RemoteScreens[playerScreen]; networkGUI = m_RemoteScreenGUIs[playerScreen].get();
+			networkGUI = m_RemoteScreenGUIs[playerScreen].get();
+		}
+		if (remoteScreen) {
+			// Publish native scene/UI state. No guest battlefield is rendered or
+			// read back on the host; each guest composes its retained world.
+			g_CameraMan.Update(playerScreen); g_SceneMan.Update(playerScreen);
+			Vector camera = g_CameraMan.GetOffset(playerScreen);
+			if (!g_SceneMan.SceneWrapsX() && networkGUI->w > g_SceneMan.GetSceneWidth()) camera.m_X += (networkGUI->w - g_SceneMan.GetSceneWidth()) / 2;
+			if (!g_SceneMan.SceneWrapsY() && networkGUI->h > g_SceneMan.GetSceneHeight()) camera.m_Y += (networkGUI->h - g_SceneMan.GetSceneHeight()) / 2;
+			g_MultiplayerMan.BeginGuestView(networkGUI, camera.GetX(), camera.GetY());
+			if (!IsHudDisabled(playerScreen)) { g_MovableMan.DrawHUD(networkGUI, camera, playerScreen); g_ActivityMan.GetActivity()->DrawGUI(networkGUI, camera, playerScreen); }
+			g_PrimitiveMan.DrawPrimitives(playerScreen, networkGUI, camera);
+			DrawScreenText(playerScreen, AllegroBitmap(networkGUI));
+			DrawScreenFlash(playerScreen, networkGUI);
+			g_MultiplayerMan.EndGuestView(networkPlayer);
+			continue;
 		}
 		screenTarget->Begin(true, 1.0f);
 		backgroundShader.Begin();
@@ -917,16 +931,7 @@ void FrameMan::Draw() {
 		DrawScreenFlash(playerScreen, drawScreenGUI);
 
 		// Draw the intermediate draw splitscreen to the appropriate spot on the back buffer
-		if (remoteScreen) {
-			g_GLResourceMan.UpdateDynamicBitmap(drawScreenGUI, true);
-			rlZDepth(c_GuiDepth - 1.0f);
-			DrawTexture(g_GLResourceMan.GetStaticTextureFromBitmap(drawScreenGUI), 0, 0, {255, 255, 255, 255});
-			rlDrawRenderBatchActive();
-			backgroundShader.End();
-			g_PostProcessMan.DrawViewEffects(screenRelativeEffects, drawScreen->w, drawScreen->h);
-			g_MultiplayerMan.CaptureFrame(networkPlayer, screenTarget->GetFramebuffer(), drawScreen->w, drawScreen->h, targetPos.GetX(), targetPos.GetY());
-			rlZDepth(0);
-		} else blit(drawScreen, m_BackBuffer8.get(), 0, 0, screenOffset.GetFloorIntX(), screenOffset.GetFloorIntY(), drawScreen->w, drawScreen->h);
+		blit(drawScreen, m_BackBuffer8.get(), 0, 0, screenOffset.GetFloorIntX(), screenOffset.GetFloorIntY(), drawScreen->w, drawScreen->h);
 		screenTarget->End();
 		backgroundShader.End();
 		if (screenCount > 1 && !networkHost) {
@@ -1028,6 +1033,7 @@ void FrameMan::DrawScreenFlash(int playerScreen, BITMAP* playerGUIBitmap) {
 			if (m_FlashedLastFrame[playerScreen]) {
 				m_FlashedLastFrame[playerScreen] = false;
 			} else {
+				if (!MultiplayerWorld::Flash(playerGUIBitmap->w, playerGUIBitmap->h, uint8_t(m_FlashScreenColor[playerScreen]))) {
 				rlZDepth(c_GuiDepth);
 				rlBegin(RL_QUADS);
 
@@ -1061,6 +1067,7 @@ void FrameMan::DrawScreenFlash(int playerScreen, BITMAP* playerGUIBitmap) {
 
 				rlEnd();
 				rlZDepth(c_DefaultDrawDepth);
+				}
 				m_FlashedLastFrame[playerScreen] = true;
 			}
 		}

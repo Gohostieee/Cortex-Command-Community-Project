@@ -1,4 +1,5 @@
 #include "Atom.h"
+#include "MultiplayerWorld.h"
 
 #include "SLTerrain.h"
 #include "MovableMan.h"
@@ -1046,6 +1047,7 @@ int Atom::Travel(float travelTime, bool autoTravel) {
 		Vector bottomRightExtent = topLeftExtent + Vector(1.0F, 1.0F);
 
 		int length = static_cast<int>(static_cast<float>(m_TrailLength) * RandomNum(1.0F - m_TrailLengthVariation, 1.0F));
+		MultiplayerWorld::Trail(std::span(trailPoints).last(std::min<size_t>(std::max(0, length), trailPoints.size())), uint8_t(m_TrailColor.GetIndex()));
 		for (size_t i = trailPoints.size() - std::min(length, static_cast<int>(trailPoints.size())); i < trailPoints.size(); ++i) {
 			putpixel(trailBitmap, trailPoints[i].first, trailPoints[i].second, m_TrailColor.GetIndex());
 

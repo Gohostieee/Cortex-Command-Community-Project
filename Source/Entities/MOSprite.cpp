@@ -1,3 +1,4 @@
+#include "MultiplayerWorld.h"
 #include "MOSprite.h"
 
 #include "AEmitter.h"
@@ -511,6 +512,7 @@ void MOSprite::Draw(BITMAP* pTargetBitmap,
 
 	Vector spritePos(m_Pos + spriteOffset - targetPos);
 
+	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_aSprite[m_Frame], spritePos + targetPos, Vector(), 0, 1, m_HFlipped, mode == g_DrawWhite, mode == g_DrawTrans ? g_FrameMan.GetCurrentAlpha() : 255);
 	// Take care of wrapping situations
 	Vector aDrawPos[4];
 	aDrawPos[0] = spritePos;

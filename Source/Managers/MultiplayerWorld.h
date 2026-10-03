@@ -1,0 +1,52 @@
+#pragma once
+#include "MultiplayerWorldProtocol.h"
+#include "Vector.h"
+#include "raylib/raylib.h"
+#include <memory>
+
+struct BITMAP;
+namespace RTE {
+class MovableObject;
+class SceneLayer;
+class GraphicalPrimitive;
+
+// Passive native presentation replicas. Gameplay objects and scripts stay on
+// the host; guests own retained resources and render state, not actor clones.
+class MultiplayerWorld {
+public:
+    MultiplayerWorld();
+    ~MultiplayerWorld();
+    void Reset();
+    void ResetPresentation();
+    void BeginObjects();
+    void BeginTrails();
+    void EndObjects();
+    void BeginView(BITMAP* gui, const Vector& camera);
+    MP::World::Snapshot EndView(int player, uint32_t id, uint32_t inputSequence, uint64_t time);
+    const MP::World::Resource* FindResource(uint64_t id) const;
+    bool Install(MP::World::Resource resource);
+    bool Install(MP::World::Snapshot snapshot, uint64_t time);
+    std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
+    unsigned Render(uint64_t time);
+    bool Ready() const;
+    bool IsDeploying() const;
+    int Width() const;
+    int Height() const;
+    uint64_t Rendered() const;
+    uint64_t Updates() const;
+    uint64_t IntermediateFrames() const;
+    static void Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& position, const Vector& pivot, float angle, float scale, bool flip, bool white = false, uint8_t alpha = 255);
+    static void Pixel(const MovableObject& owner, const Vector& position, uint8_t color);
+    static void Trail(std::span<const std::pair<int, int>> positions, uint8_t color);
+    static bool Flash(int width, int height, uint8_t color);
+    static void BeginHUD(const MovableObject& owner);
+    static void EndHUD();
+    // Native GPU/GUI adapters use the same semantic sprite representation.
+    static bool CanvasSprite(BITMAP* bitmap, Rectangle source, Rectangle dest, Vector2 pivot, float angle, RLColor tint, BITMAP* target = nullptr);
+    static bool Primitive(const GraphicalPrimitive& primitive, const Vector& offset);
+    static void EndPrimitive();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_Impl;
+};
+}

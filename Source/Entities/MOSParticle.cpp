@@ -1,4 +1,5 @@
 #include "MOSParticle.h"
+#include "MultiplayerWorld.h"
 
 #include "Atom.h"
 #include "PostProcessMan.h"
@@ -160,6 +161,7 @@ void MOSParticle::Draw(BITMAP* targetBitmap, const Vector& targetPos, DrawMode m
 	}
 
 	Vector spritePos(m_Pos + m_SpriteOffset - targetPos);
+	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_aSprite[m_Frame], spritePos + targetPos, Vector(), 0, 1, false, mode == g_DrawWhite, mode == g_DrawTrans ? g_FrameMan.GetCurrentAlpha() : 255);
 
 	// TODO I think this is an array with 4 elements to account for Y wrapping. Y wrapping is not really handled in this game, so this can probably be knocked down to 2 elements. Also, I'm sure this code can be simplified.
 	std::array<Vector, 4> drawPositions = {spritePos};

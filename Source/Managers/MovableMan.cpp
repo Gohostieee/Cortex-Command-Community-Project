@@ -1,3 +1,5 @@
+#include "MultiplayerMan.h"
+#include "MultiplayerWorld.h"
 #include "MovableMan.h"
 
 #include "PrimitiveMan.h"
@@ -1268,6 +1270,7 @@ void MovableMan::ReloadLuaScripts() {
 
 void MovableMan::Update() {
 	ZoneScoped;
+	if (g_TimerMan.DrawnSimUpdate()) g_MultiplayerMan.BeginWorldTrails();
 
 	// Don't update if paused
 	if (g_ActivityMan.GetActivity() && g_ActivityMan.ActivityPaused()) {
@@ -1916,6 +1919,7 @@ void MovableMan::CompleteQueuedMOIDDrawings() {
 
 void MovableMan::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 	ZoneScoped;
+	g_MultiplayerMan.BeginWorldCapture();
 
 	// Draw objects to accumulation bitmap, in reverse order so actors appear on top.
 
@@ -1942,15 +1946,22 @@ void MovableMan::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 			(*aIt)->Draw(pTargetBitmap, targetPos);
 		}
 	}
+	g_MultiplayerMan.EndWorldCapture();
 }
 
 void MovableMan::DrawHUD(BITMAP* pTargetBitmap, const Vector& targetPos, int which, bool playerControlled) {
 	ZoneScoped;
 
 	// Draw HUD elements
-	for (std::deque<MovableObject*>::reverse_iterator itmIt = m_Items.rbegin(); itmIt != m_Items.rend(); ++itmIt)
+	for (std::deque<MovableObject*>::reverse_iterator itmIt = m_Items.rbegin(); itmIt != m_Items.rend(); ++itmIt) {
+		MultiplayerWorld::BeginHUD(**itmIt);
 		(*itmIt)->DrawHUD(pTargetBitmap, targetPos, which);
+		MultiplayerWorld::EndHUD();
+	}
 
-	for (std::deque<Actor*>::reverse_iterator aIt = m_Actors.rbegin(); aIt != m_Actors.rend(); ++aIt)
+	for (std::deque<Actor*>::reverse_iterator aIt = m_Actors.rbegin(); aIt != m_Actors.rend(); ++aIt) {
+		MultiplayerWorld::BeginHUD(**aIt);
 		(*aIt)->DrawHUD(pTargetBitmap, targetPos, which);
+		MultiplayerWorld::EndHUD();
+	}
 }

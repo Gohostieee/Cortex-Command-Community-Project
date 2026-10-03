@@ -11,6 +11,7 @@ sources += files(
 'MetaMan.cpp',
 'MovableMan.cpp',
 'MultiplayerMan.cpp',
+'MultiplayerWorld.cpp',
 'MusicMan.cpp',
 #'NetworkClient.cpp',
 #'NetworkServer.cpp',

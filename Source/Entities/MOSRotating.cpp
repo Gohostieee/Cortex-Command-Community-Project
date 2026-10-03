@@ -1,3 +1,4 @@
+#include "MultiplayerWorld.h"
 #include "MOSRotating.h"
 
 #include "CameraMan.h"
@@ -1642,6 +1643,7 @@ void MOSRotating::Draw(BITMAP* pTargetBitmap, const Vector& targetPos, DrawMode 
 	if (m_Recoiled) {
 		spritePos += m_RecoilOffset;
 	}
+	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_aSprite[m_Frame], spritePos + targetPos, m_HFlipped ? Vector(m_aSprite[m_Frame]->w + m_SpriteOffset.GetX(), -m_SpriteOffset.GetY()) : -m_SpriteOffset, m_Rotation.GetRadAngle(), m_Scale, m_HFlipped, mode == g_DrawWhite, mode == g_DrawTrans ? g_FrameMan.GetCurrentAlpha() : 255);
 
 	// If we're drawing a material silhouette, then create an intermediate material bitmap as well
 	bool intermediateBitmapUsed = mode != g_DrawColor && mode != g_DrawTrans && mode != g_DrawMOID;

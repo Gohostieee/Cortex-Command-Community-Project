@@ -1,4 +1,5 @@
 #include "GraphicalPrimitive.h"
+#include "MultiplayerWorld.h"
 #include "Matrix.h"
 #include "FrameMan.h"
 #include "SceneMan.h"
@@ -57,7 +58,8 @@ void GraphicalPrimitive::DrawTiled(BITMAP* drawScreen, const Vector& targetPos) 
 
 		for (int tiledOffsetY = 0; tiledOffsetY < areaToCoverY;) {
 			float destY = tiledOffsetY - tiledTarget.m_Y;
-			Draw(drawScreen, Vector(destX, destY));
+			if (!MultiplayerWorld::Primitive(*this, Vector(destX, destY))) Draw(drawScreen, Vector(destX, destY));
+			MultiplayerWorld::EndPrimitive();
 			if (!g_SceneMan.SceneWrapsY()) {
 				break;
 			}

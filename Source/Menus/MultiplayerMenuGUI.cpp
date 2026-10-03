@@ -133,11 +133,11 @@ void MultiplayerMenuGUI::Build(const View& view) {
 			if (m_Tab == Tab::Host) {
 				Field("Room", 16, 158, w - 32, "Room name", view.Room, 63);
 				Label("HostHelp", 16, 214, w - 32, 22, "Create a lobby, invite your friends, then choose the battlefield together.", true);
-				Add("StreamSettings", "BUTTON", 16, std::min(264, h - 93), 176, 22, "Stream settings");
+				Add("HostConnectionSettings", "BUTTON", 16, std::min(264, h - 93), 176, 22, "Connection settings");
 				Add("Create", "BUTTON", w - 184, h - 32, 168, 22, "Create lobby");
 			} else if (m_Tab == Tab::Rules) {
-				Label("StreamTitle", 16, 155, w - 32, 16, "HOST STREAM SETTINGS", true);
-				Combo("Quality", 16, 180, w - 32, {"640 x 360 - smoother play", "960 x 540 - sharper image"}, view.Quality);
+				Label("HostConnectionTitle", 16, 155, w - 32, 16, "HOST CONNECTION SETTINGS", true);
+				Label("ResolutionInfo", 16, 180, w - 32, 22, "Each guest draws at their own game resolution.", true);
 				Field("Bandwidth", 16, 214, half, "Upload per guest (6-48 Mbps)", std::to_string(view.Bandwidth), 2);
 				Field("Port", 32 + half, 214, half, "Direct connection port", std::to_string(view.Port), 5);
 				Add("HostDone", "BUTTON", w - 184, h - 32, 168, 22, "Done");
@@ -327,8 +327,8 @@ std::vector<MultiplayerMenuGUI::Event> MultiplayerMenuGUI::Update(const View& vi
 		const auto& name = control->GetName();
 		if (event.GetType() == GUIEvent::Command) {
 			g_GUISound.ButtonPressSound()->Play();
-			if (name == "JoinTab" || name == "HostTab" || name == "HostDone" || name == "ConnectionTab" || name == "StreamSettings" || name == "RulesTab" || name == "FactionsTab" || name == "ChatTab" || name == "MatchTab") {
-				m_Tab = name == "HostTab" || name == "HostDone" ? Tab::Host : name == "ConnectionTab" ? Tab::Connection : name == "RulesTab" || name == "StreamSettings" ? Tab::Rules : name == "FactionsTab" ? Tab::Factions : name == "ChatTab" ? Tab::Chat : Tab::Join; m_Rebuild = true;
+			if (name == "JoinTab" || name == "HostTab" || name == "HostDone" || name == "ConnectionTab" || name == "HostConnectionSettings" || name == "RulesTab" || name == "FactionsTab" || name == "ChatTab" || name == "MatchTab") {
+				m_Tab = name == "HostTab" || name == "HostDone" ? Tab::Host : name == "ConnectionTab" ? Tab::Connection : name == "RulesTab" || name == "HostConnectionSettings" ? Tab::Rules : name == "FactionsTab" ? Tab::Factions : name == "ChatTab" ? Tab::Chat : Tab::Join; m_Rebuild = true;
 			} else if (name == "Leave") { m_ConfirmLeave = m_Rebuild = true; }
 			else if (name == "KeepRoom") { m_ConfirmLeave = false; m_Rebuild = true; }
 			else { std::string text; if (name == "Send") if (auto* chat = dynamic_cast<GUITextBox*>(m_Manager->GetControl("Chat"))) { text = chat->GetText(); chat->SetText(""); } result.push_back({name, text}); }
@@ -348,7 +348,7 @@ std::vector<MultiplayerMenuGUI::Event> MultiplayerMenuGUI::Update(const View& vi
 void MultiplayerMenuGUI::Draw(const View& view) {
 	Prepare(view);
 	// Native Allegro controls draw into a transparent CPU bitmap; upload that layer
-	// above streamed gameplay so guests receive the same menus as the host.
+	// above locally rendered gameplay so guests receive the same native menus.
 	clear_to_color(m_MenuBitmap->GetBitmap(), 0);
 	m_Manager->Draw(); m_Manager->SetCursor(GUIControlManager::Pointer);
 	std::array<int, 24 * 24> before{}, after{};
@@ -388,6 +388,6 @@ std::string MultiplayerMenuGUI::VerifyLayout() const {
 		const auto& [a, ax, ay, aw, ah] = interactive[i]; const auto& [b, bx, by, bw, bh] = interactive[j];
 		if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) return "Overlapping controls: " + a + " / " + b;
 	}
-	const char* expected = m_ConfirmLeave ? "ConfirmLeave" : m_Page == Screen::Entry ? m_Tab == Tab::Host ? "Create" : m_Tab == Tab::Connection ? "SaveService" : m_Tab == Tab::Rules ? "Quality" : "Join" : m_Page == Screen::Lobby ? m_Tab == Tab::Rules ? "Gold" : m_Tab == Tab::Factions ? "FactionsTitle" : m_Tab == Tab::Chat ? "ChatLog" : "Activity" : m_Page == Screen::Session ? m_Tab == Tab::Chat ? "ChatLog" : "Resume" : "ConnectTitle";
+	const char* expected = m_ConfirmLeave ? "ConfirmLeave" : m_Page == Screen::Entry ? m_Tab == Tab::Host ? "Create" : m_Tab == Tab::Connection ? "SaveService" : m_Tab == Tab::Rules ? "ResolutionInfo" : "Join" : m_Page == Screen::Lobby ? m_Tab == Tab::Rules ? "Gold" : m_Tab == Tab::Factions ? "FactionsTitle" : m_Tab == Tab::Chat ? "ChatLog" : "Activity" : m_Page == Screen::Session ? m_Tab == Tab::Chat ? "ChatLog" : "Resume" : "ConnectTitle";
 	return m_Manager->GetControl(expected) ? "" : "Expected page missing: " + std::string(expected);
 }

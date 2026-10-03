@@ -838,6 +838,8 @@
     <ClInclude Include="Source\Managers\AchievementMan.h" />
     <ClInclude Include="Source\Managers\ActivityMan.h" />
     <ClInclude Include="Source\Managers\MultiplayerMan.h" />
+    <ClInclude Include="Source\Managers\MultiplayerWorld.h" />
+    <ClInclude Include="Source\System\MultiplayerWorldProtocol.h" />
     <ClInclude Include="Source\System\MultiplayerProtocol.h" />
     <ClInclude Include="Source\System\MultiplayerRelay.h" />
     <ClInclude Include="Source\System\MultiplayerInput.h" />
@@ -1375,6 +1377,7 @@
     <ClCompile Include="Source\Managers\AchievementMan.cpp" />
     <ClCompile Include="Source\Managers\ActivityMan.cpp" />
     <ClCompile Include="Source\Managers\MultiplayerMan.cpp" />
+    <ClCompile Include="Source\Managers\MultiplayerWorld.cpp" />
     <ClCompile Include="Source\System\MultiplayerTransport.cpp" />
     <ClCompile Include="Source\Managers\AudioMan.cpp" />
     <ClCompile Include="Source\Managers\ConsoleMan.cpp" />

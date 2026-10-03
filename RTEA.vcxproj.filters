@@ -1319,4 +1319,15 @@
       <Filter>System</Filter>
     </ClCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Managers\MultiplayerWorld.h">
+      <Filter>Managers</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\System\MultiplayerWorldProtocol.h">
+      <Filter>System</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\Managers\MultiplayerWorld.cpp">
+      <Filter>Managers</Filter>
+    </ClCompile>
+  </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 #include "GUI.h"
 #include "AllegroBitmap.h"
 #include "RTEError.h"
+#include "MultiplayerWorld.h"
 
 using namespace RTE;
 
@@ -137,7 +138,7 @@ void AllegroBitmap::DrawTransScaled(GUIBitmap* destBitmap, int destX, int destY,
 	}
 	RTEAssert(destBitmap && dynamic_cast<AllegroBitmap*>(destBitmap)->GetBitmap(), "Null destination bitmap passed when trying to draw AllegroBitmap");
 
-	stretch_sprite(dynamic_cast<AllegroBitmap*>(destBitmap)->GetBitmap(), m_Bitmap, destX, destY, width, height);
+	if (!MultiplayerWorld::CanvasSprite(m_Bitmap, {0, 0, float(m_Bitmap->w), float(m_Bitmap->h)}, {float(destX), float(destY), float(width), float(height)}, {}, 0, {255,255,255,255}, dynamic_cast<AllegroBitmap*>(destBitmap)->GetBitmap())) stretch_sprite(dynamic_cast<AllegroBitmap*>(destBitmap)->GetBitmap(), m_Bitmap, destX, destY, width, height);
 }
 
 void AllegroBitmap::DrawLine(int x1, int y1, int x2, int y2, unsigned long color) {

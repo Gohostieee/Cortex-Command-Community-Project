@@ -1,3 +1,4 @@
+#include "MultiplayerWorld.h"
 #include "MOPixel.h"
 
 #include "Atom.h"
@@ -237,6 +238,7 @@ void MOPixel::Draw(BITMAP* targetBitmap, const Vector& targetPos, DrawMode mode,
 	}
 
 	Vector pixelPos = m_Pos - targetPos;
+	if (mode == g_DrawColor) MultiplayerWorld::Pixel(*this, m_Pos, uint8_t(drawColor));
 	if (mode != DrawMode::g_DrawMOID) {
 		putpixel(targetBitmap, pixelPos.GetFloorIntX(), pixelPos.GetFloorIntY(), drawColor);
 	}

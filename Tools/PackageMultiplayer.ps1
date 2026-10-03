@@ -44,7 +44,7 @@ The bundled room server is $endpoint. Hosts do not forward router ports.
 To use another server: Multiplayer > Connection settings > Server IP or hostname
 and Save server address. Use default server restores the bundled address.
 Everyone in a room must use the same server and game build.
-Start at 640 x 360 stream quality; increase it if your host and connection allow.
+Guests render locally at their own resolution, set in the normal game options.
 
 Windows 10/11 x64 and an OpenGL-capable GPU are required. Game data and the
 Visual C++ runtime are included. Traffic uses UDP and is not encrypted.

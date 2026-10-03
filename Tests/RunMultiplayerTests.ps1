@@ -1,6 +1,7 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
+if ($GuestResolutions.Count -gt 1 -and $GuestResolutions.Count -ne $Guests) { throw 'GuestResolutions must specify one size for all guests or one size per guest.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $gameRoot = if ($GameDirectory) { (Resolve-Path -LiteralPath $GameDirectory).Path } else { $taskRoot }
 Push-Location $taskRoot
@@ -26,9 +27,11 @@ try {
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
         $previousDeployment = $env:CCCP_MPSMOKE_DEPLOYMENT
+        $previousLoss = $env:CCCP_MPSMOKE_WORLD_LOSS
         $previousService = $env:CCCP_MP_SERVICE
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
         $env:CCCP_MPSMOKE_DEPLOYMENT = if ($Deployment) { '1' } else { $null }
+        $env:CCCP_MPSMOKE_WORLD_LOSS = if ($Loss) { '1' } else { $null }
         $roles = @('host', 'client')
         if ($Guests -ge 2) { $roles += 'client2' }
         if ($Guests -ge 3) { $roles += 'client3' }
@@ -43,11 +46,14 @@ try {
             } else { $env:CCCP_MP_SERVICE = $null }
             foreach ($role in $roles) {
                 $settings = Join-Path $gameRoot "build-mp/$role-settings.ini"
+                $guestIndex = [array]::IndexOf($roles, $role) - 1
+                $resolution = if ($guestIndex -lt 0 -or !$GuestResolutions.Count) { '960x540' } elseif ($GuestResolutions.Count -eq 1) { $GuestResolutions[0] } else { $GuestResolutions[$guestIndex] }
+                $dimensions = $resolution.Split('x')
                 $disabledMods = (Get-ChildItem -LiteralPath (Join-Path $gameRoot 'Mods') -Directory -Filter '*.rte' | ForEach-Object { "    DisableMod = $($_.Name)" }) -join "`n"
                 @"
 SettingsMan
-    ResolutionX = 960
-    ResolutionY = 540
+    ResolutionX = $($dimensions[0])
+    ResolutionY = $($dimensions[1])
     ResolutionMultiplier = 1
     Fullscreen = 0
     EnableVSync = 1
@@ -82,6 +88,7 @@ $disabledMods
             $env:CCCP_MPSMOKE_ROLE = $previousSmokeRole
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
             $env:CCCP_MPSMOKE_DEPLOYMENT = $previousDeployment
+            $env:CCCP_MPSMOKE_WORLD_LOSS = $previousLoss
             $env:CCCP_MP_SERVICE = $previousService
         }
     }

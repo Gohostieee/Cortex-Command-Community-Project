@@ -2,7 +2,7 @@ FROM debian:bookworm-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake g++ make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY external/sources/RakNet external/sources/RakNet
-COPY Source/System/MultiplayerProtocol.h Source/System/MultiplayerRelay.h Source/System/MultiplayerTransport.* Source/System/
+COPY Source/System/MultiplayerProtocol.h Source/System/MultiplayerWorldProtocol.h Source/System/MultiplayerRelay.h Source/System/MultiplayerTransport.* Source/System/
 COPY Tests/MultiplayerRelayTests.cpp Tests/MultiplayerRelayTests.cpp
 COPY Services/RoomService Services/RoomService
 RUN cmake -S Services/RoomService -B /build -DCMAKE_BUILD_TYPE=Release && cmake --build /build -j 2

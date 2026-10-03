@@ -1,5 +1,6 @@
 #include "MultiplayerTransport.h"
 #include "MultiplayerRelay.h"
+#include "MultiplayerWorldProtocol.h"
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -14,6 +15,12 @@ int main(int argc, char** argv) { try {
  const std::string endpoint = argc > 2 ? argv[2] : "127.0.0.1";
  Check(Relay::NormalizeCode("abcde-f2345") == "ABCDEF2345", "code normalization");
  Check(Relay::NormalizeCode("ABCDEFGHIJ").empty(), "ambiguous character rejected");
+ Writer current(Kind::WorldSnapshot, 123, 1); current.Data.resize(Relay::MaxPayload - Relay::CarrierHeaderBytes, 42);
+ auto carrier = Relay::WrapPayload(current.Data); auto unwrapped = Relay::UnwrapPayload(carrier);
+ Check(carrier.size() == Relay::MaxPayload && carrier[5] == 0 && carrier[6] == 2 && carrier[7] == uint8_t(Kind::Hello), "carrier rejected by deployed v1 broker");
+ Check(std::equal(unwrapped.begin(), unwrapped.end(), current.Data.begin(), current.Data.end()), "relay carrier changed native state");
+ for (size_t size = 0; size < Relay::CarrierHeaderBytes + 20; ++size) Check(Relay::UnwrapPayload(std::span(carrier).first(size)).empty(), "truncated carrier accepted");
+ current.Data.push_back(42); Check(Relay::WrapPayload(current.Data).empty(), "oversized relay carrier accepted");
  std::mt19937 random(45);
  for (int i = 0; i < 10000; ++i) { std::vector<uint8_t> bytes(random() % 100); for (auto& b: bytes) b = static_cast<uint8_t>(random()); Reader reader(bytes); Relay::Kind kind; if (Relay::Header(reader, kind)) Check(bytes.size() >= 8, "short relay header accepted"); }
  Transport host; std::array<Transport, 3> guests; std::string error, code;
@@ -30,12 +37,22 @@ int main(int argc, char** argv) { try {
  for (int i = 0; i < 3; ++i) { Writer input(Kind::Input, 123, 1); input.U32(99 + guests[i].RelaySlot()); Check(guests[i].Send("relay:0", input.Data, Delivery::Input), "guest input send"); }
  std::array<bool, 4> inputs{};
  Until([&] { for (auto& event: host.Poll()) if (event.Kind == TransportEvent::Type::Data) { const int slot = Relay::PeerSlot(event.Address); Reader reader(event.Data); Header header; uint32_t value; Check(ReadHeader(reader, header) && reader.U32(value) && reader.Done() && value == 99 + slot, "input crossed player channels"); inputs[slot] = true; } for (auto& guest: guests) guest.Poll(); return inputs[1] && inputs[2] && inputs[3]; }, "simultaneous sequenced input lost");
- // Same reliable control and frame data traverses the relay unchanged, including payloads near MTU.
+ // Reliable control and native state traverse the relay unchanged, including payloads near MTU.
  std::array<size_t, 3> controlBytes{};
  for (int i = 0; i < 3; ++i) { Writer data(Kind::Chat, 123, 1); std::vector<uint8_t> payload(1300, static_cast<uint8_t>(40 + i)); data.Bytes(payload); Check(host.Send(Relay::PeerAddress(static_cast<uint8_t>(guests[i].RelaySlot())), data.Data, Delivery::Control), "host send"); }
  Until([&] { host.Poll(); for (int i = 0; i < 3; ++i) for (auto& event: guests[i].Poll()) if (event.Kind == TransportEvent::Type::Data) { Check(event.Data.size() == 1320 && event.Data.back() == 40 + i && event.Address == "relay:0", "relay modified or crossed payload"); controlBytes[i] += event.Data.size(); } return controlBytes[0] && controlBytes[1] && controlBytes[2]; }, "relay reliable delivery");
  std::array<size_t, 3> frameBytes{}; const auto began = Time();
- Until([&] { host.Poll(); if (Time() - began < 3000) for (int i = 0; i < 3; ++i) { Writer frame(Kind::Frame, 123, 1); std::vector<uint8_t> payload(1100, static_cast<uint8_t>(60 + i)); frame.Bytes(payload); host.Send(Relay::PeerAddress(static_cast<uint8_t>(guests[i].RelaySlot())), frame.Data, Delivery::Frame); } for (int i = 0; i < 3; ++i) for (auto& event: guests[i].Poll()) if (event.Kind == TransportEvent::Type::Data) { Check(event.Data.back() == 60 + i, "frame crossed rooms/players"); frameBytes[i] += event.Data.size(); } return frameBytes[0] >= 100000 && frameBytes[1] >= 100000 && frameBytes[2] >= 100000; }, "relay frame delivery", 5000);
+ Until([&] { host.Poll(); if (Time() - began < 3000) for (int i = 0; i < 3; ++i) { Writer frame(Kind::WorldSnapshot, 123, 1); std::vector<uint8_t> payload(1100, static_cast<uint8_t>(60 + i)); frame.Bytes(payload); host.Send(Relay::PeerAddress(static_cast<uint8_t>(guests[i].RelaySlot())), frame.Data, Delivery::State); } for (int i = 0; i < 3; ++i) for (auto& event: guests[i].Poll()) if (event.Kind == TransportEvent::Type::Data) { Check(event.Data.back() == 60 + i, "state crossed rooms/players"); frameBytes[i] += event.Data.size(); } return frameBytes[0] >= 100000 && frameBytes[1] >= 100000 && frameBytes[2] >= 100000; }, "relay state delivery", 5000);
+ // Initial terrain and sprite resources use the v1 service's reliable lane.
+ std::vector<uint8_t> resource(135983, 77); std::array<World::Assembler, 3> assemblers; std::array<bool, 3> resources{};
+ for (int i = 0; i < 3; ++i) for (size_t offset = 0; offset < resource.size(); offset += ChunkBytes) {
+  Writer packet(Kind::WorldResource, 123, 1); World::WriteChunk(packet, {1, uint32_t(resource.size()), uint16_t(offset / ChunkBytes), std::span(resource).subspan(offset, std::min<size_t>(ChunkBytes, resource.size() - offset))});
+  Check(host.Send(Relay::PeerAddress(uint8_t(guests[i].RelaySlot())), packet.Data, Delivery::WorldResource), "relay resource send");
+ }
+ Until([&] { host.Poll(); for (int i = 0; i < 3; ++i) for (const auto& event : guests[i].Poll()) if (event.Kind == TransportEvent::Type::Data) {
+  Reader reader(event.Data); Header header; World::Chunk chunk;
+  if (ReadHeader(reader, header) && header.Type == Kind::WorldResource && World::ReadChunk(reader, chunk)) if (auto complete = assemblers[i].Push(chunk, Time())) resources[i] = *complete == resource;
+ } return resources[0] && resources[1] && resources[2]; }, "relay retained resource delivery");
  const auto guestAddress = Relay::PeerAddress(static_cast<uint8_t>(guests[0].RelaySlot())); bool down = false; host.Close(guestAddress);
  Until([&] { host.Poll(); for (auto& event: guests[0].Poll()) if (event.Kind == TransportEvent::Type::Disconnected) down = true; guests[1].Poll(); guests[2].Poll(); return down; }, "guest disconnect not forwarded");
  Check(guests[0].ReconnectRelay(error), "guest reconnect start"); bool rejoined = false, hostRejoined = false;

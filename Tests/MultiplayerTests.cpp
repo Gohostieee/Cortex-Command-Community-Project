@@ -1,5 +1,6 @@
 #include "MultiplayerProtocol.h"
 #include "MultiplayerTransport.h"
+#include "MultiplayerWorldProtocol.h"
 #include <chrono>
 #include <iostream>
 #include <random>
@@ -12,7 +13,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-	const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 2, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 3, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	WriteInput(writer, input);
@@ -48,69 +49,67 @@ void Inputs() {
 	input.Sequence = 1; input.MouseX = 3; receiver.Push(input, 410); Check(receiver.Consume(410).MouseDX == 5, "sequence or motion wrap failed");
 	Check(Newer(1, 0xfffffffe) && !Newer(0xfffffffe, 1), "sequence ordering wrap failed");
 }
-void FramePacing() {
-	// Run the production capture gate against a healthy 120 ms round-trip link.
-	// Frames finish sending immediately here so the assertion isolates ACK pacing.
-	std::vector<std::pair<uint64_t, uint32_t>> acks;
-	uint64_t lastFrame = 0, lastAck = 0; uint32_t sent = 0, acknowledged = 0;
-	for (uint64_t now = 1; now <= 5000; ++now) {
-		for (auto [arrival, id]: acks) if (arrival == now) { acknowledged = id; lastAck = now; }
-		if (FrameCaptureDue(now, lastFrame, lastAck, sent, acknowledged, 120)) { lastFrame = now; acks.emplace_back(now + 120, ++sent); }
-	}
-	std::cout << "120 ms frame pacing: " << sent / 5.0 << " FPS\n";
-	Check(sent >= 140, "healthy relay guests are throttled below 28 FPS by frame acknowledgements");
-	Check(!FrameCaptureDue(500, 450, 400, 8, 0, 10000), "frame window grew beyond eight under high latency");
-	Check(FrameCaptureDue(1500, 450, 400, 8, 0, 10000), "lost acknowledgements never allowed an independent recovery frame");
-	Check(!FrameCaptureDue(481, 450, 400, 1, 0, 0), "capture pacing exceeded the normal frame interval");
-	Check(!FrameCaptureDue(3000, 2950, 0, 1, 0, 0), "stalled peer did not fall back to the slower capture rate");
-	Check(!FrameCaptureDue(500, 450, 400, 1, 0xffffffffu, 0), "frame window failed across sequence wrap");
-}
-struct Packet { FrameInfo Info; uint16_t Index; bool Parity; std::vector<uint8_t> Data; };
-std::vector<Packet> Packets(const FrameInfo& info, const std::vector<uint8_t>& bytes) {
-	std::vector<Packet> packets;
-	for (uint16_t start = 0; start < ChunkCount(info); start += ParityGroup) {
-		std::vector<uint8_t> parity(ChunkBytes);
-		for (uint16_t index = start; index < std::min<int>(start + ParityGroup, ChunkCount(info)); ++index) {
-			auto part = std::span(bytes).subspan(size_t(index) * ChunkBytes, ChunkSize(info, index));
-			for (size_t j = 0; j < part.size(); ++j) parity[j] ^= part[j];
-			packets.push_back({info, index, false, {part.begin(), part.end()}});
-		}
-		packets.push_back({info, static_cast<uint16_t>(start / ParityGroup), true, std::move(parity)});
-	}
-	return packets;
-}
-void Frames() {
-	std::mt19937 random(1234); std::vector<uint8_t> pixels(25 * ChunkBytes - 7); for (auto& pixel: pixels) pixel = static_cast<uint8_t>(random());
-	FrameInfo info{1, 4, static_cast<uint32_t>(pixels.size()), 640, 360, 12, 13};
-	for (unsigned missing = 0; missing < ParityGroup; ++missing) {
-		auto packets = Packets(info, pixels); std::erase_if(packets, [missing](const Packet& packet) { return !packet.Parity && packet.Index % ParityGroup == missing; });
-		std::shuffle(packets.begin(), packets.end(), random); FrameAssembler assembler; std::optional<FrameAssembler::Complete> complete;
-		for (const auto& packet: packets) {
-			Writer writer(Kind::Frame, 9, 2); WriteChunk(writer, {packet.Info, packet.Index, packet.Parity, packet.Data});
-			Check(writer.Data.size() < 1400, "frame exceeded datagram limit"); Reader reader(writer.Data); Header header; FrameChunk chunk;
-			Check(ReadHeader(reader, header) && ReadChunk(reader, chunk), "frame wire decode failed");
-			if (auto frame = assembler.Push(chunk, 100)) complete = std::move(frame);
-			Check(!assembler.Push(chunk, 100), "duplicate frame chunk presented twice");
-		}
-		Check(complete && complete->Bytes == pixels && complete->Info == info, "parity recovery failed under loss and reorder");
-	}
-	FrameAssembler assembler; auto packets = Packets(info, pixels);
-	for (const auto& packet: packets) if (packet.Parity || packet.Index > 1) Check(!assembler.Push({packet.Info, packet.Index, packet.Parity, packet.Data}, 100), "two missing chunks incorrectly recovered");
-	++info.ID; auto next = Packets(info, pixels); std::optional<FrameAssembler::Complete> completed;
-	for (const auto& packet: next) if (auto frame = assembler.Push({packet.Info, packet.Index, packet.Parity, packet.Data}, 110)) completed = std::move(frame);
-	Check(completed && completed->Bytes == pixels, "lost frame corrupted the next independent frame");
-	Check(!assembler.Push({packets[0].Info, 0, false, packets[0].Data}, 111), "old frame accepted after presentation");
-	assembler.Reset(); Check(!assembler.Push({info, 0, false, packets[0].Data}, 100), "incomplete frame presented");
-	for (const auto& packet: next) if (packet.Parity || packet.Index > 1) Check(!assembler.Push({info, packet.Index, packet.Parity, packet.Data}, 1101), "expired frame chunks retained");
-	FrameInfo huge = info; huge.Bytes = 0xffffffffu; Check(!assembler.Push({huge, 0, false, packets[0].Data}, 500), "unbounded frame accepted");
-	// Decoder receives arbitrary network bytes, including truncated valid chunks.
-	for (int attempt = 0; attempt < 20000; ++attempt) {
-		std::vector<uint8_t> fuzz(random() % 1500); for (auto& byte: fuzz) byte = static_cast<uint8_t>(random());
-		Writer packet(attempt % 2 ? Kind::Frame : Kind::Input); packet.Bytes(fuzz);
-		Reader reader(packet.Data); Header header; Check(ReadHeader(reader, header), "fuzz header failed");
-		if (header.Type == Kind::Frame) { FrameChunk chunk; if (ReadChunk(reader, chunk)) assembler.Push(chunk, 1000 + attempt); }
-		else { Input input; ReadInput(reader, input); }
-	}
+void Worlds() {
+    namespace W = RTE::MP::World;
+    W::ResourceWindow credits; unsigned issued = 0;
+    while (credits.CanSend(1131)) credits.Sent(1, uint16_t(issued++), 1131);
+    const size_t outstanding = credits.Bytes(); Check(issued > 1 && outstanding <= W::ResourceWindow::Limit && !credits.CanSend(1131), "relay resources exceeded the guest receipt window");
+    // Immediate broker transport ACKs do not release any application credits.
+    Check(!credits.Receipt(2, 0) && credits.Bytes() == outstanding, "another resource released delivery credits");
+    Check(credits.Receipt(1, 0) && !credits.Receipt(1, 0) && credits.CanSend(1131), "duplicate guest receipts inflated delivery credits");
+    credits.Sent(1, 0, 1131); Check(credits.Bytes() == outstanding && credits.Contains(1), "resource receipt did not admit exactly its next fragment");
+    credits.Reset(); Check(credits.Bytes() == 0 && !credits.Contains(1) && !credits.Receipt(1, 1) && !credits.CanSend(1401), "match reset retained stale resource credits");
+    W::Resource resource; resource.Width = 4; resource.Height = 3; resource.Pixels = {1,2,3,4,5,6,7,8,9,10,11,12}; resource.ID = W::ResourceHash(resource);
+    Writer rw(Kind::WorldResource); W::WriteResource(rw, resource); Reader rr(rw.Data); Header h; W::Resource decoded;
+    Check(ReadHeader(rr, h) && W::ReadResource(rr, decoded) && decoded.Pixels == resource.Pixels, "retained resource round trip failed");
+    rw.Data.back() ^= 1; Reader corrupt(rw.Data); Check(ReadHeader(corrupt, h) && !W::ReadResource(corrupt, decoded), "resource corruption accepted");
+    W::Snapshot first; first.ID = 1; first.Time = 1000; first.SceneWidth = 1000; first.SceneHeight = 500; first.Wrap = 1; first.InputSequence = 7;
+    W::Node node; node.ID = 11; node.Asset = resource.ID; node.Width = node.SourceWidth = 4; node.Height = node.SourceHeight = 3; node.ClipWidth = 200; first.Nodes.push_back(node);
+    Writer sw(Kind::WorldSnapshot); W::WriteSnapshot(sw, first); Reader sr(sw.Data); W::Snapshot copy;
+    Check(ReadHeader(sr, h) && W::ReadSnapshot(sr, copy) && copy.Nodes == first.Nodes && copy.InputSequence == 7, "world state round trip failed");
+    for (size_t i = 0; i < sw.Data.size(); ++i) { Reader truncated(std::span(sw.Data).first(i)); W::Snapshot value; Check(!(ReadHeader(truncated, h) && W::ReadSnapshot(truncated, value)), "truncated state accepted"); }
+    auto duplicate = first; duplicate.Nodes.push_back(node); Writer dw(Kind::WorldSnapshot); W::WriteSnapshot(dw, duplicate); Reader dr(dw.Data); Check(ReadHeader(dr, h) && !W::ReadSnapshot(dr, copy), "duplicate entity identity accepted");
+    for (uint64_t time : {uint64_t(0), W::MaxTime + 1, std::numeric_limits<uint64_t>::max()}) { auto invalid = first; invalid.Time = time; Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, invalid); Reader reader(writer.Data); Check(ReadHeader(reader, h) && !W::ReadSnapshot(reader, copy), "unsafe presentation clock accepted"); }
+    { auto invalid = first; invalid.Phase = 7; Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, invalid); Reader reader(writer.Data); Check(ReadHeader(reader, h) && !W::ReadSnapshot(reader, copy), "invalid activity phase accepted"); }
+    auto invalidEvent = node; invalidEvent.StartTime = W::MaxTime; invalidEvent.EndTime = W::MaxTime + 1; Check(!W::Valid(invalidEvent), "overflowing event time accepted");
+    W::Timeline timeline; Check(timeline.Push(first, 1020), "initial state rejected");
+    auto second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 10; second.CameraX = 10;
+    Check(timeline.Push(second, 1080), "next state rejected"); Check(!timeline.Push(first, 1081), "reordered state accepted");
+    auto middle = timeline.Sample(1120); Check(std::abs(middle.Nodes[0].X - 5) < 0.001f && std::abs(middle.CameraX - 5) < 0.001f, "guest did not interpolate camera and entity between 20 Hz updates");
+    float previous = -1; int distinct = 0;
+    for (int frame = 0; frame <= 3; ++frame) { const auto sample = timeline.Sample(1095 + frame * 16); if (sample.Nodes[0].X != previous) ++distinct; previous = sample.Nodes[0].X; }
+    Check(distinct == 4, "60 Hz presentation repeats state instead of creating intermediate movement");
+    Check(timeline.Sample(1500).Nodes[0].X == timeline.Sample(5000).Nodes[0].X, "lost connection extrapolated without a bound");
+    auto third = second; third.ID = 3; third.Time = 1100; third.Nodes.clear();
+    Check(timeline.Push(third, 1120), "despawn state rejected"); Check(timeline.Sample(1170).Nodes.size() == 1 && timeline.Sample(1195).Nodes.empty(), "lifecycle changed before its presentation time");
+    timeline.Reset(); first.Nodes[0].X = 995; first.Nodes[0].Angle = 3.1f; second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 5; second.Nodes[0].Angle = -3.1f;
+    timeline.Push(first, 1020); timeline.Push(second, 1070); middle = timeline.Sample(1120);
+    Check(std::abs(middle.Nodes[0].X - 1000) < 0.001f && std::abs(middle.Nodes[0].Angle - 3.14159265f) < 0.001f, "scene or angle wrap used the long path");
+    { W::Timeline layers; auto a = first, b = second; a.Nodes[0].Flags = b.Nodes[0].Flags = W::ScreenSpace | W::Layer; a.Nodes[0].X2 = b.Nodes[0].X2 = 640; a.Nodes[0].X = -600; b.Nodes[0].X = 0;
+      layers.Push(a, 1020); layers.Push(b, 1070);
+      Check(std::abs(layers.Sample(1120).Nodes[0].X + 620) < 0.001f && layers.Sample(1145).Nodes[0].X == 0, "wrapped parallax jumped or moved repeated tiles into the wrong cycle"); }
+    timeline.Reset(); first.Nodes[0].Flags |= W::Discontinuous; second.Nodes[0].Flags |= W::Discontinuous; timeline.Push(first, 1020); timeline.Push(second, 1070);
+    Check(timeline.Sample(1120).Nodes[0].X == 995, "teleport was interpolated");
+    timeline.Reset(); first.Nodes[0].Flags = W::Masked; first.Nodes[0].X = 0; second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 10; second.Nodes[0].Parent = 123;
+    timeline.Push(first, 1020); timeline.Push(second, 1070); Check(timeline.Sample(1120).Nodes[0].X == 0, "reparent was interpolated across a lifecycle boundary");
+    std::mt19937 random(97); std::vector<uint8_t> bytes(ChunkBytes * 7 + 19); for (auto& b : bytes) b = uint8_t(random());
+    std::vector<unsigned> order; for (unsigned i = 0; i < (bytes.size() + ChunkBytes - 1) / ChunkBytes; ++i) order.push_back(i); std::shuffle(order.begin(), order.end(), random);
+    W::Assembler assembler; std::optional<std::vector<uint8_t>> assembled;
+    for (unsigned i : order) { auto data = std::span(bytes).subspan(i * ChunkBytes, std::min<size_t>(ChunkBytes, bytes.size() - i * ChunkBytes)); if (auto complete = assembler.Push({1, uint32_t(bytes.size()), uint16_t(i), data}, 100)) assembled = std::move(complete); }
+    Check(assembled && *assembled == bytes, "retained resources failed under reordering");
+    std::vector<uint8_t> parity(ChunkBytes); for (size_t i = 0; i < bytes.size(); ++i) parity[i % ChunkBytes] ^= bytes[i];
+    // The first group has exactly one missing chunk; its parity repairs it.
+    parity.assign(ChunkBytes, 0); for (size_t i = 0; i < ChunkBytes * 7; ++i) parity[i % ChunkBytes] ^= bytes[i]; for (size_t i = ChunkBytes * 7; i < bytes.size(); ++i) parity[i % ChunkBytes] ^= bytes[i];
+    assembler.Reset(); assembled.reset();
+    for (unsigned i : order) if (i != 3) { auto data = std::span(bytes).subspan(i * ChunkBytes, std::min<size_t>(ChunkBytes, bytes.size() - i * ChunkBytes)); if (auto complete = assembler.Push({4, uint32_t(bytes.size()), uint16_t(i), data}, 100)) assembled = std::move(complete); }
+    assembled = assembler.Push({4, uint32_t(bytes.size()), 0, parity, true}, 100); Check(assembled && *assembled == bytes, "scene state parity did not repair a lost datagram");
+    timeline.Reset(); first.Nodes[0].Flags = W::Masked; first.Nodes[0].X = 0; first.Nodes[0].Angle = 0; W::Node child = first.Nodes[0]; child.ID = 12; child.Parent = 11; child.X = 10; first.Nodes.push_back(child);
+    second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].Angle = 1.57079633f; second.Nodes[1].X = 0; second.Nodes[1].Y = -10; second.Nodes[1].Angle = 1.57079633f;
+    timeline.Push(first, 1020); timeline.Push(second, 1070); middle = timeline.Sample(1120); Check(std::abs(middle.Nodes[1].X - 7.071f) < 0.01f && std::abs(middle.Nodes[1].Y + 7.071f) < 0.01f, "attachment detached from interpolated parent rotation");
+    W::Node trail; trail.ID = uint64_t(1) << 59; trail.Type = W::Shape::Pixel; trail.StartTime = 1010; trail.EndTime = 1030; second.Nodes.push_back(trail);
+    timeline.Reset(); timeline.Push(first, 1020); timeline.Push(second, 1070); Check(timeline.Sample(1115).Nodes.size() == 3 && timeline.Sample(1135).Nodes.size() == 2, "short-lived trail did not use its host event time");
+    Check(!assembler.Push({3, 0xffffffff, 0, std::span(bytes).first(ChunkBytes)}, 200), "unbounded scene assembly accepted");
+    for (int i = 0; i < 10000; ++i) { std::vector<uint8_t> fuzz(random() % 400); for (auto& b : fuzz) b = uint8_t(random()); Reader bad(fuzz); W::Snapshot state; W::ReadSnapshot(bad, state); Reader badResource(fuzz); W::ReadResource(badResource, decoded); Reader badChunk(fuzz); W::Chunk chunk; if (W::ReadChunk(badChunk, chunk)) assembler.Push(chunk, 1000 + i); }
 }
 void TransportLoopback() {
 	Transport host, client, wrong, discovery; std::string error;
@@ -131,15 +130,18 @@ void TransportLoopback() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	Check(hostConnected && clientConnected && echoed && rejected && discovered, "loopback, password rejection or LAN discovery failed");
-	std::vector<uint8_t> bulk(135983, 77); FrameInfo info{1, 1, static_cast<uint32_t>(bulk.size()), 640, 360, 0, 0}; FrameAssembler assembler;
-	for (const auto& packet: Packets(info, bulk)) { Writer frame(Kind::Frame, 1, 1); WriteChunk(frame, {info, packet.Index, packet.Parity, packet.Data}); Check(host.Send(clientAddress, frame.Data, Delivery::Frame), "bulk frame send failed"); }
-	bool frameReceived = false; unsigned received = 0; const auto frameStarted = Now(); uint64_t firstPacket = 0, lastPacket = 0;
-	while (Now() - frameStarted < 3000 && !frameReceived) {
-		for (const auto& event: client.Poll()) if (event.Kind == TransportEvent::Type::Data) { ++received; if (!firstPacket) firstPacket = Now(); lastPacket = Now(); Reader reader(event.Data); Header header; FrameChunk chunk; if (ReadHeader(reader, header) && ReadChunk(reader, chunk)) if (auto complete = assembler.Push(chunk, Now())) frameReceived = complete->Bytes == bulk; }
-		host.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(16));
-	}
-	std::cout << "UDP frame: " << received << " chunks, " << Now() - frameStarted << " ms, arrival span=" << lastPacket - firstPacket << "\n";
-	Check(frameReceived, "real UDP frame failed to assemble");
+    std::vector<uint8_t> bulk(135983, 77); World::Assembler assembler;
+    for (size_t offset = 0; offset < bulk.size(); offset += ChunkBytes) {
+        Writer packet(Kind::WorldResource, 1, 1); World::WriteChunk(packet, {1, uint32_t(bulk.size()), uint16_t(offset / ChunkBytes), std::span(bulk).subspan(offset, std::min<size_t>(ChunkBytes, bulk.size() - offset))});
+        Check(host.Send(clientAddress, packet.Data, Delivery::WorldResource), "retained resource send failed");
+    }
+    bool resourceReceived = false; unsigned received = 0; const auto started = Now();
+    while (Now() - started < 5000 && !resourceReceived) {
+        for (const auto& event : client.Poll()) if (event.Kind == TransportEvent::Type::Data) { ++received; Reader reader(event.Data); Header header; World::Chunk chunk; if (ReadHeader(reader, header) && World::ReadChunk(reader, chunk)) if (auto complete = assembler.Push(chunk, Now())) resourceReceived = *complete == bulk; }
+        host.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::cout << "UDP retained resource: " << received << " chunks, " << Now() - started << " ms\n";
+    Check(resourceReceived, "real UDP retained resource failed to assemble");
 	std::array<Transport, 2> guests; Transport overflow; unsigned accepted = 0; bool full = false;
 	for (auto& guest: guests) Check(guest.Start(false, 0, "", error) && guest.Connect("127.0.0.1", port, "room-secret", error), "additional player connection failed");
 	const auto roomDeadline = Now() + 3000;
@@ -149,7 +151,7 @@ void TransportLoopback() {
 	const auto overflowDeadline = Now() + 3000;
 	while (Now() < overflowDeadline && !full) { host.Poll(); for (const auto& event: overflow.Poll()) if (event.Kind == TransportEvent::Type::Failed) full = event.Error == "This room is full."; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
 	Check(full, "fifth player was not rejected from the full room");
-	std::vector<uint8_t> oversized(1401, PacketID); Check(!client.Send(hostAddress, oversized, Delivery::Frame), "oversized datagram sent");
+	std::vector<uint8_t> oversized(1401, PacketID); Check(!client.Send(hostAddress, oversized, Delivery::State), "oversized datagram sent");
 	client.Close(hostAddress);
 	const auto closeDeadline = Now() + 3000;
 	while (Now() < closeDeadline && !disconnected) { for (const auto& event: host.Poll()) if (event.Kind == TransportEvent::Type::Disconnected && event.Address == clientAddress) disconnected = true; client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
@@ -158,6 +160,6 @@ void TransportLoopback() {
 }
 }
 int main() {
-	try { Wire(); Inputs(); FramePacing(); Frames(); TransportLoopback(); std::cout << "PASS: wire bounds, all controls, loss/reorder/duplicates, timeout, frame pacing and repair, 20000 malformed packet bodies, real UDP frames, password rejection, LAN discovery, full rooms, disconnect and restart\n"; return 0; }
+	try { Wire(); Inputs(); Worlds(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
 	catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

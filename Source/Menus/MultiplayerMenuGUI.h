@@ -28,7 +28,7 @@ public:
 		Screen Page = Screen::Entry;
 		bool Host = false, Online = true, Ready = false, Played = false;
 		bool Fog = false, Deploy = false, ClearOrbit = false;
-		int LocalSlot = 0, Difficulty = 50, Gold = 5000, Quality = 0, Bandwidth = 24, Port = 8000;
+		int LocalSlot = 0, Difficulty = 50, Gold = 5000, Bandwidth = 24, Port = 8000;
 		int ActivityIndex = 0, SceneIndex = 0;
 		std::string Name, Room, Code, Address, Password, Service, DefaultService;
 		std::string Title, Subtitle, Error, Notice, StartBlock, Activity, SceneName, Description;
