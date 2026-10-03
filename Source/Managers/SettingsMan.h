@@ -293,6 +293,12 @@ namespace RTE {
 		/// @param play Whether to skip game intro or not.
 		void SetSkipIntro(bool play) { m_SkipIntro = play; }
 
+		/// Gets whether the intro has already started on this installation, even if it was skipped.
+		bool HasSeenIntro() const { return m_HasSeenIntro; }
+
+		/// Records the first intro immediately so skipping it or quitting early cannot replay it on the next launch.
+		void MarkIntroSeen();
+
 		/// Gets whether tooltip display on certain UI elements is enabled or not.
 		/// @return Whether tooltips are displayed or not.
 		bool ShowToolTips() const { return m_ShowToolTips; }
@@ -400,6 +406,7 @@ namespace RTE {
 		bool m_ForceImmediatePathingRequestCompletion; //!< Whether pathing requests will be forced to immediately complete for the next frame, or if they can take multiple frames to calculate.
 
 		bool m_SkipIntro; //!< Whether to play the intro of the game or skip directly to the main menu.
+		bool m_HasSeenIntro; //!< Whether the intro has already started on this installation.
 		bool m_ShowToolTips; //!< Whether ToolTips are enabled or not.
 		bool m_DisableLoadingScreenProgressReport; //!< Whether to display the reader progress report during module loading or not. Greatly increases loading speeds when disabled.
 		int m_LoadingScreenProgressReportPrecision; //!< How accurately the reader progress report tells what line it's reading during module loading. Lower values equal more precision at the cost of loading speed.

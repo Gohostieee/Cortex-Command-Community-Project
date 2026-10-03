@@ -56,7 +56,8 @@ void TitleScreen::Clear() {
 	m_PlanetViewScrollOffsetY = 325 + m_PlanetRadius - (static_cast<float>(g_WindowMan.GetResY()) / 2);
 
 	m_FinishedPlayingIntro = false;
-	m_IntroSequenceState = IntroSequence::DataRealmsLogoFadeIn;
+	// Bypass both startup logos, including the first time the intro plays.
+	m_IntroSequenceState = IntroSequence::SlideshowFadeIn;
 	m_IntroSongTimer.Reset();
 	m_IntroScrollStartTime = 0;
 	m_IntroScrollDuration = 0;
@@ -86,10 +87,11 @@ void TitleScreen::Create(AllegroScreen* guiScreen) {
 	m_StationOrbitTimer.SetElapsedRealTimeS(15);
 
 	if (!g_WindowMan.ResolutionChanged()) {
-		if (!g_SettingsMan.SkipIntro() && !g_ActivityMan.IsSetToLaunchIntoActivity()) {
+		if (!g_SettingsMan.SkipIntro() && !g_SettingsMan.HasSeenIntro() && !g_ActivityMan.IsSetToLaunchIntoActivity()) {
 			m_IntroTextFont = std::make_unique<GUIFont>("FontLarge");
 			m_IntroTextFont->Load(guiScreen, "Base.rte/GUIs/Skins/Menus/FontLarge.png");
 			CreateIntroSequenceSlides();
+			g_SettingsMan.MarkIntroSeen();
 		} else {
 			m_IntroSequenceState = IntroSequence::MainMenuAppear;
 		}

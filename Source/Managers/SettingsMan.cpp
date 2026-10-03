@@ -53,6 +53,7 @@ void SettingsMan::Clear() {
 	m_ForceImmediatePathingRequestCompletion = false;
 
 	m_SkipIntro = false;
+	m_HasSeenIntro = false;
 	m_ShowToolTips = true;
 	m_DisableLoadingScreenProgressReport = true;
 	m_LoadingScreenProgressReportPrecision = 100;
@@ -102,6 +103,13 @@ int SettingsMan::Initialize() {
 void SettingsMan::UpdateSettingsFile() const {
 	Writer settingsWriter(m_SettingsPath);
 	g_SettingsMan.Save(settingsWriter);
+}
+
+void SettingsMan::MarkIntroSeen() {
+	if (!m_HasSeenIntro) {
+		m_HasSeenIntro = true;
+		UpdateSettingsFile();
+	}
 }
 
 int SettingsMan::ReadProperty(const std::string_view& propName, Reader& reader) {
@@ -173,6 +181,7 @@ int SettingsMan::ReadProperty(const std::string_view& propName, Reader& reader) 
 	MatchProperty("AllowSavingToBase", { reader >> m_AllowSavingToBase; });
 	MatchProperty("ShowMetaScenes", { reader >> m_ShowMetaScenes; });
 	MatchProperty("SkipIntro", { reader >> m_SkipIntro; });
+	MatchProperty("HasSeenIntro", { reader >> m_HasSeenIntro; });
 	MatchProperty("ShowToolTips", { reader >> m_ShowToolTips; });
 	MatchProperty("CaseSensitiveFilePaths", { System::EnableFilePathCaseSensitivity(std::stoi(reader.ReadPropValue())); });
 	MatchProperty("DisableLoadingScreenProgressReport", { reader >> m_DisableLoadingScreenProgressReport; });
@@ -317,6 +326,7 @@ int SettingsMan::Save(Writer& writer) const {
 	writer.NewLineString("// Misc Settings", false);
 	writer.NewLine(false);
 	writer.NewPropertyWithValue("SkipIntro", m_SkipIntro);
+	writer.NewPropertyWithValue("HasSeenIntro", m_HasSeenIntro);
 	writer.NewPropertyWithValue("ShowToolTips", m_ShowToolTips);
 	writer.NewPropertyWithValue("CaseSensitiveFilePaths", System::FilePathsCaseSensitive());
 	writer.NewPropertyWithValue("DisableLoadingScreenProgressReport", m_DisableLoadingScreenProgressReport);
