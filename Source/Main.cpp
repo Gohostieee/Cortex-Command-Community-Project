@@ -133,14 +133,15 @@ void InitializeManagers() {
 /// </summary>
 void DestroyManagers() {
 	g_MultiplayerMan.Stop();
+	// Stop the mixer and its callbacks while all referenced sound owners exist.
+	g_AudioMan.Destroy();
+	g_MusicMan.Destroy();
 	g_MetaMan.Destroy();
 	g_PerformanceMan.Destroy();
 	g_MovableMan.Destroy();
 	g_SceneMan.Destroy();
 	g_ActivityMan.Destroy();
 	g_GUISound.Destroy();
-	g_AudioMan.Destroy();
-	g_MusicMan.Destroy();
 	g_PresetMan.Destroy();
 	g_UInputMan.Destroy();
 	g_PostProcessMan.Destroy();
@@ -274,6 +275,7 @@ void RunMenuLoop() {
 			g_WindowMan.CompleteResolutionChange();
 		}
 
+		if (g_MultiplayerMan.IsUIOpen()) g_MenuMan.UpdateMultiplayerBackground();
 		if (g_MultiplayerMan.TakeLaunchRequest() || (!g_MultiplayerMan.IsUIOpen() && g_MenuMan.Update())) {
 			g_UInputMan.EndFrame();
 			break;
@@ -346,6 +348,7 @@ void RunGameLoop() {
 
 			g_UInputMan.Update();
 			g_MultiplayerMan.ApplyInputs();
+			g_MultiplayerMan.UpdateMenu();
 
 			g_FrameMan.Update();
 
@@ -375,6 +378,7 @@ void RunGameLoop() {
 			g_UInputMan.EndFrame();
 
 			if (!g_ActivityMan.IsInActivity()) {
+				g_MultiplayerMan.HandleActivityExit();
 				g_TimerMan.PauseSim(true);
 
 				if (!g_ActivityMan.ActivitySetToRestart()) {

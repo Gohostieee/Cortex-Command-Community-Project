@@ -120,7 +120,12 @@ namespace RTE {
 		/// @param maxLength The maximum length of the text this text panel can contain.
 		void SetMaxTextLength(int maxLength) { m_MaxTextLength = maxLength; }
 
+		/// Hide sensitive text while retaining the underlying value for form submission.
+		void SetPasswordMode(bool enabled) { m_PasswordMode = enabled; UpdateText(); }
+
 	private:
+		bool m_PasswordMode = false;
+		std::string DisplayText() const { return m_PasswordMode ? std::string(m_Text.size(), '*') : m_Text; }
 		unsigned long m_FontSelectColor;
 
 		std::string m_Text;

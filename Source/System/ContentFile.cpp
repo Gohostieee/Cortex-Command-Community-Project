@@ -375,6 +375,11 @@ BITMAP* ContentFile::LoadAndReleaseBitmap(int conversionMode, const std::string&
 	return returnBitmap;
 }
 
+void ContentFile::ReleaseLoadedSounds() {
+	for (const auto& [path, sound]: s_LoadedSamples) if (sound) sound->release();
+	s_LoadedSamples.clear();
+}
+
 FMOD::Sound* ContentFile::GetAsSound(bool abortGameForInvalidSound, bool asyncLoading) {
 	if (m_DataPath.empty() || !g_AudioMan.IsAudioEnabled()) {
 		return nullptr;

@@ -1,4 +1,4 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [string]$ServiceAddress = '', [string]$GameDirectory = '')
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -16,11 +16,11 @@ try {
     if ($Smoke) {
         if ($Relay) { & ./Services/RoomService/Build.ps1 -Test }
         if (!$GameDirectory) {
-            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
+            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
             if ($LASTEXITCODE) { throw 'Game build failed.' }
             if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
         }
-        if (!(Test-Path -LiteralPath (Join-Path $gameRoot 'Cortex Command.exe')) -or !(Test-Path -LiteralPath (Join-Path $gameRoot 'Data'))) { throw 'GameDirectory must contain the built game and Data folder.' }
+        if (!(Test-Path -LiteralPath (Join-Path $gameRoot $GameExecutable)) -or !(Test-Path -LiteralPath (Join-Path $gameRoot 'Data'))) { throw 'GameDirectory must contain the built game and Data folder.' }
         New-Item -ItemType Directory -Path (Join-Path $gameRoot 'build-mp') -Force | Out-Null
         $previousSettings = $env:CCCP_SETTINGSPATH
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
@@ -43,6 +43,7 @@ try {
             } else { $env:CCCP_MP_SERVICE = $null }
             foreach ($role in $roles) {
                 $settings = Join-Path $gameRoot "build-mp/$role-settings.ini"
+                $disabledMods = (Get-ChildItem -LiteralPath (Join-Path $gameRoot 'Mods') -Directory -Filter '*.rte' | ForEach-Object { "    DisableMod = $($_.Name)" }) -join "`n"
                 @"
 SettingsMan
     ResolutionX = 960
@@ -53,7 +54,8 @@ SettingsMan
     UseMultiDisplays = 0
     SkipIntro = 1
     LaunchIntoActivity = 0
-"@ | Set-Content -LiteralPath $settings
+$disabledMods
+"@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $settings
                 $env:CCCP_SETTINGSPATH = $settings
                 $env:CCCP_MPSMOKE_ROLE = $role
                 if ($Relay -and $role -ne 'host') {
@@ -63,7 +65,7 @@ SettingsMan
                     $roomCode = (Get-Content -LiteralPath $codeFile -Raw).Trim()
                 }
                 $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
-                $instances += Start-Process -FilePath (Join-Path $gameRoot 'Cortex Command.exe') -ArgumentList $argument -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
+                $instances += Start-Process -FilePath (Join-Path $gameRoot $GameExecutable) -ArgumentList $argument -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
             }
             $deadline = [DateTime]::UtcNow.AddSeconds(150)
             while (@($instances | Where-Object { !$_.HasExited }).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Seconds 1 }

@@ -424,6 +424,9 @@
     <ClInclude Include="Source\Menus\ScenarioGUI.h">
       <Filter>Menus</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Menus\MultiplayerMenuGUI.h">
+      <Filter>Menus</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Menus\SceneEditorGUI.h">
       <Filter>Menus</Filter>
     </ClInclude>
@@ -1016,6 +1019,9 @@
       <Filter>Entities</Filter>
     </ClCompile>
     <ClCompile Include="Source\Menus\ScenarioGUI.cpp">
+      <Filter>Menus</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Menus\MultiplayerMenuGUI.cpp">
       <Filter>Menus</Filter>
     </ClCompile>
     <ClCompile Include="Source\Menus\SceneEditorGUI.cpp">

@@ -16,9 +16,11 @@ public:
 	~MultiplayerMan();
 	void Open();
 	void Update();
+	void UpdateMenu();
 	void DrawUI();
 	void ApplyInputs();
 	void Stop();
+	void HandleActivityExit();
 	bool StartRoom(bool host, const std::string& address, bool smokeTest = false);
 	void CaptureVerificationFrame();
 	bool IsUIOpen() const;

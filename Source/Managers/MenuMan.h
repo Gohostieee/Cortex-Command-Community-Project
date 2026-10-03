@@ -39,6 +39,8 @@ namespace RTE {
 		/// Updates the MenuMan state.
 		/// @return Whether the MenuMan update has reached a state where the menu loop should be exited so the simulation loop can proceed.
 		bool Update();
+		void UpdateMultiplayerBackground();
+		void SetMultiplayerMenuBackground(bool open);
 
 		/// Draws the MenuMan to the screen.
 		void Draw() const;

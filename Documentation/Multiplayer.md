@@ -4,22 +4,22 @@ Multiplayer is available from the main menu. A room supports one host and up to 
 
 ## Host a room
 
-1. Choose **Multiplayer**, enter your player name, and open **Host**.
-2. Leave **Use room codes** enabled. This fork includes the AWS service at **54.164.52.173:8001**. Set a room name and optional password. To use another service, expand **Connection settings**, enter its **Server IP or hostname**, and choose **Save server address**. **Use default server** restores the bundled AWS address.
-3. Start with **640 × 360** stream quality. **960 × 540** uses more upload bandwidth and rendering time. The upload slider is a budget for each guest, not the whole room; it defaults to 24 Mbps per guest.
-4. Choose **Create room**. Wait for your room code, then choose **Copy code** and share it with guests.
-5. Select an activity and compatible scene. Choose teams, difficulty, gold, fog, scene deployment, and team factions. Guests can change their own teams and mark themselves ready. Changing match options clears guest readiness.
+1. Choose **Multiplayer**, open **Host game**, and enter your player name.
+2. Set a room name and optional password. The **Connection** page selects **Online - invitation codes** or direct LAN play. The bundled service is **54.164.52.173:8001**. To use another service, enter its **Room server** address and choose **Save server**. **Use default** restores the bundled address.
+3. Open **Stream settings** if needed. Start with **640 × 360** stream quality. **960 × 540** uses more upload bandwidth and rendering time. Upload is a budget for each guest, not the whole room; it defaults to 24 Mbps per guest.
+4. Choose **Create lobby**. Wait for your room code, then choose **Copy invite** and share it with guests.
+5. Select an activity and compatible battlefield, with the same fonts, controls, sounds and menu skin used by regular game setup. Choose teams in the roster and use **Match rules and factions** for difficulty, gold, fog, scene deployment and factions. Guests can change their own teams and mark themselves ready. Changing match options clears guest readiness. The lobby explains what is required before the host can start.
 6. Choose **Start match** after everyone is ready. Activities must support the player count and have enough distinct teams. AI teams are reserved for the activity.
 
 Room-code play uses outgoing connections to the central relay, so hosts do not forward ports. The service must stay online and your network must allow outgoing UDP. To run your own service locally or on AWS, see [the room service guide](../Services/RoomService/README.md).
 
-For direct LAN play, disable **Use room codes** and use UDP port **8000** by default. Direct internet play still needs the selected port forwarded to the host and a reachable public IPv4 address.
+For direct LAN play, select **Local network / direct address** on the **Connection** page and use UDP port **8000** by default. Direct internet play still needs the selected port forwarded to the host and a reachable public IPv4 address.
 
 ## Join a room
 
-1. Choose **Multiplayer**, set your player name, and open **Join**.
-2. Paste the host's ten-character **Room code** and enter the password if needed. Both players must use the same room service. For direct play, disable **Use room codes**, enter the host address such as `192.168.1.20:8000`, or use **Find LAN rooms** to discover rooms on port 8000.
-3. Choose **Join room**, select your team, and press **Ready**. Room chat is available before and during a match.
+1. Choose **Multiplayer**, open **Join game**, and set your player name.
+2. Paste the host's ten-character **Invitation code** and enter the password if needed. Both players must use the same room service. For direct play, select **Local network / direct address** on the **Connection** page, enter the host address such as `192.168.1.20:8000`, or use **Find LAN games** to discover rooms on port 8000.
+3. Choose **Join lobby**, select your team, and press **Ready up**. Room chat is available in the lobby and session menu. At compact resolutions it opens on its own page.
 4. Configure your normal player-one controls in the game's options. Guests send their keyboard, mouse, and gamepad mappings as their assigned network player. Shop search text and navigation keys also travel to that player's menus. The host's controls and typing stay local.
 
 All players should use the same game build and game/mod assets. The handshake rejects a different game version or multiplayer protocol. It does not currently compare every installed mod or asset checksum; missing guest sound files cannot be played.
@@ -29,7 +29,8 @@ All players should use the same game build and game/mod assets. The handshake re
 - **Escape** opens the session menu. The host can also use their player-one Start control. Guests use **Escape** for the session menu.
 - **Resume** returns control to the match. Opening the menu releases that player's controls while the other players continue.
 - The host can **Return everyone to lobby** and launch another match with new options. The host's ordinary single-player pause, quick-load, and restart shortcuts do not bypass the room lifecycle.
-- The guest overlay shows ping, received frame rate, and when frames stop arriving.
+- After game over, the results remain visible for five seconds, then everyone automatically returns to the same lobby. Activity exits also return the group to the lobby. The invitation code, player slots, teams, settings and chat stay in place; guests ready up again and the host chooses **Play again**. Input, old frames and looping sounds are cleared between rounds.
+- The lobby and session menu show the guest's connection latency; the session menu also shows received frame rate. Loading and reconnecting have dedicated screens.
 - A dropped connection triggers automatic reconnect attempts for 20 seconds. The host reserves the player's slot for 60 seconds. Rejoining during that window restores the same player and ongoing looping sounds. Controls expire after 250 ms without fresh input, so a disconnected player does not keep firing or moving.
 - A match accepts returning players; new players join in the lobby. Before another match, the host must wait for disconnected players or **Release slot**. Closing the room tells guests the host left.
 
@@ -61,17 +62,21 @@ On Windows with Visual Studio 2022 C++ tools and the repository dependencies ins
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Deployment -Guests 3 -Relay
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -ServiceAddress 54.164.52.173:8001
 .\Tests\RunMultiplayerCursorTests.ps1
+.\Tests\RunMultiplayerCursorTests.ps1 -Resolution 640x360
+.\Tests\RunMultiplayerCursorTests.ps1 -Resolution 1280x720
 ```
 
 The standalone suite checks serialization bounds, every mapped action, movement and button recovery, duplicate/reordered/wrapped inputs, control expiry, frame repair and heavier-loss recovery, 20,000 malformed packet bodies, real UDP frame delivery, passwords, LAN discovery replies, four-player transport capacity, rejection of a fifth player, disconnects, and repeated shutdown/startup. Meson also registers `multiplayer-tests` for builds on other platforms.
 
-The native smoke test builds the complete Windows x64 game and runs a real host and one to three guests with isolated settings. It exercises two different activities and both stream sizes, returns to the lobby, reconnects every original guest slot, checks each remote actor's movement and firing, verifies GUI navigation and text routing, chat, and looping-sound replay/stop, and captures the actual OpenGL output. Logs and screenshots are written to ignored `build-mp/` files. Smoke flags are opt-in test hooks and are not used by normal rooms.
+The native smoke test builds the complete Windows x64 game and runs a real host and one to three guests with isolated settings and local mods disabled. It starts and readies players through the native menu buttons, opens live host and guest session overlays and resumes through their buttons, exercises two different activities and both stream sizes, tests activity-exit and automatic game-over returns to the same room, reconnects every original guest slot, checks each remote actor's movement and firing, verifies GUI navigation and text routing, chat, and looping-sound replay/stop, and captures the actual OpenGL output. Logs and screenshots are written to ignored `build-mp/` files. Smoke flags are opt-in test hooks and are not used by normal rooms.
 
 The deployment variant initializes an opaque fog map, places brains and troops, marks guests ready while the host continues deploying, and then enters combat. It checks the host's rendered view and every guest's decoded view for a black map, verifies that combat preserves fog, reports delivered frame rates, and captures all four stages. The original fog fixture left only about 1% of the guest image visible. A separate deterministic check drives the production frame gate over a healthy 120 ms round trip; the old two-frame window produced 16.8 FPS, while the adaptive window produces 30.2 FPS. That gate measurement isolates acknowledgement pacing; actual frame rate also depends on rendering, encoding, upload capacity and packet loss.
 
 After these fixes on 2026-10-02, a host and three guests passed the deployment variant through a local relay, including preserved combat fog. All four instances also passed the normal two-match smoke test through the deployed AWS relay, including movement/firing, GUI keys/text, audio replay/stop and reconnects. Guest checkpoints measured about 19–21 FPS at 640 × 360 and 12–17 FPS at 960 × 540 on one shared Windows computer. Separate computers and networks still need player acceptance; these measurements do not guarantee a particular frame rate.
 
-The cursor check renders twelve menu, lobby, connection, session, and gameplay states through the actual game renderer. It asserts that foreground cursor geometry exists when menus are visible and disappears during gameplay and after closing the menu, and captures each OpenGL view. This check reproduced the original missing pointer (`software=0 rendered=0`) and passed after enabling the menu's software cursor. Opening the multiplayer menu also releases captured mouse input. The opt-in `CCCP_MPSMOKE_CURSOR=1` fixture does not start or join network rooms; it is separate from the live multiplayer smoke test.
+The native menu check renders 24 entry, lobby, rules, factions, chat, connection, session, leave confirmation, post-match and gameplay states through the actual game renderer. It checks page contents, control bounds and overlapping interactive controls, verifies both native cursor pixels and the final rendered pointer, and captures each OpenGL view. It supports 640 × 360, 960 × 540 and 1280 × 720, asserts the actual resolution and requires clean engine shutdown. Captures are saved under `build-mp/menus-RESOLUTION/`. Opening multiplayer menus releases captured mouse input. The opt-in `CCCP_MPSMOKE_CURSOR=1` fixture does not start or join network rooms; it is separate from the live multiplayer smoke test.
+
+On 2026-10-03, all 24 native menu states passed at each of the three resolutions. A host and three guests passed the two-match test through the local relay, including native Start/Ready/Resume buttons, live session overlays, reconnects, activity-exit return, automatic game-over return, retained room identity and chat, and cleared readiness/input/frames/audio. Actual host and guest post-match screenshots confirmed the palette-based battlefield preview. Every instance exited cleanly. The quick menu test exposed an audio shutdown crash; cached samples are now released before the audio system and its referenced sound owners are destroyed. The Windows x64 Final build passed with existing dependency/build-property warnings.
 
 The local two-instance direct combat run received approximately 25–30 FPS at 640 × 360. The four-instance direct run measured approximately 15–23 FPS at 960 × 540. The four-instance local relay run passed for every guest at about 20 FPS at its second-match verification checkpoints. Windows clients also passed the relay suite against the native Linux service.
 

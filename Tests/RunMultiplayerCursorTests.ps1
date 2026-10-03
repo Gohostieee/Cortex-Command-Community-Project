@@ -1,4 +1,4 @@
-param([string]$GameDirectory = '')
+param([string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe', [ValidateSet('960x540', '640x360', '1280x720')][string]$Resolution = '960x540')
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $gameRoot = if ($GameDirectory) { (Resolve-Path -LiteralPath $GameDirectory).Path } else { $taskRoot }
@@ -6,22 +6,25 @@ Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Path (Join-Path $gameRoot 'build-mp') -Force | Out-Null
     if (!$GameDirectory) {
-        & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 /v:quiet '/flp:logfile=build-mp/cursor-build.log;verbosity=minimal'
+        & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/cursor-build.log;verbosity=minimal'
         if ($LASTEXITCODE) { throw 'Game build failed.' }
         if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
     }
     $settings = Join-Path $gameRoot 'build-mp/cursor-settings.ini'
+    $dimensions = $Resolution.Split('x')
+    $disabledMods = (Get-ChildItem -LiteralPath (Join-Path $gameRoot 'Mods') -Directory -Filter '*.rte' | ForEach-Object { "    DisableMod = $($_.Name)" }) -join "`n"
     @"
 SettingsMan
-    ResolutionX = 960
-    ResolutionY = 540
+    ResolutionX = $($dimensions[0])
+    ResolutionY = $($dimensions[1])
     ResolutionMultiplier = 1
     Fullscreen = 0
     EnableVSync = 1
     UseMultiDisplays = 0
     SkipIntro = 1
     LaunchIntoActivity = 0
-"@ | Set-Content -LiteralPath $settings
+$disabledMods
+"@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $settings
     $previousSettings = $env:CCCP_SETTINGSPATH
     $previousCursor = $env:CCCP_MPSMOKE_CURSOR
     $logPath = Join-Path $gameRoot 'build-mp/cursor-smoke.log'
@@ -30,11 +33,14 @@ SettingsMan
     try {
         $env:CCCP_SETTINGSPATH = $settings
         $env:CCCP_MPSMOKE_CURSOR = '1'
-        $instance = Start-Process -FilePath (Join-Path $gameRoot 'Cortex Command.exe') -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
+        $instance = Start-Process -FilePath (Join-Path $gameRoot $GameExecutable) -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
         $deadline = [DateTime]::UtcNow.AddSeconds(120)
         while (!$instance.HasExited -and [DateTime]::UtcNow -lt $deadline) {
             if ((Test-Path -LiteralPath $logPath) -and ((Get-Content -LiteralPath $logPath) -match '^(PASS|FAIL):')) {
-                if (!$instance.WaitForExit(5000)) { Stop-Process -Id $instance.Id; $instance.WaitForExit() }
+                # Keep waiting for normal engine shutdown; a written PASS alone
+                # must not conceal a crash or stalled teardown.
+                $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                while (!$instance.HasExited -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
                 break
             }
             Start-Sleep -Milliseconds 200
@@ -43,10 +49,16 @@ SettingsMan
         $log = Get-Content -LiteralPath $logPath
         $log
         if (!($log -match '^PASS:') -or ($log -match '^FAIL:')) { throw 'Multiplayer cursor verification failed.' }
+        if (!($log -match "^RESOLUTION: $Resolution$")) { throw 'Menu verification used an unexpected resolution.' }
+        if ($instance.ExitCode) { throw "Native menu verification exited with $($instance.ExitCode)." }
+        $captureDirectory = Join-Path $gameRoot "build-mp/menus-$Resolution"
+        New-Item -ItemType Directory -Path $captureDirectory -Force | Out-Null
+        Copy-Item -LiteralPath $logPath -Destination $captureDirectory
         foreach ($line in $log) {
             if ($line -match '^([a-z-]+): expected=') {
                 $screenshot = Join-Path $gameRoot "build-mp/cursor-$($Matches[1]).png"
                 if (!(Test-Path -LiteralPath $screenshot) -or (Get-Item -LiteralPath $screenshot).Length -eq 0) { throw "Cursor screenshot missing: $screenshot" }
+                Copy-Item -LiteralPath $screenshot -Destination $captureDirectory
             }
         }
     } finally {

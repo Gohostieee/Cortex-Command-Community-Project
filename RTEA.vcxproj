@@ -951,6 +951,7 @@
     <ClInclude Include="Source\Menus\MetagameGUI.h" />
     <ClInclude Include="Source\Menus\ObjectPickerGUI.h" />
     <ClInclude Include="Source\Menus\ScenarioGUI.h" />
+    <ClInclude Include="Source\Menus\MultiplayerMenuGUI.h" />
     <ClInclude Include="Source\Menus\SceneEditorGUI.h" />
   </ItemGroup>
   <ItemGroup>
@@ -1480,6 +1481,7 @@
     <ClCompile Include="Source\Menus\MetagameGUI.cpp" />
     <ClCompile Include="Source\Menus\ObjectPickerGUI.cpp" />
     <ClCompile Include="Source\Menus\ScenarioGUI.cpp" />
+    <ClCompile Include="Source\Menus\MultiplayerMenuGUI.cpp" />
     <ClCompile Include="Source\Menus\SceneEditorGUI.cpp" />
     <ClCompile Include="Source\Main.cpp" />
   </ItemGroup>

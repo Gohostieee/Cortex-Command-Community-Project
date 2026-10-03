@@ -19,6 +19,7 @@
 #include "MetagameGUI.h"
 #include "LoadingScreen.h"
 #include "System.h"
+#include "MultiplayerMan.h"
 
 using namespace RTE;
 
@@ -105,6 +106,7 @@ void MenuMan::SetActiveMenu() {
 }
 
 void MenuMan::HandleTransitionIntoMenuLoop() {
+	if (g_MultiplayerMan.IsUIOpen()) { SetMultiplayerMenuBackground(true); return; }
 	if (g_MetaMan.GameInProgress()) {
 		if (g_ActivityMan.SkipPauseMenuWhenPausingActivity()) {
 			m_TitleScreen->SetTitleTransitionState(TitleScreen::TitleTransition::MetaGameFadeIn);
@@ -127,6 +129,12 @@ void MenuMan::HandleTransitionIntoMenuLoop() {
 			m_TitleScreen->SetTitleTransitionState(TitleScreen::TitleTransition::ScrollingFadeIn);
 		}
 	}
+}
+
+void MenuMan::UpdateMultiplayerBackground() { m_TitleScreen->Update(); }
+void MenuMan::SetMultiplayerMenuBackground(bool open) {
+	if (open) m_TitleScreen->SkipIntro();
+	m_TitleScreen->SetTitleTransitionState(open ? TitleScreen::TitleTransition::ScenarioFadeIn : TitleScreen::TitleTransition::ScrollingFadeIn);
 }
 
 bool MenuMan::Update() {
@@ -254,6 +262,7 @@ void MenuMan::Draw() const {
 	if (g_WindowMan.ResolutionChanged()) {
 		return;
 	}
+	if (g_MultiplayerMan.IsUIOpen()) { m_TitleScreen->Draw(); return; }
 
 	switch (m_ActiveMenu) {
 		case ActiveMenu::MainMenuActive:

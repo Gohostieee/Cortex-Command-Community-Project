@@ -59,6 +59,8 @@ namespace RTE {
 		/// Gets the current title transition state.
 		/// @return The current title transition state. See TitleTransition enumeration for values.
 		TitleTransition GetTitleTransitionState() const { return m_TitleTransitionState; }
+		/// Direct multiplayer launches enter room setup without waiting for the intro.
+		void SkipIntro() { m_FinishedPlayingIntro = true; }
 
 		/// Sets the target title transition state and, if different from the current, sets the section switch to trigger the transition.
 		/// @param newTransitionState The target title transition state.
