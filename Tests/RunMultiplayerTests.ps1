@@ -1,4 +1,4 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [string]$ServiceAddress = '', [string]$GameDirectory = '')
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [string]$ServiceAddress = '', [string]$GameDirectory = '')
 $ErrorActionPreference = 'Stop'
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -16,7 +16,7 @@ try {
     if ($Smoke) {
         if ($Relay) { & ./Services/RoomService/Build.ps1 -Test }
         if (!$GameDirectory) {
-            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
+            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
             if ($LASTEXITCODE) { throw 'Game build failed.' }
             if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
         }
@@ -25,8 +25,10 @@ try {
         $previousSettings = $env:CCCP_SETTINGSPATH
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
+        $previousDeployment = $env:CCCP_MPSMOKE_DEPLOYMENT
         $previousService = $env:CCCP_MP_SERVICE
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
+        $env:CCCP_MPSMOKE_DEPLOYMENT = if ($Deployment) { '1' } else { $null }
         $roles = @('host', 'client')
         if ($Guests -ge 2) { $roles += 'client2' }
         if ($Guests -ge 3) { $roles += 'client3' }
@@ -77,6 +79,7 @@ SettingsMan
             $env:CCCP_SETTINGSPATH = $previousSettings
             $env:CCCP_MPSMOKE_ROLE = $previousSmokeRole
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
+            $env:CCCP_MPSMOKE_DEPLOYMENT = $previousDeployment
             $env:CCCP_MP_SERVICE = $previousService
         }
     }

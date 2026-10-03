@@ -23,6 +23,7 @@
 #include "glad/gl.h"
 #include "raylib/rlgl.h"
 #include "lz4.h"
+#include "lz4hc.h"
 
 #include <charconv>
 #include <cstdlib>
@@ -34,6 +35,7 @@
 #include "System.h"
 #include "DataModule.h"
 #include "Actor.h"
+#include "SceneEditorGUI.h"
 
 using namespace RTE;
 using namespace RTE::MP;
@@ -66,6 +68,8 @@ struct MultiplayerMan::Impl {
 		std::vector<std::vector<uint8_t>> Outgoing;
 		size_t NextPacket = 0;
 		uint32_t FrameID = 0, AckID = 0;
+		int FrameRoundTripMS = 0;
+		std::array<std::pair<uint32_t, uint64_t>, 8> CaptureTimes{};
 		double Budget = 0;
 	};
 	Mode State = Mode::Idle;
@@ -116,6 +120,9 @@ struct MultiplayerMan::Impl {
 	uint64_t BytesReceived = 0;
 	float FPS = 0;
 	bool Smoke = false, SmokeCapture = false;
+	bool SmokeDeployment = false;
+	bool SmokeDeploymentFailed = false;
+	uint64_t SmokeDeploymentStart = 0, SmokeDeploymentCount = 0;
 	bool CursorVerification = false;
 	size_t CursorStage = 0;
 	int CursorFrames = 0;
@@ -148,6 +155,7 @@ struct MultiplayerMan::Impl {
 	bool SmokeLoopStopped = false;
 	void Verify(const std::string& message) { if (Smoke) { std::ofstream log("build-mp/" + SmokeRole + "-smoke.log", std::ios::app); log << message << '\n'; } }
 	void SmokeTick();
+	void DeploymentTick();
 
 	void ClearSounds() { for (auto& [channel, sound]: Sounds) sound->Stop(); Sounds.clear(); }
 	void Stop() {
@@ -248,7 +256,7 @@ struct MultiplayerMan::Impl {
 		if (game->GetCPUTeam() >= 0) { const int cpuTeam = game->GetCPUTeam(); for (const auto& player: Players) if (player.Connected && player.Team == cpuTeam) { delete game; Error = "That team belongs to the AI. Choose another team."; return false; } }
 		g_SceneMan.SetSceneToLoad(Scenes[SceneIndex], true, Deploy); g_LuaMan.FileCloseAll(); g_ActivityMan.SetStartActivity(game); g_ActivityMan.SetRestartActivity();
 		++Epoch; Playing = Launch = true; UI = false; Error.clear();
-		for (auto& player: Players) { if (player.Encoding.valid()) player.Encoding.get(); player.Inputs.Reset(); player.Outgoing.clear(); player.NextPacket = 0; player.LastFrame = player.LastAck = Now(); player.Loops.clear(); player.AudioReady = false; player.ReplayLoops = true; player.Text.clear(); player.TextActive = false; }
+		for (auto& player: Players) { if (player.Encoding.valid()) player.Encoding.get(); player.Inputs.Reset(); player.Outgoing.clear(); player.NextPacket = 0; player.LastFrame = player.LastAck = Now(); player.CaptureTimes = {}; player.FrameRoundTripMS = 0; player.Loops.clear(); player.AudioReady = false; player.ReplayLoops = true; player.Text.clear(); player.TextActive = false; }
 		g_AudioMan.ClearSoundEvents(-1); g_AudioMan.SetMultiplayerMode(true); Lobby(); return true;
 	}
 	void ReturnToLobby() {
@@ -277,6 +285,7 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	impl.Online = std::getenv("CCCP_MP_SERVICE") != nullptr;
 	if (!host && impl.Online) std::snprintf(impl.JoinCode, sizeof(impl.JoinCode), "%s", address.c_str());
 	if (smokeTest) {
+		impl.SmokeDeployment = std::getenv("CCCP_MPSMOKE_DEPLOYMENT") != nullptr;
 		impl.SmokeRole = host ? "host" : "client";
 		if (const char* role = std::getenv("CCCP_MPSMOKE_ROLE"); role && (std::string(role) == "host" || std::string(role) == "client" || std::string(role) == "client2" || std::string(role) == "client3")) impl.SmokeRole = role;
 		if (const char* count = std::getenv("CCCP_MPSMOKE_GUESTS"); count && count[0] >= '1' && count[0] <= '3' && !count[1]) impl.SmokeGuests = count[0] - '0';
@@ -288,7 +297,7 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	if (smokeTest) {
 		impl.Smoke = true; impl.SmokeStarted = impl.SmokeStageTime = Now();
 		std::ofstream("build-mp/" + impl.SmokeRole + "-smoke.log") << (started ? "START" : "FAIL: " + impl.Error) << '\n';
-		if (host && started) { for (int i = 0; i < impl.Activities.size(); ++i) if (impl.Activities[i]->GetPresetName() == "Test Activity") { impl.ActivityIndex = i; impl.LoadScenes(); break; } impl.Lobby(); }
+		if (host && started) { for (int i = 0; i < impl.Activities.size(); ++i) if (impl.Activities[i]->GetPresetName() == "Test Activity") { impl.ActivityIndex = i; impl.LoadScenes(); break; } if (impl.SmokeDeployment) { for (int i = 0; i < impl.Scenes.size(); ++i) if (impl.Scenes[i]->GetPresetName() == "Grasslands") impl.SceneIndex = i; impl.SceneName = impl.Scenes[impl.SceneIndex]->GetPresetName(); } impl.Lobby(); }
 	}
 	return started;
 }
@@ -306,6 +315,12 @@ void MultiplayerMan::CaptureVerificationFrame() {
 	if (!impl.SmokeCapture) return; if (++impl.SmokeCaptureDelay < 3) return; impl.SmokeCapture = false; impl.SmokeCaptureDelay = 0;
 	int viewport[4]; glGetIntegerv(GL_VIEWPORT, viewport); int alignment; glGetIntegerv(GL_PACK_ALIGNMENT, &alignment); glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	std::vector<uint8_t> pixels(size_t(viewport[2]) * viewport[3] * 3); glReadPixels(viewport[0], viewport[1], viewport[2], viewport[3], GL_RGB, GL_UNSIGNED_BYTE, pixels.data()); glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+	if (impl.SmokeDeployment && impl.State == Impl::Mode::Host && impl.SmokeStage >= 2 && impl.SmokeStage <= 4) {
+		size_t colored = 0; for (size_t i = 0; i < pixels.size(); i += 3) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) ++colored;
+		const double visible = double(colored) / (pixels.size() / 3);
+		impl.Verify("DEPLOYMENT: host visible=" + std::to_string(visible));
+		if (visible < 0.6) { impl.SmokeDeploymentFailed = true; impl.Verify("FAIL: host deployment world is black"); }
+	}
 	const size_t pitch = size_t(viewport[2]) * 3; for (int row = 0; row < viewport[3] / 2; ++row) std::swap_ranges(pixels.begin() + row * pitch, pixels.begin() + (row + 1) * pitch, pixels.begin() + (viewport[3] - row - 1) * pitch);
 	SDL_Surface* surface = SDL_CreateSurfaceFrom(viewport[2], viewport[3], SDL_PIXELFORMAT_RGB24, pixels.data(), static_cast<int>(pitch));
 	const auto path = impl.CursorVerification ? std::string("build-mp/cursor-") + Impl::CursorCases[impl.CursorStage].Name + ".png" : std::string("build-mp/") + impl.SmokeRole + "-stage" + std::to_string(impl.SmokeStage) + ".png";
@@ -327,13 +342,13 @@ int MultiplayerMan::ViewWidth(int screen) const { const auto* activity = g_Activ
 int MultiplayerMan::ViewHeight(int screen) const { return IsHostingMatch() && screen > 0 ? (m_Impl->Quality == 0 ? 360 : 540) : g_WindowMan.GetResY(); }
 bool MultiplayerMan::WantsFrame(int player) const {
 	if (!IsRemotePlayer(player)) return false; const auto& peer = m_Impl->Players[player];
-	if (uint32_t(peer.FrameID - peer.AckID) >= 2 && Now() - peer.LastFrame < FrameTimeoutMS) return false;
-	return peer.Connected && !peer.Encoding.valid() && peer.Outgoing.empty() && Now() - peer.LastFrame >= (Now() - peer.LastAck > 2000 ? 66 : 33) && m_Impl->Net.QueuedBytes(peer.Address) < 32 * 1024;
+	return peer.Connected && !peer.Encoding.valid() && peer.Outgoing.empty() && FrameCaptureDue(Now(), peer.LastFrame, peer.LastAck, peer.FrameID, peer.AckID, std::max(peer.FrameRoundTripMS, m_Impl->Net.Ping(peer.Address))) && m_Impl->Net.QueuedBytes(peer.Address) < 32 * 1024;
 }
 void MultiplayerMan::CaptureFrame(int player, unsigned framebuffer, int width, int height, float cameraX, float cameraY) {
 	if (!WantsFrame(player) || width < 320 || width > MaxWidth || height < 180 || height > MaxHeight) return;
 	auto& peer = m_Impl->Players[player]; peer.LastFrame = Now();
 	FrameInfo info; info.ID = ++peer.FrameID; info.InputSequence = peer.Inputs.LastSequence(); info.Width = static_cast<uint16_t>(width); info.Height = static_cast<uint16_t>(height); info.CameraX = cameraX; info.CameraY = cameraY;
+	peer.CaptureTimes[info.ID % peer.CaptureTimes.size()] = {info.ID, peer.LastFrame};
 	std::vector<uint8_t> pixels(size_t(width) * height * 2);
 	int previousRead = 0, previousPack = 0; glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousRead); glGetIntegerv(GL_PACK_ALIGNMENT, &previousPack);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer); glPixelStorei(GL_PACK_ALIGNMENT, 1); glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels.data());
@@ -341,7 +356,10 @@ void MultiplayerMan::CaptureFrame(int player, unsigned framebuffer, int width, i
 	if constexpr (std::endian::native == std::endian::big) for (size_t i = 0; i < pixels.size(); i += 2) std::swap(pixels[i], pixels[i + 1]);
 	peer.Encoding = std::async(std::launch::async, [info, pixels = std::move(pixels)]() mutable {
 		Impl::Encoded result; result.Info = info; result.Bytes.resize(LZ4_compressBound(static_cast<int>(pixels.size())));
-		const int size = LZ4_compress_default(reinterpret_cast<const char*>(pixels.data()), reinterpret_cast<char*>(result.Bytes.data()), static_cast<int>(pixels.size()), static_cast<int>(result.Bytes.size()));
+		// Terrain textures dominate the stream's upload cost. Moderate HC levels
+		// save bandwidth while fitting inside one capture interval on the worker.
+		const int level = info.Width <= 640 ? 5 : 3;
+		const int size = LZ4_compress_HC(reinterpret_cast<const char*>(pixels.data()), reinterpret_cast<char*>(result.Bytes.data()), static_cast<int>(pixels.size()), static_cast<int>(result.Bytes.size()), level);
 		result.Bytes.resize(std::max(0, size)); result.Info.Bytes = static_cast<uint32_t>(result.Bytes.size()); return result;
 	});
 }
@@ -369,7 +387,15 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		if (header.Type == Kind::Input && Playing) { Input input; if (ReadInput(reader, input)) player.Inputs.Push(input, Now()); }
 		else if (header.Type == Kind::Ready && !Playing) { uint8_t ready, team; if (reader.U8(ready) && ready <= 1 && reader.U8(team) && team < 4 && (AvailableTeams & (1 << team)) && reader.Done()) { player.Ready = ready != 0; player.Team = team; Lobby(); } }
 		else if (header.Type == Kind::Chat) { std::string message; if (reader.Text(message, 192) && !message.empty() && reader.Done() && Now() - player.LastChat > 250) { player.LastChat = Now(); AddChat(slot, message); } }
-		else if (header.Type == Kind::FrameAck) { uint32_t frame; if (reader.U32(frame) && reader.Done() && !Newer(frame, player.FrameID) && Newer(frame, player.AckID)) { player.AckID = frame; player.LastAck = Now(); if (!player.AudioReady) g_MultiplayerMan.SetTextInputActive(slot, player.TextActive); player.AudioReady = true; } }
+		else if (header.Type == Kind::FrameAck) {
+			uint32_t frame;
+			if (reader.U32(frame) && reader.Done() && !Newer(frame, player.FrameID) && Newer(frame, player.AckID)) {
+				player.AckID = frame; player.LastAck = Now();
+				const auto [id, captured] = player.CaptureTimes[frame % player.CaptureTimes.size()];
+				if (id == frame && captured) { const int sample = static_cast<int>(std::min<uint64_t>(1000, player.LastAck - captured)); player.FrameRoundTripMS = player.FrameRoundTripMS ? (player.FrameRoundTripMS * 3 + sample) / 4 : sample; }
+				if (!player.AudioReady) g_MultiplayerMan.SetTextInputActive(slot, player.TextActive); player.AudioReady = true;
+			}
+		}
 		else if (header.Type == Kind::TextInput && Playing) { uint8_t direction; std::string text; if (reader.U8(direction) && direction == 0 && reader.Text(text, 64) && reader.Done() && player.TextActive && player.Text.size() + text.size() <= 256) { player.Text += text; if (Smoke && text == "Shop text test") { player.SmokeTextSeen = true; Verify("GUI TEXT: player " + std::to_string(slot + 1)); } } }
 		else if (header.Type == Kind::Leave && reader.Done()) { Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Playing ? Now() + 60000 : 0; player.Inputs.Reset(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
 		return;
@@ -415,13 +441,22 @@ void MultiplayerMan::Impl::Present(const FrameAssembler::Complete& frame) {
 	const size_t size = size_t(frame.Info.Width) * frame.Info.Height * 2; std::vector<uint8_t> pixels(size);
 	const int decoded = LZ4_decompress_safe(reinterpret_cast<const char*>(frame.Bytes.data()), reinterpret_cast<char*>(pixels.data()), static_cast<int>(frame.Bytes.size()), static_cast<int>(pixels.size()));
 	if (decoded != static_cast<int>(pixels.size())) { Verify("DECODE FAILURE: " + std::to_string(decoded) + " expected=" + std::to_string(size)); return; }
-	std::vector<uint8_t> rgba(size * 2);
-	for (size_t i = 0; i < size / 2; ++i) { const uint16_t color = uint16_t(pixels[i * 2]) | uint16_t(pixels[i * 2 + 1]) << 8; rgba[i * 4] = ((color >> 11) & 31) * 255 / 31; rgba[i * 4 + 1] = ((color >> 5) & 63) * 255 / 63; rgba[i * 4 + 2] = (color & 31) * 255 / 31; rgba[i * 4 + 3] = 255; }
+	if (SmokeDeployment && frame.Info.ID > 3 && (!SmokeDeploymentStart || Now() - SmokeDeploymentStart < 8000)) {
+		size_t colored = 0;
+		for (size_t i = 0; i < pixels.size(); i += 2) if (pixels[i] || pixels[i + 1]) ++colored;
+		const double visible = double(colored) / (pixels.size() / 2);
+		if (visible < 0.6 && !SmokeDeploymentFailed) { SmokeDeploymentFailed = true; Verify("FAIL: deployment world is black; visible=" + std::to_string(visible)); }
+	}
+	if constexpr (std::endian::native == std::endian::big) for (size_t i = 0; i < pixels.size(); i += 2) std::swap(pixels[i], pixels[i + 1]);
 	int previousTexture = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
 	if (!Texture) glGenTextures(1, &Texture);
 	glBindTexture(GL_TEXTURE_2D, Texture); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	if (TextureWidth != frame.Info.Width || TextureHeight != frame.Info.Height) { glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, frame.Info.Width, frame.Info.Height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data()); TextureWidth = frame.Info.Width; TextureHeight = frame.Info.Height; }
-	else glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.Info.Width, frame.Info.Height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+	// Upload the wire pixels directly; the GPU expands RGB565 instead of doing
+	// a CPU conversion and a second full-frame allocation on every guest frame.
+	int alignment = 0; glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	if (TextureWidth != frame.Info.Width || TextureHeight != frame.Info.Height) { glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, frame.Info.Width, frame.Info.Height, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels.data()); TextureWidth = frame.Info.Width; TextureHeight = frame.Info.Height; }
+	else glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.Info.Width, frame.Info.Height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels.data());
+	glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
 	glBindTexture(GL_TEXTURE_2D, previousTexture);
 	const uint64_t now = Now(); if (now > LastFrameReceived) FPS = FPS * 0.9f + 100.0f / static_cast<float>(now - LastFrameReceived); LastFrameReceived = now; BytesReceived += frame.Bytes.size();
 	g_AudioMan.SetStreamListener(Vector(frame.Info.CameraX + frame.Info.Width / 2, frame.Info.CameraY + frame.Info.Height / 2), true);
@@ -475,7 +510,7 @@ void MultiplayerMan::Impl::SampleInput() {
 	}
 	const Vector aim = enabled ? g_UInputMan.AnalogAimValues(0) : Vector(), move = enabled ? g_UInputMan.AnalogMoveValues(0) : Vector();
 	LocalInput.AimX = std::clamp(aim.GetX(), -1.0f, 1.0f); LocalInput.AimY = std::clamp(aim.GetY(), -1.0f, 1.0f); LocalInput.MoveX = std::clamp(move.GetX(), -1.0f, 1.0f); LocalInput.MoveY = std::clamp(move.GetY(), -1.0f, 1.0f);
-	if (Smoke) { LocalInput.Held |= (uint64_t(1) << InputElements::INPUT_L_RIGHT) | (uint64_t(1) << InputElements::INPUT_FIRE); LocalInput.MouseHeld = 1; LocalInput.AimX = 0.75f; LocalInput.MouseX += 2; }
+	if (Smoke && !SmokeDeployment) { LocalInput.Held |= (uint64_t(1) << InputElements::INPUT_L_RIGHT) | (uint64_t(1) << InputElements::INPUT_FIRE); LocalInput.MouseHeld = 1; LocalInput.AimX = 0.75f; LocalInput.MouseX += 2; }
 	if (Smoke && TextActive && !SmokeTextSent) { SmokeTextSent = true; MP::Writer writer(Kind::TextInput, Session, Epoch); writer.U8(0); writer.Text("Shop text test", 64); Net.Send(ServerAddress, writer.Data, Delivery::Control); }
 	if (Smoke && SmokeStage == 1 && TextActive) LocalInput.Held |= uint64_t(1) << (GUIKeyFirst + 1);
 	if (Now() - LastInputSent >= 8) { ++LocalInput.Sequence; LastInputSent = Now(); MP::Writer writer(Kind::Input, Session, Epoch); WriteInput(writer, LocalInput); Net.Send(ServerAddress, writer.Data, Delivery::Input); }
@@ -526,6 +561,7 @@ void MultiplayerMan::Impl::Tick() {
 
 void MultiplayerMan::Impl::SmokeTick() {
 	if (!Smoke) return; const auto now = Now();
+	if (SmokeDeployment) { DeploymentTick(); return; }
 	if (Playing && now - SmokeLastStats > 3000) { SmokeLastStats = now; if (State == Mode::Host) Verify("TRANSPORT: " + Net.Diagnostics(Players[1].Address)); else Verify("TRANSPORT: " + Net.Diagnostics(ServerAddress) + " buffered=" + std::to_string(Frames.BufferedChunks()) + " expired=" + std::to_string(Frames.DroppedFrames()) + " presented=" + std::to_string(Presented)); }
 	if (now - SmokeStarted > 90000) { Verify("FAIL: smoke timed out: " + Error); System::SetQuit(true); return; }
 	if (State == Mode::Host) {
@@ -547,6 +583,49 @@ void MultiplayerMan::Impl::SmokeTick() {
 		if (Playing && SmokeStage == 2) { SmokeStage = 3; SmokeStageTime = now; SmokeSecondStart = Presented; }
 		if (SmokeStage == 3 && now - SmokeStageTime > 6000 && Presented >= SmokeSecondStart + 20 && Texture) { SmokeStage = 4; SmokeCapture = true; const bool chat = std::any_of(Chat.begin(), Chat.end(), [](const auto& line) { return line.find("Guest room chat test") != std::string::npos; }); Verify(std::string(SmokeLoopPlays >= 2 && SmokeLoopStopped && chat ? "PASS: " : "FAIL: audio replay, stop or chat missing. ") + "second match. new frames=" + std::to_string(Presented - SmokeSecondStart) + " FPS=" + std::to_string(FPS) + " sounds=" + std::to_string(AudioReceived)); }
 	} else if (SmokeStage == 4 && State == Mode::Idle) System::SetQuit(true);
+}
+
+void MultiplayerMan::Impl::DeploymentTick() {
+	const auto now = Now();
+	if (State == Mode::Idle && SmokeStage == 5) { System::SetQuit(true); return; }
+	if (now - SmokeStarted > 60000) { Verify("FAIL: deployment timed out: " + Error); System::SetQuit(true); return; }
+	if (State == Mode::Client) {
+		if (!Playing && SmokeStage == 0 && !Players[LocalSlot].Ready) SendReady(true, Players[LocalSlot].Team);
+		if (Playing && Presented && SmokeStage == 0) { SmokeStage = 1; SmokeStageTime = SmokeDeploymentStart = now; SmokeDeploymentCount = Presented; SmokeCapture = true; }
+		if (Playing && Presented) {
+			const int phase = std::clamp(int((now - SmokeStageTime) / 3000), 0, 3);
+			if (phase + 1 > SmokeStage) { SmokeStage = phase + 1; SmokeCapture = true; Verify("DEPLOYMENT: phase=" + std::to_string(phase) + " frames=" + std::to_string(Presented) + " FPS=" + std::to_string(FPS)); }
+		}
+		if (!Playing && SmokeStage > 0 && SmokeStage < 5) { Verify("DEPLOYMENT: average FPS=" + std::to_string(1000.0 * (Presented - SmokeDeploymentCount) / std::max<uint64_t>(1, now - SmokeDeploymentStart))); Verify(SmokeDeploymentFailed ? "FAIL: deployment visibility" : "PASS: deployment world remains visible through brain placement, troop placement and waiting"); SmokeStage = 5; }
+		return;
+	}
+	if (State != Mode::Host) return;
+	if (SmokeStage == 0 && std::all_of(Players.begin() + 1, Players.begin() + 1 + SmokeGuests, [](const auto& player) { return player.Connected && player.Ready; })) { if (!StartGame()) { Verify("FAIL: " + Error); System::SetQuit(true); return; } SmokeStage = 1; }
+	auto* game = dynamic_cast<GameActivity*>(g_ActivityMan.GetActivity());
+	if (SmokeStage == 1 && game && game->GetPresetName() == "Test Activity" && game->GetActivityState() == Activity::Editing) {
+		// Exercise activities that initialize an opaque fog layer before combat.
+		// Placement must show the world without revealing that layer permanently.
+		for (int team = 0; team < 4; ++team) g_SceneMan.MakeAllUnseen(Vector(4, 4), team);
+		for (int player = 0; player <= SmokeGuests; ++player) {
+			const Vector pos = g_SceneMan.MovePointToGround(Vector(600 + player * 300, 0), 25, 1);
+			game->GetEditorGUI(player)->SetCurrentObject(dynamic_cast<SceneObject*>(g_PresetMan.GetEntityPreset("Actor", "Brain Case")->Clone()));
+			game->GetEditorGUI(player)->SetCursorPos(pos); game->GetEditorGUI(player)->SetEditorGUIMode(SceneEditorGUI::INSTALLINGBRAIN);
+		}
+		SmokeStage = 2; SmokeStageTime = now; Verify("DEPLOYMENT: brain placement"); SmokeCapture = true;
+	}
+	if (SmokeStage == 2 && now - SmokeStageTime > 3000) {
+		for (int player = 0; player <= SmokeGuests; ++player) {
+			const Vector pos = g_SceneMan.MovePointToGround(Vector(600 + player * 300, 0), 25, 1);
+			auto* brain = dynamic_cast<SceneObject*>(g_PresetMan.GetEntityPreset("Actor", "Brain Case")->Clone()); brain->SetPos(pos); brain->SetTeam(game->GetTeamOfPlayer(player)); g_SceneMan.GetScene()->SetResidentBrain(player, brain);
+			auto* troop = dynamic_cast<SceneObject*>(g_PresetMan.GetEntityPreset("AHuman", "Soldier Light", "Coalition.rte")->Clone()); troop->SetPos(pos + Vector(50, 0)); troop->SetTeam(game->GetTeamOfPlayer(player)); g_SceneMan.GetScene()->AddPlacedObject(Scene::PLACEONLOAD, troop);
+			game->GetEditorGUI(player)->SetCurrentObject(dynamic_cast<SceneObject*>(troop->Clone())); game->GetEditorGUI(player)->SetEditorGUIMode(SceneEditorGUI::ADDINGOBJECT);
+		}
+		SmokeStage = 3; Verify("DEPLOYMENT: troop placement"); SmokeCapture = true;
+	}
+	if (SmokeStage == 3 && now - SmokeStageTime > 6000) { for (int player = 1; player <= SmokeGuests; ++player) game->GetEditorGUI(player)->SetEditorGUIMode(SceneEditorGUI::DONEEDITING); SmokeStage = 4; Verify("DEPLOYMENT: guests ready, waiting for host"); SmokeCapture = true; }
+	if (SmokeStage == 4 && now - SmokeStageTime > 9000) { game->GetEditorGUI(0)->SetEditorGUIMode(SceneEditorGUI::DONEEDITING); SmokeStage = 5; Verify("DEPLOYMENT: all ready, combat"); SmokeCapture = true; }
+	if (SmokeStage == 5 && now - SmokeStageTime > 12000) { bool passed = !SmokeDeploymentFailed && game->GetActivityState() == Activity::Running; for (int player = 1; player <= SmokeGuests; ++player) { Verify("DEPLOYMENT: player=" + std::to_string(player) + " ack=" + std::to_string(Players[player].AckID)); passed &= Players[player].AckID > 20 && g_SceneMan.IsUnseen(10, g_SceneMan.GetSceneHeight() - 20, game->GetTeamOfPlayer(player)); } Verify(passed ? "PASS: deployment completed into combat with fog preserved" : "FAIL: deployment visibility, combat transition or fog preservation"); ReturnToLobby(); SmokeStage = 6; SmokeStageTime = now; }
+	if (SmokeStage == 6 && now - SmokeStageTime > 1000) { Stop(); System::SetQuit(true); }
 }
 
 void MultiplayerMan::Impl::SendAudio(int player) {

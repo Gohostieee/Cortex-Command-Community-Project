@@ -48,6 +48,23 @@ void Inputs() {
 	input.Sequence = 1; input.MouseX = 3; receiver.Push(input, 410); Check(receiver.Consume(410).MouseDX == 5, "sequence or motion wrap failed");
 	Check(Newer(1, 0xfffffffe) && !Newer(0xfffffffe, 1), "sequence ordering wrap failed");
 }
+void FramePacing() {
+	// Run the production capture gate against a healthy 120 ms round-trip link.
+	// Frames finish sending immediately here so the assertion isolates ACK pacing.
+	std::vector<std::pair<uint64_t, uint32_t>> acks;
+	uint64_t lastFrame = 0, lastAck = 0; uint32_t sent = 0, acknowledged = 0;
+	for (uint64_t now = 1; now <= 5000; ++now) {
+		for (auto [arrival, id]: acks) if (arrival == now) { acknowledged = id; lastAck = now; }
+		if (FrameCaptureDue(now, lastFrame, lastAck, sent, acknowledged, 120)) { lastFrame = now; acks.emplace_back(now + 120, ++sent); }
+	}
+	std::cout << "120 ms frame pacing: " << sent / 5.0 << " FPS\n";
+	Check(sent >= 140, "healthy relay guests are throttled below 28 FPS by frame acknowledgements");
+	Check(!FrameCaptureDue(500, 450, 400, 8, 0, 10000), "frame window grew beyond eight under high latency");
+	Check(FrameCaptureDue(1500, 450, 400, 8, 0, 10000), "lost acknowledgements never allowed an independent recovery frame");
+	Check(!FrameCaptureDue(481, 450, 400, 1, 0, 0), "capture pacing exceeded the normal frame interval");
+	Check(!FrameCaptureDue(3000, 2950, 0, 1, 0, 0), "stalled peer did not fall back to the slower capture rate");
+	Check(!FrameCaptureDue(500, 450, 400, 1, 0xffffffffu, 0), "frame window failed across sequence wrap");
+}
 struct Packet { FrameInfo Info; uint16_t Index; bool Parity; std::vector<uint8_t> Data; };
 std::vector<Packet> Packets(const FrameInfo& info, const std::vector<uint8_t>& bytes) {
 	std::vector<Packet> packets;
@@ -141,6 +158,6 @@ void TransportLoopback() {
 }
 }
 int main() {
-	try { Wire(); Inputs(); Frames(); TransportLoopback(); std::cout << "PASS: wire bounds, all controls, loss/reorder/duplicates, timeout, frame repair, 20000 malformed packet bodies, real UDP frames, password rejection, LAN discovery, full rooms, disconnect and restart\n"; return 0; }
+	try { Wire(); Inputs(); FramePacing(); Frames(); TransportLoopback(); std::cout << "PASS: wire bounds, all controls, loss/reorder/duplicates, timeout, frame pacing and repair, 20000 malformed packet bodies, real UDP frames, password rejection, LAN discovery, full rooms, disconnect and restart\n"; return 0; }
 	catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

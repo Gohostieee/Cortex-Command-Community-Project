@@ -39,11 +39,13 @@ For code-based command-line play, set `CCCP_MP_SERVICE` to the service hostname/
 
 ## Implementation
 
-The replacement uses the current GPU renderer. The host owns simulation, terrain, physics, Lua, and activities. Each guest receives complete independent RGB565 frames compressed with LZ4, aiming for 30 frames per second when the host and link can sustain it. Every eight fragments include XOR parity to repair one lost fragment. A later complete frame recovers from heavier loss without depending on an earlier frame. Incomplete frames never replace the displayed view.
+The replacement uses the current GPU renderer. The host owns simulation, terrain, physics, Lua, and activities. Each guest receives complete independent RGB565 frames compressed with LZ4 HC, aiming for 30 frames per second when the host and link can sustain it. Moderate compression levels reduce terrain upload cost, with a faster level for the larger stream. Guests upload RGB565 directly to the GPU. Every eight fragments include XOR parity to repair one lost fragment. A later complete frame recovers from heavier loss without depending on an earlier frame. Incomplete frames never replace the displayed view.
 
 Packets use explicit fixed-width, big-endian serialization with version, session, and match identifiers. Only registered peers can submit gameplay messages. Strings, dimensions, datagrams, frame assemblies, and sound channels have limits. Relative mouse movement and button transitions use cumulative counters to survive lost, duplicated, or reordered input snapshots. New matches clear previous input, frames, and sounds.
 
-Encoding workers own copied pixels; engine access stays on the main thread. Frame acknowledgements, upload budgets, stale-frame expiry, and transport backpressure prevent unlimited frame queues. Audio uses reliable ordered messages, coalesces repeated property changes, preserves stop/fade events, and rebuilds active loops after reconnect. Severely overloaded peers reconnect rather than accumulating an unbounded audio queue. Shutdown joins outstanding encoding work before releasing transport or engine resources.
+Encoding workers own copied pixels; engine access stays on the main thread. The frame window follows measured capture-to-acknowledgement time, including both relay legs, and stays bounded at eight frames. Upload budgets, stale-frame expiry, and transport backpressure also prevent unlimited frame queues. Audio uses reliable ordered messages, coalesces repeated property changes, preserves stop/fade events, and rebuilds active loops after reconnect. Severely overloaded peers reconnect rather than accumulating an unbounded audio queue. Shutdown joins outstanding encoding work before releasing transport or engine resources.
+
+During initial troop placement, the renderer shows the world without drawing the team's fog layer. It leaves the exploration map intact, so combat restores the activity's existing fog. This avoids a black placement screen when an activity initializes fog before players finish deploying.
 
 This is host-rendered multiplayer and includes network input latency. The standalone service adds invitation codes and relayed connections; it does not run game simulation. There is no client prediction, replicated local simulation, automated public matchmaking, or Steam invites. Service restarts expire all codes. Transport traffic is not encrypted.
 
@@ -56,6 +58,7 @@ On Windows with Visual Studio 2022 C++ tools and the repository dependencies ins
 .\Tests\RunMultiplayerTests.ps1 -Smoke
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay
+.\Tests\RunMultiplayerTests.ps1 -Smoke -Deployment -Guests 3 -Relay
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -ServiceAddress 54.164.52.173:8001
 .\Tests\RunMultiplayerCursorTests.ps1
 ```
@@ -63,6 +66,10 @@ On Windows with Visual Studio 2022 C++ tools and the repository dependencies ins
 The standalone suite checks serialization bounds, every mapped action, movement and button recovery, duplicate/reordered/wrapped inputs, control expiry, frame repair and heavier-loss recovery, 20,000 malformed packet bodies, real UDP frame delivery, passwords, LAN discovery replies, four-player transport capacity, rejection of a fifth player, disconnects, and repeated shutdown/startup. Meson also registers `multiplayer-tests` for builds on other platforms.
 
 The native smoke test builds the complete Windows x64 game and runs a real host and one to three guests with isolated settings. It exercises two different activities and both stream sizes, returns to the lobby, reconnects every original guest slot, checks each remote actor's movement and firing, verifies GUI navigation and text routing, chat, and looping-sound replay/stop, and captures the actual OpenGL output. Logs and screenshots are written to ignored `build-mp/` files. Smoke flags are opt-in test hooks and are not used by normal rooms.
+
+The deployment variant initializes an opaque fog map, places brains and troops, marks guests ready while the host continues deploying, and then enters combat. It checks the host's rendered view and every guest's decoded view for a black map, verifies that combat preserves fog, reports delivered frame rates, and captures all four stages. The original fog fixture left only about 1% of the guest image visible. A separate deterministic check drives the production frame gate over a healthy 120 ms round trip; the old two-frame window produced 16.8 FPS, while the adaptive window produces 30.2 FPS. That gate measurement isolates acknowledgement pacing; actual frame rate also depends on rendering, encoding, upload capacity and packet loss.
+
+After these fixes on 2026-10-02, a host and three guests passed the deployment variant through a local relay, including preserved combat fog. All four instances also passed the normal two-match smoke test through the deployed AWS relay, including movement/firing, GUI keys/text, audio replay/stop and reconnects. Guest checkpoints measured about 19–21 FPS at 640 × 360 and 12–17 FPS at 960 × 540 on one shared Windows computer. Separate computers and networks still need player acceptance; these measurements do not guarantee a particular frame rate.
 
 The cursor check renders twelve menu, lobby, connection, session, and gameplay states through the actual game renderer. It asserts that foreground cursor geometry exists when menus are visible and disappears during gameplay and after closing the menu, and captures each OpenGL view. This check reproduced the original missing pointer (`software=0 rendered=0`) and passed after enabling the menu's software cursor. Opening the multiplayer menu also releases captured mouse input. The opt-in `CCCP_MPSMOKE_CURSOR=1` fixture does not start or join network rooms; it is separate from the live multiplayer smoke test.
 

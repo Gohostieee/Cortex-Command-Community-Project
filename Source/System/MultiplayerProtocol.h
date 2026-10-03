@@ -27,6 +27,15 @@ inline constexpr uint32_t FrameTimeoutMS = 1000;
 enum class Kind : uint8_t { Hello, Welcome, Lobby, Ready, Input, Frame, FrameAck, Leave, Reject, Sound, Announcement, Chat, TextInput };
 inline bool Newer(uint32_t value, uint32_t previous) { return value != previous && uint32_t(value - previous) < 0x80000000u; }
 
+inline bool FrameCaptureDue(uint64_t now, uint64_t lastFrame, uint64_t lastAck, uint32_t frameID, uint32_t ackID, int roundTripMS) {
+	const uint64_t interval = now - lastAck > 2000 ? 66 : 33;
+	// Keep enough independent frames in flight to cover the round trip. A fixed
+	// two-frame window caps a healthy 120 ms link at roughly 17 FPS.
+	const uint32_t window = static_cast<uint32_t>(std::clamp((std::clamp(roundTripMS, 0, 1000) + int(interval) - 1) / int(interval) + 2, 2, 8));
+	if (uint32_t(frameID - ackID) >= window && now - lastFrame < FrameTimeoutMS) return false;
+	return now - lastFrame >= interval;
+}
+
 // The wire format is explicit big endian. No engine structures, pointers, hashes,
 // size_t, compiler padding, or native-endian floats cross this interface.
 class Writer {

@@ -2617,7 +2617,12 @@ void SceneMan::Draw(BITMAP* targetBitmap, BITMAP* targetGUIBitmap, const Vector&
 				terrain->Draw(targetDimensions, targetBox);
 			}
 			int teamId = g_CameraMan.GetScreenTeam(m_LastUpdatedScreen);
-			if (SceneLayer* unseenLayer = (teamId != Activity::NoTeam) ? m_pCurrentScene->GetUnseenLayer(teamId) : nullptr) {
+			// Activities can initialize fog before players have placed their brains.
+			// Show the placement view without changing the team's exploration map;
+			// the existing fog becomes visible again as soon as combat starts.
+			const Activity* activity = g_ActivityMan.GetActivity();
+			const bool deploying = activity && activity->GetActivityState() == Activity::Editing;
+			if (SceneLayer* unseenLayer = (teamId != Activity::NoTeam && !deploying) ? m_pCurrentScene->GetUnseenLayer(teamId) : nullptr) {
 				unseenLayer->Draw(targetDimensions, targetBox);
 			}
 
