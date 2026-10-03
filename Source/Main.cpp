@@ -21,6 +21,7 @@
 #include "allegro.h"
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
+#include <cstdlib>
 
 #include "GUI.h"
 #include "GUIInputWrapper.h"
@@ -455,6 +456,15 @@ int main(int argc, char** argv) {
 	InitializeManagers();
 
 	HandleMainArgs(argc, argv);
+	std::string testActivity;
+	if (const char* value = std::getenv("CCCP_TEST_ACTIVITY")) { testActivity = value; }
+	for (int i = 1; i + 1 < argc; ++i) {
+		if (std::string(argv[i]) == "-test-activity") { testActivity = argv[++i]; }
+	}
+	if (!testActivity.empty()) {
+		g_ConsoleMan.PrintString("Loading native test: " + testActivity);
+		g_ConsoleMan.SaveAllText("build-mp/native-test-startup.log");
+	}
 
 	g_PresetMan.LoadAllDataModules();
 	for (int i = 1; i + 1 < argc; ++i) {
@@ -480,7 +490,15 @@ int main(int argc, char** argv) {
 			}
 		}
 
-		if (!g_ActivityMan.Initialize()) {
+		// Native regression activities run unattended without navigating the menu.
+		if (!testActivity.empty()) {
+			g_ConsoleMan.PrintString("Starting native test: " + testActivity);
+			g_ConsoleMan.SaveAllText("build-mp/native-test-startup.log");
+			if (g_ActivityMan.StartActivity("GAScripted", testActivity) < 0) {
+				g_ConsoleMan.SaveAllText("build-mp/native-test-startup.log");
+				return 1;
+			}
+		} else if (!g_ActivityMan.Initialize()) {
 			RunMenuLoop();
 		}
 

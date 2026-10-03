@@ -14,6 +14,7 @@
 
 #include <array>
 #include <exception>
+#include <cstdlib>
 #include <regex>
 #include <utility>
 #include <vector>
@@ -205,10 +206,20 @@ void RTEError::SetExceptionHandlers() {
 }
 
 void RTEError::ShowMessageBox(const std::string& message) {
+	if (std::getenv("CCCP_TEST_ACTIVITY")) {
+		g_ConsoleMan.PrintString(message);
+		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
+		std::exit(EXIT_FAILURE);
+	}
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "RTE Warning! (>_<)", message.c_str(), nullptr);
 }
 
 bool RTEError::ShowAbortMessageBox(const std::string& message) {
+	if (std::getenv("CCCP_TEST_ACTIVITY")) {
+		g_ConsoleMan.PrintString(message);
+		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
+		return false;
+	}
 	enum AbortMessageButton {
 		ButtonInvalid,
 		ButtonExit,
@@ -242,6 +253,10 @@ bool RTEError::ShowAbortMessageBox(const std::string& message) {
 }
 
 bool RTEError::ShowAssertMessageBox(const std::string& message) {
+	if (std::getenv("CCCP_TEST_ACTIVITY")) {
+		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
+		return true;
+	}
 	enum AssertMessageButton {
 		ButtonInvalid,
 		ButtonAbort,

@@ -167,8 +167,34 @@ int SceneMan::LoadScene(Scene* pNewScene, bool placeObjects, bool placeUnits) {
 
 	// Finally draw the ID:s of the MO:s to the MOID layers for the first time
 	g_MovableMan.UpdateDrawMOIDs();
+	{
+		std::scoped_lock lock(m_GoldMiningMutex);
+		BITMAP* matter = GetTerrain()->GetMaterialBitmap();
+		m_GoldMiningSurvey.Reset(matter->w, matter->h, [matter](int x, int y) { return matter->line[y][x] == g_MaterialGold; });
+	}
 
 	return 0;
+}
+
+Vector SceneMan::AcquireGoldMiningTarget(const Vector& origin, int actorUniqueID, int team) {
+	std::scoped_lock lock(m_GoldMiningMutex);
+	if (!GetTerrain()) { return Vector(-1, -1); }
+	BITMAP* matter = GetTerrain()->GetMaterialBitmap();
+	const double nowMS = static_cast<double>(g_TimerMan.GetSimTickCount()) * 1000.0 / g_TimerMan.GetTicksPerSecond();
+	const auto target = m_GoldMiningSurvey.Acquire(actorUniqueID, team, origin.m_X, origin.m_Y, SceneWrapsX(), SceneWrapsY(), nowMS,
+	    [matter](int x, int y) { return matter->line[y][x] == g_MaterialGold; });
+	return Vector(target.x, target.y);
+}
+
+void SceneMan::ReleaseGoldMiningTarget(int actorUniqueID, int retryDelayMS) {
+	std::scoped_lock lock(m_GoldMiningMutex);
+	const double nowMS = static_cast<double>(g_TimerMan.GetSimTickCount()) * 1000.0 / g_TimerMan.GetTicksPerSecond();
+	m_GoldMiningSurvey.Release(actorUniqueID, std::max(0, retryDelayMS), nowMS);
+}
+
+int SceneMan::GetGoldMiningTargetGoldCount(int actorUniqueID) {
+	std::scoped_lock lock(m_GoldMiningMutex);
+	return m_GoldMiningSurvey.Remaining(actorUniqueID);
 }
 
 int SceneMan::SetSceneToLoad(const std::string& sceneName, bool placeObjects, bool placeUnits) {
@@ -2553,6 +2579,11 @@ void SceneMan::Update(int screenId) {
 	SLTerrain* terrain = m_pCurrentScene->GetTerrain();
 	terrain->SetOffset(offset);
 	terrain->Update();
+	{
+		std::scoped_lock lock(m_GoldMiningMutex);
+		BITMAP* matter = terrain->GetMaterialBitmap();
+		m_GoldMiningSurvey.Refresh(64, [matter](int x, int y) { return matter->line[y][x] == g_MaterialGold; });
+	}
 
 	// Background layers may scroll in fractions of the real offset and need special care to avoid jumping after having traversed wrapped edges, so they need the total offset without taking wrapping into account.
 	const Vector& unwrappedOffset = g_CameraMan.GetUnwrappedOffset(screenId);

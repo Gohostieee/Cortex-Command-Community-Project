@@ -10,6 +10,8 @@
 #include "Box.h"
 #include "Singleton.h"
 #include "SpatialPartitionGrid.h"
+#include "GoldMiningSurvey.h"
+#include <mutex>
 
 #include "ActivityMan.h"
 
@@ -220,6 +222,11 @@ namespace RTE {
 		/// @param pixelX The X and Y coordinates of screen material pixel to get.
 		/// @return An unsigned char specifying the requested pixel's material index.
 		unsigned char GetTerrMatter(int pixelX, int pixelY);
+
+		/// Claims an exact gold pixel anywhere in the scene. (-1,-1) means none currently available.
+		Vector AcquireGoldMiningTarget(const Vector& origin, int actorUniqueID, int team);
+		void ReleaseGoldMiningTarget(int actorUniqueID, int retryDelayMS);
+		int GetGoldMiningTargetGoldCount(int actorUniqueID);
 
 		/// Gets a MOID from pixel coordinates in the Scene. LockScene() must be called before using this method.
 		/// @param pixelX The X coordinate of the Scene pixel to test.
@@ -969,6 +976,8 @@ namespace RTE {
 
 		/// Protected member variable and method declarations
 	protected:
+		GoldMiningSurvey m_GoldMiningSurvey;
+		std::mutex m_GoldMiningMutex;
 		static std::vector<std::pair<int, BITMAP*>> m_IntermediateSettlingBitmaps; //!< Intermediate bitmaps of different sizes that are used to draw settled MovableObjects into the terrain.
 
 		// Default Scene name to load if nothing else is specified

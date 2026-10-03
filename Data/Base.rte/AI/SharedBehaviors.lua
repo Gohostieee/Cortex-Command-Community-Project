@@ -384,9 +384,9 @@ function SharedBehaviors.GoToWpt(AI, Owner, Abort)
 				Owner:ClearAIWaypoints();
 				Owner:ClearMovePath();
 				Owner:DrawWaypoints(false);
-				AI:CreateSentryBehavior(Owner);
 
 				if Owner.AIMode == Actor.AIMODE_GOTO then
+					AI:CreateSentryBehavior(Owner);
 					AI.SentryFacing = Owner.HFlipped; -- guard this direction
 					AI.SentryPos = Vector(Owner.Pos.X, Owner.Pos.Y); -- guard this point
 				end

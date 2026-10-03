@@ -192,7 +192,8 @@ function NativeHumanAI:Update(Owner)
 	end
 
 	-- check if the AI mode has changed or if we need a new behavior
-	if Owner.AIMode ~= self.lastAIMode or not(self.Behavior or self.GoToBehavior) then
+	if Owner.AIMode ~= self.lastAIMode or not(self.Behavior or self.GoToBehavior) or
+		(Owner.AIMode == Actor.AIMODE_GOLDDIG and not self.Behavior and not self.NextBehavior and not self.PickupHD) then
 		-- Tell the coroutines to abort to avoid memory leaks
 		if self.Behavior then
 			local msg, done = coroutine.resume(self.Behavior, self, Owner, true);
@@ -537,7 +538,9 @@ function NativeHumanAI:Update(Owner)
 				if not self.NextBehavior and not self.PickupHD and self.PickUpTimer:IsPastSimMS(10000) then
 					self.PickUpTimer:Reset();
 
-					if not Owner:EquipFirearm(false) then
+					if Owner.AIMode == Actor.AIMODE_GOLDDIG then
+						if not Owner:EquipDiggingTool(false) then self:CreateGetToolBehavior(Owner); end
+					elseif not Owner:EquipFirearm(false) then
 						self:CreateGetWeaponBehavior(Owner);
 					elseif Owner.AIMode ~= Actor.AIMODE_SENTRY and not Owner:EquipDiggingTool(false) then
 						self:CreateGetToolBehavior(Owner);
@@ -661,6 +664,8 @@ function NativeHumanAI:Destroy(Owner)
 	if self.Behavior then
 		local msg, done = coroutine.resume(self.Behavior, self, Owner, true);
 	end
+	if self.BehaviorCleanup then self.BehaviorCleanup(self); end
+	if self.GoToCleanup then self.GoToCleanup(self); end
 end
 
 -- functions that create behaviors. the default behaviors are stored in the HumanBehaviors table. store your custom behaviors in a table to avoid name conflicts between mods.
@@ -711,7 +716,7 @@ function NativeHumanAI:CreateGoldDigBehavior(Owner)
 	end
 
 	self.NextBehavior = coroutine.create(HumanBehaviors.GoldDig);
-	self.NextCleanup = nil;
+	self.NextCleanup = function(AI) GoldMining.Cleanup(AI, Owner); end;
 	self.NextBehaviorName = "GoldDig";
 end
 

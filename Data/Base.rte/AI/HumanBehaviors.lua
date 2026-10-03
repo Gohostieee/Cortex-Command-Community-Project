@@ -1,3 +1,4 @@
+require("AI/GoldMining");
 
 HumanBehaviors = {};
 
@@ -383,186 +384,7 @@ function HumanBehaviors.Sentry(AI, Owner, Abort)
 end
 
 function HumanBehaviors.GoldDig(AI, Owner, Abort)
-	-- make sure our weapon have ammo before we start to dig, just in case we encounter an enemy while digging
-	if Owner.EquippedItem and (Owner.FirearmNeedsReload or Owner.FirearmIsEmpty) and Owner.EquippedItem:HasObjectInGroup("Weapons") then
-		Owner:ReloadFirearms();
-
-		repeat
-			local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-			if _abrt then return true end
-		until not Owner.FirearmIsEmpty
-	end
-
-	-- select a digger
-	if not Owner:EquipDiggingTool(true) then
-		return true; -- our digger is gone, abort this behavior
-	end
-
-	local aimAngle = 0.45;
-	local BestGoldLocation = {X = 0, Y = 0};
-	local smallestPenalty = math.huge;
-
-	for aimAngle = 0.4, -3.54, -0.033 do
-		local Digger;
-		if Owner.EquippedItem then
-			Digger = ToHeldDevice(Owner.EquippedItem);
-			if not Digger then
-				break;
-			end
-		else
-			break;
-		end
-
-		local LookVec;
-		if aimAngle < -0.8 and aimAngle > -2.4 then
-			LookVec = Vector(60,0):RadRotate(aimAngle);
-		else	-- search further away horizontally
-			LookVec = Vector(180,0):RadRotate(aimAngle);
-		end
-
-		AI.Ctrl.AnalogAim = LookVec.Normalized;
-		local GoldPos = Vector();
-		if SceneMan:CastMaterialRay(Digger.MuzzlePos, LookVec, rte.goldID, GoldPos, 1, true) then
-			-- avoid gold close to the edges of the scene
-			if GoldPos.Y < SceneMan.SceneHeight - 25 and (SceneMan.SceneWrapsX or (GoldPos.X > 50 and GoldPos.X < SceneMan.SceneWidth - 50)) then
-				local Dist = SceneMan:ShortestDistance(Owner.Pos, GoldPos, false); -- prioritize gold close to us
-				local str = SceneMan:CastStrengthSumRay(Owner.EyePos, GoldPos, 3, rte.goldID) / 30; -- prioritize gold in soft ground
-				local penalty = str + Dist.Magnitude + math.abs(Dist.Y*5);
-				local DigArea = SceneMan:ShortestDistance(GoldPos, Owner.EyePos+LookVec, false);
-				local digLength = math.min(DigArea.Magnitude, 180); -- sanity check to circumvent infinite loops
-
-				-- prioritize gold located horizontally or below us
-				if Dist.Y > -20 then
-					penalty = penalty - 5;
-				end
-
-				local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-				if _abrt then return true end
-
-				-- prioritize areas with more gold
-				DigArea:Normalize();
-				for i = 5, digLength, 5 do
-					local Step = GoldPos + DigArea * i;
-					if Step.X >= SceneMan.SceneWidth then
-						if SceneMan.SceneWrapsX then
-							Step.X = Step.X - SceneMan.SceneWidth;
-						else
-							break;
-						end
-					elseif Step.X < 0 then
-						if SceneMan.SceneWrapsX then
-							Step.X = SceneMan.SceneWidth - Step.X;
-						else
-							break;
-						end
-					end
-
-					if Step.Y > SceneMan.SceneHeight - 50 then
-						break;
-					end
-
-					if SceneMan:GetTerrMatter(Step.X, Step.Y) == rte.goldID then
-						penalty = penalty - 4;
-					end
-				end
-
-				-- prioritize gold located horizontally relative to us
-				if math.abs(Dist.X) > math.abs(Dist.Y) then
-					if math.abs(Dist.X) * 0.5 > math.abs(Dist.Y) then
-						penalty = penalty - 80;
-					else
-						penalty = penalty - 40;
-					end
-				end
-
-				if penalty < smallestPenalty then
-					if Dist:MagnitudeIsLessThan(50) then	-- dig to a point behind the gold
-						GoldPos = Owner.Pos + Dist:SetMagnitude(55);
-					end
-
-					-- make sure there is no metal in our path
-					if not SceneMan:CastStrengthRay(Owner.Pos, Dist:SetMagnitude(60), 95, Vector(), 2, rte.grassID, SceneMan.SceneWrapsX) then
-						smallestPenalty = penalty + RangeRand(-7, 7);
-						BestGoldLocation.X, BestGoldLocation.Y = GoldPos.X, GoldPos.Y;
-					end
-				end
-			end
-		end
-
-		local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-		if _abrt then return true end
-	end
-
-	local BestGoldPos = Vector(BestGoldLocation.X, BestGoldLocation.Y);
-	if BestGoldPos.Largest == 0 then
-		if Owner.Pos.Y < SceneMan.SceneHeight - 50 then	-- don't dig beyond the scene limit
-			-- no gold found, so dig down and try again
-			local rayLenghtY = math.min(80, SceneMan.SceneHeight-100);
-			local rayLenghtX = rayLenghtY * 0.5;
-			local Target = Owner.Pos + Vector(rayLenghtX, rayLenghtY);
-			local str_r = SceneMan:CastStrengthSumRay(Owner.Pos, Target, 6, rte.goldID);
-			local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-			if _abrt then return true end
-
-			Target = Owner.Pos + Vector(-rayLenghtX, rayLenghtY);
-			local str_l = SceneMan:CastStrengthSumRay(Owner.Pos, Target, 6, rte.goldID);
-			local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-			if _abrt then return true end
-
-			if str_r < str_l then
-				BestGoldPos = Owner.Pos + Vector(rayLenghtX, rayLenghtY);
-			else
-				BestGoldPos = Owner.Pos + Vector(-rayLenghtX, rayLenghtY);
-			end
-		else
-			-- no gold here, and we cannot dig deeper, calculate average horizontal strength
-			local rayLenght = 80;
-			local Target = Owner.Pos + Vector(rayLenght, -5);
-			local Trace = SceneMan:ShortestDistance(Owner.Pos, Target, false);
-			local str_r = SceneMan:CastStrengthSumRay(Owner.Pos, Target, 5, rte.goldID);
-			local obst_r = SceneMan:CastStrengthRay(Owner.Pos, Trace, 95, Vector(), 2, rte.grassID, SceneMan.SceneWrapsX);
-			local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-			if _abrt then return true end
-
-			Target = Owner.Pos + Vector(-rayLenght, -5);
-			Trace = SceneMan:ShortestDistance(Owner.Pos, Target, false);
-			local str_l = SceneMan:CastStrengthSumRay(Owner.Pos, Target, 5, rte.goldID);
-			local obst_l = SceneMan:CastStrengthRay(Owner.Pos, Trace, 95, Vector(), 2, rte.grassID, SceneMan.SceneWrapsX);
-			local _ai, _ownr, _abrt = coroutine.yield(); -- wait until next frame
-			if _abrt then return true end
-
-			local goLeft;
-			if obst_l then
-				goLeft = false;
-			elseif obst_r then
-				goLeft = true;
-			else
-				goLeft = math.random() > 0.5;
-
-				-- go towards the larger obstacle, unless metal
-				if math.abs(str_l - str_r) > 200 then
-					if str_r > str_l and not obst_r then
-						goLeft = false;
-					elseif str_r < str_l and not obst_l then
-						goLeft = true;
-					end
-				end
-			end
-
-			if goLeft then
-				BestGoldPos = Owner.Pos + Vector(-rayLenght, -5);
-			else
-				BestGoldPos = Owner.Pos + Vector(rayLenght, -5);
-			end
-		end
-	end
-
-	BestGoldPos.Y = math.min(BestGoldPos.Y, SceneMan.SceneHeight-30);
-	Owner:ClearAIWaypoints();
-	Owner:AddAISceneWaypoint(BestGoldPos);
-	AI:CreateGoToBehavior(Owner);
-
-	return true;
+	return GoldMining.Dig(AI, Owner, Abort);
 end
 
 -- find a weapon to pick up
@@ -610,7 +432,8 @@ function HumanBehaviors.WeaponSearch(AI, Owner, Abort)
 			maxPathLength = 10;
 		end
 		
-		local searchesRemaining = #devices;
+		local searchesRemaining = 0;
+		local searchTimer = Timer();
 		local devicesToPickUp = {};
 		for _, deviceEntry in pairs(devices) do
 			local device = deviceEntry.device;
@@ -630,6 +453,7 @@ function HumanBehaviors.WeaponSearch(AI, Owner, Abort)
 
 				if pathMultiplier ~= -1 then
 					local deviceID = device.UniqueID;
+					searchesRemaining = searchesRemaining + 1;
 					SceneMan.Scene:CalculatePathAsync(
 						function(pathRequest)
 							local pathLength = pathRequest.PathLength;
@@ -645,7 +469,7 @@ function HumanBehaviors.WeaponSearch(AI, Owner, Abort)
 			end
 		end
 		
-		while searchesRemaining > 0 do
+		while searchesRemaining > 0 and not searchTimer:IsPastSimMS(5000) do
 			local _ai, _ownr, _abrt = coroutine.yield();
 			if _abrt then return true end
 		end
@@ -686,9 +510,15 @@ function HumanBehaviors.WeaponSearch(AI, Owner, Abort)
 			Owner:UpdateMovePath();
 
 			-- wait until movepath is updated
-			while Owner.IsWaitingOnNewMovePath do
+			local pathTimer = Timer();
+			while Owner.IsWaitingOnNewMovePath and not pathTimer:IsPastSimMS(5000) do
 				local _ai, _ownr, _abrt = coroutine.yield();
 				if _abrt then return true end
+			end
+			if Owner.IsWaitingOnNewMovePath then
+				AI.PickupHD = nil;
+				Owner:ClearAIWaypoints();
+				return true;
 			end
 
 			AI:CreateGoToBehavior(Owner);
@@ -742,12 +572,14 @@ function HumanBehaviors.ToolSearch(AI, Owner, Abort)
 			maxPathLength = 5;
 		end
 		
-		local searchesRemaining = #devices;
+		local searchesRemaining = 0;
+		local searchTimer = Timer();
 		local devicesToPickUp = {};
 		for _, deviceEntry in pairs(devices) do
 			local device = deviceEntry.device;
 			if MovableMan:ValidMO(device) then
 				local deviceId = device.UniqueID;
+				searchesRemaining = searchesRemaining + 1;
 				SceneMan.Scene:CalculatePathAsync(
 					function(pathRequest)
 						local pathLength = pathRequest.PathLength;
@@ -761,7 +593,7 @@ function HumanBehaviors.ToolSearch(AI, Owner, Abort)
 			end
 		end
 		
-		while searchesRemaining > 0 do
+		while searchesRemaining > 0 and not searchTimer:IsPastSimMS(5000) do
 			local _ai, _ownr, _abrt = coroutine.yield();
 			if _abrt then return true end
 		end
@@ -804,9 +636,15 @@ function HumanBehaviors.ToolSearch(AI, Owner, Abort)
 			Owner:UpdateMovePath();
 
 			-- wait until movepath is updated
-			while Owner.IsWaitingOnNewMovePath do
+			local pathTimer = Timer();
+			while Owner.IsWaitingOnNewMovePath and not pathTimer:IsPastSimMS(5000) do
 				local _ai, _ownr, _abrt = coroutine.yield();
 				if _abrt then return true end
+			end
+			if Owner.IsWaitingOnNewMovePath then
+				AI.PickupHD = nil;
+				Owner:ClearAIWaypoints();
+				return true;
 			end
 
 			AI:CreateGoToBehavior(Owner);
