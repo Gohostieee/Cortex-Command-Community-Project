@@ -1,6 +1,7 @@
-param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$GuestInput, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
 if ($ExplosionBurst) { $Smoke = $Encounter = $CombatStress = $true }
+if ($GuestInput) { $Smoke = $Deployment = $true }
 if ($NativeBaseline -and !$Encounter) { throw 'Use -Encounter with -NativeBaseline.' }
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 if ($GuestResolutions.Count -gt 1 -and $GuestResolutions.Count -ne $Guests) { throw 'GuestResolutions must specify one size for all guests or one size per guest.' }
@@ -29,6 +30,7 @@ try {
         $previousSmokeRole = $env:CCCP_MPSMOKE_ROLE
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
         $previousDeployment = $env:CCCP_MPSMOKE_DEPLOYMENT
+        $previousGuestInput = $env:CCCP_MPSMOKE_GUEST_INPUT
         $previousLoss = $env:CCCP_MPSMOKE_WORLD_LOSS
         $previousBurst = $env:CCCP_MPSMOKE_BURST
         $previousCombat = $env:CCCP_MPSMOKE_COMBAT
@@ -41,6 +43,7 @@ try {
         $env:CCCP_MPSMOKE_BASELINE = if ($NativeBaseline) { '1' } else { $null }
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
         $env:CCCP_MPSMOKE_DEPLOYMENT = if ($Deployment) { '1' } else { $null }
+        $env:CCCP_MPSMOKE_GUEST_INPUT = if ($GuestInput) { '1' } else { $null }
         $env:CCCP_MPSMOKE_WORLD_LOSS = if ($Loss) { '1' } else { $null }
         $roles = @('host', 'client')
         if ($Guests -ge 2) { $roles += 'client2' }
@@ -101,6 +104,7 @@ $disabledMods
             $env:CCCP_MPSMOKE_ROLE = $previousSmokeRole
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
             $env:CCCP_MPSMOKE_DEPLOYMENT = $previousDeployment
+            $env:CCCP_MPSMOKE_GUEST_INPUT = $previousGuestInput
             $env:CCCP_MPSMOKE_WORLD_LOSS = $previousLoss
             $env:CCCP_MPSMOKE_BURST = $previousBurst
             $env:CCCP_MPSMOKE_COMBAT = $previousCombat

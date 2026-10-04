@@ -494,7 +494,7 @@ bool UInputMan::AnyMouseButtonPress(SDL_MouseID mouseID) const {
 }
 
 void UInputMan::TrapMousePos(bool trap, int whichPlayer) {
-	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) return;
+	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active) { m_RemoteInputs[whichPlayer].MouseTrapped = trap; return; }
 	if (whichPlayer == Players::NoPlayer) {
 		m_TrapMousePos = trap;
 		SDL_SetWindowRelativeMouseMode(g_WindowMan.GetWindow(), trap);
@@ -681,6 +681,12 @@ bool UInputMan::AnyJoyButtonPress(int whichJoy) const {
 bool UInputMan::GetInputElementState(int whichPlayer, int whichElement, InputState whichState) {
 	if (whichPlayer == 0 && g_MultiplayerMan.IsHostingMatch() && g_MultiplayerMan.IsUIOpen()) return false;
 	if (whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active && whichElement >= 0 && whichElement < MP::InputCount) {
+		// Guests keep their physical mouse captured for streaming even when the
+		// host opens a picker/shop. Match local menu behavior: raw mouse buttons
+		// drive the GUI, without also becoming fire/select or pie-menu actions.
+		const auto& remote = m_RemoteInputs[whichPlayer];
+		if (remote.State.Snapshot.Device == InputDevice::DEVICE_MOUSE_KEYB && !remote.MouseTrapped &&
+			(whichElement == InputElements::INPUT_FIRE || whichElement == InputElements::INPUT_PIEMENU_ANALOG)) return false;
 		const auto& input = m_RemoteInputs[whichPlayer].State; const uint64_t mask = uint64_t(1) << whichElement;
 		return ((whichState == InputState::Held ? input.Snapshot.Held | input.Pressed : whichState == InputState::Pressed ? input.Pressed : input.Released) & mask) != 0;
 	}
@@ -884,6 +890,7 @@ bool UInputMan::GetJoystickDirectionState(int whichJoy, int whichAxis, int which
 }
 
 void UInputMan::HandleInputEvent(const SDL_Event& inputEvent) {
+	++m_InputStateRevision;
 	switch (inputEvent.type) {
 		case SDL_EVENT_KEY_UP:
 		case SDL_EVENT_KEY_DOWN: {
@@ -1076,6 +1083,7 @@ int UInputMan::Update() {
 }
 
 void UInputMan::EndFrame() {
+	++m_InputStateRevision;
 	for (auto& remote: m_RemoteInputs) { remote.State.Pressed = remote.State.Released = 0; remote.State.MousePressed = remote.State.MouseReleased = 0; remote.State.MouseDX = remote.State.MouseDY = remote.State.WheelDelta = 0; remote.Changes.fill(false); }
 	m_LastDeviceWhichControlledGUICursor = InputDevice::DEVICE_KEYB_ONLY;
 

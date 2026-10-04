@@ -733,7 +733,10 @@ void SceneEditorGUI::Update() {
 			Vector snappedPos = g_SceneMan.SnapPosition(m_CursorPos, m_GridSnapping);
 			m_CursorInAir = g_SceneMan.GetTerrMatter(snappedPos.GetFloorIntX(), snappedPos.GetFloorIntY()) == g_MaterialAir;
 			// Also check that it isn't over unseen areas, can't place there
-			m_CursorInAir = m_CursorInAir && !g_SceneMan.IsUnseen(snappedPos.GetFloorIntX(), snappedPos.GetFloorIntY(), m_pController->GetTeam());
+			// Deployment shows the full battlefield. Its fog layer is retained for
+			// combat, so it must not prevent placing troops/devices during setup.
+			m_CursorInAir = m_CursorInAir && (g_ActivityMan.GetActivity()->GetActivityState() == Activity::Editing ||
+				!g_SceneMan.IsUnseen(snappedPos.GetFloorIntX(), snappedPos.GetFloorIntY(), m_pController->GetTeam()));
 		}
 
 		// Constrain the cursor to only be within specific scene areas

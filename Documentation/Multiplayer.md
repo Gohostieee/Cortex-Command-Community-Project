@@ -71,6 +71,7 @@ On Windows with Visual Studio 2022 C++ tools and the repository dependencies ins
 .\Tests\RunMultiplayerTests.ps1 -Smoke
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -Loss
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Deployment -Guests 3 -Relay
+.\Tests\RunMultiplayerTests.ps1 -GuestInput -Relay
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -Loss -ServiceAddress 54.164.52.173:8001
 .\Tests\RunMultiplayerTests.ps1 -Smoke -Guests 3 -Relay -Loss -GuestResolutions @('640x360','1280x720','1920x1080') -ServiceAddress 54.164.52.173:8001
 .\Tests\RunMultiplayerCursorTests.ps1

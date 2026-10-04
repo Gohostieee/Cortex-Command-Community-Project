@@ -43,6 +43,10 @@
 #include "MultiplayerMenuGUI.h"
 #include "MenuMan.h"
 #include "PerformanceMan.h"
+#include "GUI/GUI.h"
+#include "BuyMenuGUI.h"
+#include "GUI/GUICollectionBox.h"
+#include "GUI/GUIListBox.h"
 
 using namespace RTE;
 using namespace RTE::MP;
@@ -134,6 +138,7 @@ struct MultiplayerMan::Impl {
 	std::vector<GameActivity*> Activities;
 	std::vector<Scene*> Scenes;
 	Input LocalInput;
+	uint64_t LastSampledInputRevision = UINT64_MAX;
 	float MouseRemainderX = 0, MouseRemainderY = 0;
 	MultiplayerWorld World;
 	MP::World::Assembler SnapshotAssembly, ResourceAssembly{30000};
@@ -173,6 +178,7 @@ struct MultiplayerMan::Impl {
 	bool SmokeQCameraCaptured = false;
 	std::string SmokeCaptureName;
 	bool SmokeDeployment = false;
+	bool SmokeGuestInput = false, SmokeGuestInputChecked = false;
 	bool SmokeDeploymentFailed = false;
 	uint64_t SmokeDeploymentStart = 0, SmokeDeploymentCount = 0;
 	bool CursorVerification = false;
@@ -218,6 +224,7 @@ struct MultiplayerMan::Impl {
 	void Verify(const std::string& message) { if (Smoke) { std::ofstream log("build-mp/" + SmokeRole + "-smoke.log", std::ios::app); log << message << '\n'; } }
 	void SmokeTick();
 	void DeploymentTick();
+	void GuestInputChecks(GameActivity* game);
 	void EncounterTick();
 
 	void ClearSounds() { for (auto& [channel, sound]: Sounds) sound->Stop(); Sounds.clear(); }
@@ -376,6 +383,7 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	if (!host && impl.Online) std::snprintf(impl.JoinCode, sizeof(impl.JoinCode), "%s", address.c_str());
 	if (smokeTest) {
 		impl.SmokeDeployment = std::getenv("CCCP_MPSMOKE_DEPLOYMENT") != nullptr;
+		impl.SmokeGuestInput = std::getenv("CCCP_MPSMOKE_GUEST_INPUT") != nullptr;
 		impl.SmokeRole = host ? "host" : "client";
 		if (const char* role = std::getenv("CCCP_MPSMOKE_ROLE"); role && (std::string(role) == "host" || std::string(role) == "client" || std::string(role) == "client2" || std::string(role) == "client3")) impl.SmokeRole = role;
 		if (const char* count = std::getenv("CCCP_MPSMOKE_GUESTS"); count && count[0] >= '1' && count[0] <= '3' && !count[1]) impl.SmokeGuests = count[0] - '0';
@@ -785,33 +793,38 @@ void MultiplayerMan::Impl::SampleInput() {
 	static_assert(InputElements::INPUT_COUNT <= GUIKeyFirst && GUIKeyFirst + GUIKeys.size() <= InputCount);
 	if (State != Mode::Client || !Playing) return;
 	const bool enabled = !UI && Controls && World.Ready() && !World.Paused() && (g_WindowMan.AnyWindowHasFocus() || Smoke);
-	if ((enabled || Smoke) && TextActive) { SDL_StartTextInput(g_WindowMan.GetWindow()); const auto& text = g_UInputMan.GetTextInput(); if (!text.empty()) { MP::Writer writer(Kind::TextInput, Session, Epoch); writer.U8(0); writer.Text(text, 64); Net.Send(ServerAddress, writer.Data, Delivery::Control); } }
-	else if (enabled && !TextActive) SDL_StopTextInput(g_WindowMan.GetWindow());
-	LocalInput.Device = static_cast<uint8_t>(g_UInputMan.GetInputDevice(0));
-	for (int i = 0; i < InputElements::INPUT_COUNT; ++i) {
-		const uint64_t mask = uint64_t(1) << i;
-		if (enabled && g_UInputMan.ElementPressed(0, i)) ++LocalInput.Presses[i];
-		if ((enabled && g_UInputMan.ElementReleased(0, i)) || (!enabled && (LocalInput.Held & mask))) ++LocalInput.Releases[i];
-		if (enabled && g_UInputMan.ElementHeld(0, i)) LocalInput.Held |= mask; else LocalInput.Held &= ~mask;
+	// Retransmissions may run between simulation steps. Accumulate each input
+	// revision once while continuing to send the latest cumulative snapshot.
+	if (LastSampledInputRevision != g_UInputMan.GetInputStateRevision()) {
+		LastSampledInputRevision = g_UInputMan.GetInputStateRevision();
+		if ((enabled || Smoke) && TextActive) { SDL_StartTextInput(g_WindowMan.GetWindow()); const auto& text = g_UInputMan.GetTextInput(); if (!text.empty()) { MP::Writer writer(Kind::TextInput, Session, Epoch); writer.U8(0); writer.Text(text, 64); Net.Send(ServerAddress, writer.Data, Delivery::Control); } }
+		else if (enabled && !TextActive) SDL_StopTextInput(g_WindowMan.GetWindow());
+		LocalInput.Device = static_cast<uint8_t>(g_UInputMan.GetInputDevice(0));
+		for (int i = 0; i < InputElements::INPUT_COUNT; ++i) {
+			const uint64_t mask = uint64_t(1) << i;
+			if (enabled && g_UInputMan.ElementPressed(0, i)) ++LocalInput.Presses[i];
+			if ((enabled && g_UInputMan.ElementReleased(0, i)) || (!enabled && (LocalInput.Held & mask))) ++LocalInput.Releases[i];
+			if (enabled && g_UInputMan.ElementHeld(0, i)) LocalInput.Held |= mask; else LocalInput.Held &= ~mask;
+		}
+		for (size_t key = 0; key < GUIKeys.size(); ++key) {
+			const size_t bit = GUIKeyFirst + key; const uint64_t mask = uint64_t(1) << bit;
+			if (enabled && g_UInputMan.KeyPressed(GUIKeys[key])) ++LocalInput.Presses[bit];
+			if ((enabled && g_UInputMan.KeyReleased(GUIKeys[key])) || (!enabled && (LocalInput.Held & mask))) ++LocalInput.Releases[bit];
+			if (enabled && g_UInputMan.KeyHeld(GUIKeys[key])) LocalInput.Held |= mask; else LocalInput.Held &= ~mask;
+		}
+		const Vector movement = enabled ? g_UInputMan.GetMouseMovement(0) : Vector();
+		const auto* viewport = ImGui::GetMainViewport(); const float scale = TextureWidth > 0 ? std::max(0.1f, std::min(viewport->Size.x / TextureWidth, viewport->Size.y / TextureHeight)) : 1.0f;
+		MouseRemainderX += movement.GetX() / scale; MouseRemainderY += movement.GetY() / scale;
+		const int dx = static_cast<int>(MouseRemainderX), dy = static_cast<int>(MouseRemainderY); MouseRemainderX -= dx; MouseRemainderY -= dy;
+		LocalInput.MouseX += dx; LocalInput.MouseY += dy; LocalInput.Wheel += enabled ? g_UInputMan.MouseWheelMoved() : 0;
+		for (int i = 0; i < 3; ++i) {
+			if (enabled && g_UInputMan.MouseButtonPressed(i + 1, 0)) ++LocalInput.MousePresses[i];
+			if ((enabled && g_UInputMan.MouseButtonReleased(i + 1, 0)) || (!enabled && (LocalInput.MouseHeld & (1 << i)))) ++LocalInput.MouseReleases[i];
+			if (enabled && g_UInputMan.MouseButtonHeld(i + 1, 0)) LocalInput.MouseHeld |= uint8_t(1 << i); else LocalInput.MouseHeld &= uint8_t(~(1 << i));
+		}
+		const Vector aim = enabled ? g_UInputMan.AnalogAimValues(0) : Vector(), move = enabled ? g_UInputMan.AnalogMoveValues(0) : Vector();
+		LocalInput.AimX = std::clamp(aim.GetX(), -1.0f, 1.0f); LocalInput.AimY = std::clamp(aim.GetY(), -1.0f, 1.0f); LocalInput.MoveX = std::clamp(move.GetX(), -1.0f, 1.0f); LocalInput.MoveY = std::clamp(move.GetY(), -1.0f, 1.0f);
 	}
-	for (size_t key = 0; key < GUIKeys.size(); ++key) {
-		const size_t bit = GUIKeyFirst + key; const uint64_t mask = uint64_t(1) << bit;
-		if (enabled && g_UInputMan.KeyPressed(GUIKeys[key])) ++LocalInput.Presses[bit];
-		if ((enabled && g_UInputMan.KeyReleased(GUIKeys[key])) || (!enabled && (LocalInput.Held & mask))) ++LocalInput.Releases[bit];
-		if (enabled && g_UInputMan.KeyHeld(GUIKeys[key])) LocalInput.Held |= mask; else LocalInput.Held &= ~mask;
-	}
-	const Vector movement = enabled ? g_UInputMan.GetMouseMovement(0) : Vector();
-	const auto* viewport = ImGui::GetMainViewport(); const float scale = TextureWidth > 0 ? std::max(0.1f, std::min(viewport->Size.x / TextureWidth, viewport->Size.y / TextureHeight)) : 1.0f;
-	MouseRemainderX += movement.GetX() / scale; MouseRemainderY += movement.GetY() / scale;
-	const int dx = static_cast<int>(MouseRemainderX), dy = static_cast<int>(MouseRemainderY); MouseRemainderX -= dx; MouseRemainderY -= dy;
-	LocalInput.MouseX += dx; LocalInput.MouseY += dy; LocalInput.Wheel += enabled ? g_UInputMan.MouseWheelMoved() : 0;
-	for (int i = 0; i < 3; ++i) {
-		if (enabled && g_UInputMan.MouseButtonPressed(i + 1, 0)) ++LocalInput.MousePresses[i];
-		if ((enabled && g_UInputMan.MouseButtonReleased(i + 1, 0)) || (!enabled && (LocalInput.MouseHeld & (1 << i)))) ++LocalInput.MouseReleases[i];
-		if (enabled && g_UInputMan.MouseButtonHeld(i + 1, 0)) LocalInput.MouseHeld |= uint8_t(1 << i); else LocalInput.MouseHeld &= uint8_t(~(1 << i));
-	}
-	const Vector aim = enabled ? g_UInputMan.AnalogAimValues(0) : Vector(), move = enabled ? g_UInputMan.AnalogMoveValues(0) : Vector();
-	LocalInput.AimX = std::clamp(aim.GetX(), -1.0f, 1.0f); LocalInput.AimY = std::clamp(aim.GetY(), -1.0f, 1.0f); LocalInput.MoveX = std::clamp(move.GetX(), -1.0f, 1.0f); LocalInput.MoveY = std::clamp(move.GetY(), -1.0f, 1.0f);
 	if (Smoke && !SmokeDeployment && !SmokeEncounter) { LocalInput.Held |= (uint64_t(1) << InputElements::INPUT_L_RIGHT) | (uint64_t(1) << InputElements::INPUT_FIRE); LocalInput.MouseHeld = 1; LocalInput.AimX = 0.75f; LocalInput.MouseX += 2; }
 	if (SmokeCombatStress && !SmokeEncounter && SmokeStage == 3) {
 		const uint64_t elapsed = Now() - SmokeStageTime;
@@ -1117,6 +1130,72 @@ void MultiplayerMan::Impl::EncounterTick() {
 	}
 	if (SmokeStage == 4 && now - SmokeEncounterStart > 1500) { Stop(); System::SetQuit(); }
 }
+void MultiplayerMan::Impl::GuestInputChecks(GameActivity* game) {
+	if (SmokeGuestInputChecked) return;
+	SmokeGuestInputChecked = true;
+	if (State == Mode::Client) {
+		// Render frames can outnumber simulation steps. Repeated sampling before
+		// EndFrame must not turn one physical click into several network clicks.
+		const auto presses = LocalInput.MousePresses[0], releases = LocalInput.MouseReleases[0];
+		SDL_Event event{}; event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+		event.button.button = SDL_BUTTON_LEFT; event.button.down = true;
+		g_UInputMan.HandleInputEvent(event); SampleInput(); SampleInput();
+		g_UInputMan.EndFrame();
+		event.type = SDL_EVENT_MOUSE_BUTTON_UP; event.button.down = false;
+		g_UInputMan.HandleInputEvent(event); SampleInput(); SampleInput();
+		g_UInputMan.EndFrame();
+		const bool passed = uint16_t(LocalInput.MousePresses[0] - presses) == 1 && uint16_t(LocalInput.MouseReleases[0] - releases) == 1;
+		Verify(passed ? "PASS: one physical guest click sampled across multiple renders stays one click" : "FAIL: one physical guest click was sampled multiple times");
+		SmokeDeploymentFailed |= !passed;
+		return;
+	}
+	// Exercise the real remote-input/controller/editor chain while deployment
+	// fog is intact. Unlike the visibility fixture, no placed actor is injected.
+	const int player = 1, team = game->GetTeamOfPlayer(player);
+	auto* editor = game->GetEditorGUI(player); auto* controller = game->GetPlayerController(player);
+	const Vector position = g_SceneMan.MovePointToGround(Vector(950, 0), 60, 1);
+	InputReceiver receiver; Input input; input.Device = uint8_t(InputDevice::DEVICE_MOUSE_KEYB);
+	auto step = [&] {
+		++input.Sequence; receiver.Push(input, Now()); g_UInputMan.SetRemoteInput(player, receiver.Consume(Now()));
+		controller->Update(); editor->Update(); g_UInputMan.EndFrame();
+	};
+	for (const auto* preset : {g_PresetMan.GetEntityPreset("AHuman", "Soldier Light", "Coalition.rte"), g_PresetMan.GetEntityPreset("HDFirearm", "Assault Rifle", "Coalition.rte")}) {
+		editor->SetCurrentObject(dynamic_cast<SceneObject*>(preset->Clone())); editor->SetCursorPos(position);
+		editor->SetEditorGUIMode(SceneEditorGUI::ADDINGOBJECT); step();
+		const float funds = game->GetTeamFunds(team);
+		input.MouseHeld = 1; ++input.MousePresses[0]; step(); step();
+		input.MouseHeld = 0; ++input.MouseReleases[0]; step(); step();
+		const bool passed = game->GetTeamFunds(team) < funds && g_SceneMan.IsUnseen(position.GetFloorIntX(), position.GetFloorIntY(), team);
+		Verify(std::string(passed ? "PASS: guest placed " : "FAIL: guest could not place ") + preset->GetPresetName() + " during deployment with fog preserved");
+		SmokeDeploymentFailed |= !passed;
+	}
+	class CartFixture : public BuyMenuGUI {
+	public:
+		Vector Prepare(const Entity* preset) {
+			SetEnabled(true); m_pParentBox->SetPositionAbs(0, 0);
+			m_pCartList->ClearList();
+			for (int i = 0; i < 3; ++i) m_pCartList->AddItem(preset->GetPresetName(), "", nullptr, preset);
+			return Vector(m_pCartList->GetXPos() + 12, m_pCartList->GetYPos() + 8);
+		}
+		size_t Count() { return m_pCartList->GetItemList()->size(); }
+	};
+	CartFixture cart; cart.Create(controller);
+	const Vector pointer = cart.Prepare(g_PresetMan.GetEntityPreset("HDFirearm", "Assault Rifle", "Coalition.rte"));
+	receiver.Reset(); input = {}; input.Device = uint8_t(InputDevice::DEVICE_MOUSE_KEYB);
+	auto cartStep = [&] {
+		++input.Sequence; receiver.Push(input, Now()); g_UInputMan.SetRemoteInput(player, receiver.Consume(Now()));
+		g_UInputMan.SetAbsoluteMousePosition(pointer * g_WindowMan.GetResMultiplier(), player);
+		controller->Update(); cart.Update(); g_UInputMan.EndFrame();
+	};
+	cartStep(); cartStep();
+	input.MouseHeld = 1; input.Held = uint64_t(1) << INPUT_FIRE; ++input.MousePresses[0]; ++input.Presses[INPUT_FIRE]; cartStep();
+	input.MouseHeld = 0; input.Held = 0; ++input.MouseReleases[0]; ++input.Releases[INPUT_FIRE]; cartStep(); cartStep();
+	const bool cartPassed = cart.Count() == 2;
+	Verify(std::string(cartPassed ? "PASS: " : "FAIL: ") + "one guest cart click leaves " + std::to_string(cart.Count()) + " of three items (expected two)");
+	SmokeDeploymentFailed |= !cartPassed;
+	cart.Destroy(); g_UInputMan.ClearRemoteInput(player);
+}
+
 void MultiplayerMan::Impl::DeploymentTick() {
 	const auto now = Now();
 	if (State == Mode::Idle && SmokeStage == 5) { System::SetQuit(true); return; }
@@ -1124,6 +1203,7 @@ void MultiplayerMan::Impl::DeploymentTick() {
 	if (State == Mode::Client) {
 		if (!Playing && SmokeStage == 0 && !Players[LocalSlot].Ready) SendReady(true, Players[LocalSlot].Team);
 		if (Playing && World.Ready() && !World.Paused() && SmokeStage == 0) { SmokeStage = 1; SmokeStageTime = SmokeDeploymentStart = now; SmokeDeploymentCount = Presented; SmokeCapture = true; }
+		if (SmokeGuestInput && Playing && World.Ready() && !World.Paused() && SmokeStage > 0) GuestInputChecks(nullptr);
 		if (Playing && Presented && SmokeStage > 0) {
 			const int phase = std::clamp(int((now - SmokeStageTime) / 3000), 0, 3);
 			if (phase + 1 > SmokeStage) { SmokeStage = phase + 1; SmokeCapture = true; Verify("DEPLOYMENT: phase=" + std::to_string(phase) + " frames=" + std::to_string(Presented) + " FPS=" + std::to_string(FPS)); }
@@ -1147,6 +1227,7 @@ void MultiplayerMan::Impl::DeploymentTick() {
 		SmokeStage = 2; SmokeStageTime = now; Verify("DEPLOYMENT: brain placement"); SmokeCapture = true;
 	}
 	if (SmokeStage == 2 && now - SmokeStageTime > 3000) {
+		if (SmokeGuestInput) GuestInputChecks(game);
 		for (int player = 0; player <= SmokeGuests; ++player) {
 			const Vector pos = g_SceneMan.MovePointToGround(Vector(600 + player * 300, 0), 25, 1);
 			auto* brain = dynamic_cast<SceneObject*>(g_PresetMan.GetEntityPreset("Actor", "Brain Case")->Clone()); brain->SetPos(pos); brain->SetTeam(game->GetTeamOfPlayer(player)); g_SceneMan.GetScene()->SetResidentBrain(player, brain);

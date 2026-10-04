@@ -73,6 +73,7 @@ namespace RTE {
 
 		/// Resets the changed states for keyboard and mouse events.
 		void EndFrame();
+		uint64_t GetInputStateRevision() const { return m_InputStateRevision; }
 
 		/// Applies one authenticated remote player's controls for the simulation step.
 		void SetRemoteInput(int player, const MP::InputState& input);
@@ -512,11 +513,13 @@ namespace RTE {
 		bool m_OverrideInput; //!< If true then this instance operates in multiplayer mode and the input is overridden by network input.
 		struct RemoteInput {
 			bool Active = false;
+			bool MouseTrapped = true;
 			MP::InputState State{};
 			Vector Position;
 			std::array<bool, MouseButtons::MAX_MOUSE_BUTTONS> Buttons{}, Changes{};
 		};
 		std::array<RemoteInput, 4> m_RemoteInputs{};
+		uint64_t m_InputStateRevision = 0;
 
 		std::array<InputScheme, Players::MaxPlayerCount> m_ControlScheme; //!< Which control scheme is being used by each player.
 		const Icon* m_DeviceIcons[InputDevice::DEVICE_COUNT]; //!< The Icons representing all different devices.
