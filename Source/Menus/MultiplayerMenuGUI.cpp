@@ -138,7 +138,7 @@ void MultiplayerMenuGUI::Build(const View& view) {
 			} else if (m_Tab == Tab::Rules) {
 				Label("HostConnectionTitle", 16, 155, w - 32, 16, "HOST CONNECTION SETTINGS", true);
 				Label("ResolutionInfo", 16, 180, w - 32, 22, "Each guest draws at their own game resolution.", true);
-				Field("Bandwidth", 16, 214, half, "Upload per guest (6-48 Mbps)", std::to_string(view.Bandwidth), 2);
+				Field("Bandwidth", 16, 214, half, "Upload per guest (1-48 Mbps)", std::to_string(view.Bandwidth), 2);
 				Field("Port", 32 + half, 214, half, "Direct connection port", std::to_string(view.Port), 5);
 				Add("HostDone", "BUTTON", w - 184, h - 32, 168, 22, "Done");
 			} else {
@@ -249,6 +249,7 @@ void MultiplayerMenuGUI::Sync(const View& view) {
 	if (auto* rooms = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("LANRooms")); rooms && rooms->GetCount() != view.LANRooms.size()) { rooms->ClearList(); for (const auto& room: view.LANRooms) rooms->AddItem(room); }
 	if (auto* mode = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("Online")); mode && !mode->IsDropped() && mode->GetSelectedIndex() != (view.Online ? 0 : 1)) mode->SetSelectedIndex(view.Online ? 0 : 1);
 	if (view.Page == Screen::Loading) SetLabel("ConnectInfo", view.LoadingMessage.empty() ? "Preparing your battlefield..." : view.LoadingMessage);
+	if (view.Page == Screen::Session && !view.Host && !view.NetworkStatus.empty()) SetLabel("SessionInfo", view.NetworkStatus + "\nThe match continues while this menu is open.");
 	if (m_ConfirmLeave) return;
 	if (auto* log = dynamic_cast<GUIListBox*>(m_Manager->GetControl("ChatLog")); log && m_LastChat != view.Chat) {
 		log->ClearList(); for (const auto& line: view.Chat) log->AddItem(line); log->ScrollToBottom(); m_LastChat = view.Chat;

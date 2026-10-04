@@ -76,6 +76,12 @@ struct MultiplayerMan::Impl {
 		float SmokeQTargetX = 0, SmokeQTargetY = 0;
 		std::string Text;
 		std::unordered_map<int, AudioMan::NetworkSoundData> Loops;
+		std::unordered_set<int> AudioChannels;
+		std::map<std::pair<int, int>, AudioMan::NetworkSoundData> PendingSoundChanges;
+		std::pair<int, int> AudioCursor{};
+		double AudioBudget = 0;
+		uint64_t LastAudioBudget = 0, LastAudioChanges = 0;
+		float SentGlobalPitch = -1;
 		uint8_t Team = 0;
 		uint16_t ViewWidth = 960, ViewHeight = 540;
 		InputReceiver Inputs;
@@ -129,7 +135,7 @@ struct MultiplayerMan::Impl {
 		if (const char* verify = std::getenv("CCCP_MPSMOKE_CURSOR"); verify && std::string(verify) == "1") { CursorVerification = UI = true; std::ofstream("build-mp/cursor-smoke.log") << "START\n"; }
 	}
 	void SaveService() { if (!Smoke && !std::getenv("CCCP_MP_SERVICE")) { std::ofstream file(System::GetUserdataDirectory() + "MultiplayerService.txt"); file << ServiceAddress << '\n'; } }
-	int Port = 8000, Quality = 0, BandwidthMbps = 24, Difficulty = 50, Gold = 5000;
+	int Port = 8000, Quality = 0, BandwidthMbps = 3, Difficulty = 50, Gold = 5000;
 	int ActivityIndex = 0, SceneIndex = 0;
 	bool Fog = false, Deploy = false, ClearOrbit = false;
 	uint8_t AvailableTeams = 15, CPUTeam = 0;
@@ -149,13 +155,16 @@ struct MultiplayerMan::Impl {
 	bool SceneReceived = false;
 	uint64_t SceneReceivedAt = 0;
 	MP::World::ResourceRequests ResourceRequests;
-	void ResetSceneTransfer() { SceneManifest.clear(); SceneMissing.clear(); SceneReceived = false; ResourceRequests.Reset(); }
+	void ResetSceneTransfer() { SceneManifest.clear(); SceneMissing.clear(); SceneReceived = false; ResourceRequests.Reset(); RecentWorldUpdates.clear(); LastFrameReceived = 0; }
 	uint64_t LastRender = 0;
 	uint64_t LastResourceRequest = 0;
 	unsigned Texture = 0;
 	int TextureWidth = 0, TextureHeight = 0;
 	uint64_t BytesReceived = 0;
 	float FPS = 0;
+	std::deque<uint64_t> RecentWorldUpdates;
+	uint64_t LastNetworkLog = 0;
+	unsigned NetworkLogSamples = 0;
 	bool Smoke = false, SmokeCapture = false;
 	bool SmokeWorldLoss = false;
 	bool SmokeCombatStress = false;
@@ -168,6 +177,7 @@ struct MultiplayerMan::Impl {
 	size_t SmokeEncounterPeakPacked = 0;
 	size_t SmokeEncounterPeakPixels = 0, SmokeEncounterPeakSprites = 0;
 	uint64_t SmokeEncounterWireBytes = 0, SmokeEncounterWireUpdates = 0;
+	uint64_t SnapshotChunksReceived = 0, SnapshotsAssembled = 0;
 	uint64_t SmokeCaptureStarted = 0;
 	std::vector<uint64_t> SmokeCaptureTimes;
 	std::array<uint64_t, 4> SmokeCaptureParts{};
@@ -231,6 +241,7 @@ struct MultiplayerMan::Impl {
 	static void ClearWorldPackets(Player& player) {
 		player.WorldPackets.clear(); player.ResourceFlight.Reset(); player.ResourceMessages.clear(); player.QueuedResourceChunks.clear(); player.SnapshotStarted = false;
 		player.AckID = 0;
+		player.AudioChannels.clear(); player.PendingSoundChanges.clear(); player.AudioCursor = {}; player.AudioBudget = 0; player.LastAudioBudget = player.LastAudioChanges = 0; player.SentGlobalPitch = -1;
 		player.SceneSent = false; player.SceneQueue.clear();
 	}
 	void Stop() {
@@ -243,6 +254,7 @@ struct MultiplayerMan::Impl {
 		for (auto& player: Players) { player = Player(); }
 		Pending.clear(); Chat.clear(); ClearSounds(); World.Reset(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); LocalInput = {}; Session = ReconnectToken = 0; Epoch = 0; MouseRemainderX = MouseRemainderY = 0;
 		Texture = 0; TextureWidth = TextureHeight = 0;
+		RecentWorldUpdates.clear(); LastFrameReceived = LastNetworkLog = 0; NetworkLogSamples = 0;
 		State = Mode::Idle; Playing = Launch = Played = false; MatchEndedAt = 0; Notice.clear(); g_AudioMan.SetMultiplayerMode(false); g_UInputMan.TrapMousePos(false);
 		WarmingGuests = false;
 		g_AudioMan.SetStreamListener(Vector(), false);
@@ -449,7 +461,7 @@ int MultiplayerMan::ViewHeight(int screen) const { const auto* activity = g_Acti
 bool MultiplayerMan::WantsState(int player) const {
 	if (m_Impl->SmokeNativeBaseline && m_Impl->SmokeStage == 3) return false;
 	if (!IsRemotePlayer(player)) return false; const auto& peer = m_Impl->Players[player];
-	return peer.Connected && Now() - peer.LastWorld >= MP::World::SnapshotIntervalMS;
+	return peer.Connected && Now() - peer.LastWorld >= (peer.AckID ? MP::World::SnapshotIntervalMS : 250);
 }
 void MultiplayerMan::BeginWorldCapture() { if (IsHostingMatch() && !(m_Impl->SmokeNativeBaseline && m_Impl->SmokeStage == 3)) m_Impl->World.BeginObjects(); }
 bool MultiplayerMan::GuestView(int player, float& x, float& y) const {
@@ -593,12 +605,14 @@ bool MultiplayerMan::Impl::QueueWorld(Player& player, Kind kind, std::span<const
 }
 void MultiplayerMan::Impl::ReceiveWorld(Kind kind, MP::Reader& reader) {
 	MP::World::Chunk chunk; if (!MP::World::ReadChunk(reader, chunk)) return;
+	if (kind == Kind::WorldSnapshot) ++SnapshotChunksReceived;
 	if (Smoke && SmokeWorldLoss && kind == Kind::WorldSnapshot && !chunk.Parity && chunk.Index % ParityGroup == 0) return;
 	// A relay's transport ACK covers only the first network leg. Guest receipts
 	// bound reliable resources across both legs without delaying scene poses.
 	if (kind != Kind::WorldSnapshot) { MP::Writer receipt(Kind::WorldAck, Session, Epoch); receipt.U8(3); receipt.U32(chunk.ID); receipt.U16(chunk.Index); Net.Send(ServerAddress, receipt.Data, Delivery::Control); }
 	auto& assembly = kind != Kind::WorldSnapshot ? ResourceAssembly : SnapshotAssembly;
 	auto complete = assembly.Push(chunk, Now()); if (!complete) return;
+	if (kind == Kind::WorldSnapshot) ++SnapshotsAssembled;
 	MP::Reader packed(*complete); Header header; uint32_t size;
 	if (!ReadHeader(packed, header) || header.Type != kind || !packed.U32(size) || !size || size > MP::World::MaxPayload) return;
 	std::vector<uint8_t> payload(size);
@@ -656,6 +670,8 @@ void MultiplayerMan::Impl::PresentWorld(MP::World::Snapshot snapshot) {
 	const uint64_t now = Now();
 	if (SmokeCombatStress && SmokeStage == 3 && LastFrameReceived && World.Updates() > 1) { SmokeMaxUpdateGap = std::max(SmokeMaxUpdateGap, now - LastFrameReceived); ++SmokeStressUpdates; }
 	LastFrameReceived = now;
+	RecentWorldUpdates.push_back(now);
+	while (RecentWorldUpdates.size() > 64) RecentWorldUpdates.pop_front();
 	if (SmokeEncounter) {
 		if (SmokeEncounterLastUpdate) SmokeEncounterGap = std::max(SmokeEncounterGap, now - SmokeEncounterLastUpdate);
 		SmokeEncounterLastUpdate = now; ++SmokeEncounterUpdates;
@@ -900,8 +916,13 @@ void MultiplayerMan::Impl::Tick() {
 				if (!QueueResource(player, player.SceneQueue.front())) break;
 				player.SceneQueue.pop_front();
 			}
-			player.Budget = std::min(262144.0, player.Budget + elapsed * BandwidthMbps * 125000.0);
-			while (!player.WorldPackets.empty() && player.Budget >= player.WorldPackets.front().first.size() && Net.QueuedBytes(player.Address) < 128 * 1024) {
+			// Keep the upload limit meaningful on short WAN queues too. Saving
+			// 256 KB of idle credit let one render tick flood a home uplink even
+			// when its average send rate was below the configured limit.
+			const double worldRate = BandwidthMbps * 125000.0 * .85;
+			const double burstBytes = std::max(2400.0, worldRate * .020);
+			player.Budget = std::min(burstBytes, player.Budget + elapsed * worldRate);
+			while (!player.WorldPackets.empty() && player.Budget >= player.WorldPackets.front().first.size() + 80 && Net.QueuedBytes(player.Address) < 128 * 1024) {
 				const auto& [bytes, delivery] = player.WorldPackets.front();
 				if (delivery == Delivery::WorldResource && !player.ResourceFlight.CanSend(bytes.size())) break;
 				if (!Net.Send(player.Address, bytes, delivery)) break;
@@ -913,7 +934,7 @@ void MultiplayerMan::Impl::Tick() {
 						if (auto queued = player.QueuedResourceChunks.find(chunk.ID); queued != player.QueuedResourceChunks.end() && !--queued->second) player.QueuedResourceChunks.erase(queued);
 					}
 				}
-				player.Budget -= bytes.size(); player.WorldPackets.pop_front();
+				player.Budget -= bytes.size() + 80; player.WorldPackets.pop_front();
 			}
 			if (player.SnapshotStarted && std::none_of(player.WorldPackets.begin(), player.WorldPackets.end(), [](const auto& packet) { return packet.second == Delivery::State; })) player.SnapshotStarted = false;
 			if (Playing && player.Token) SendAudio(i); else g_AudioMan.ClearSoundEvents(i);
@@ -921,6 +942,19 @@ void MultiplayerMan::Impl::Tick() {
 		g_AudioMan.ClearSoundEvents(0);
 	}
 	SampleInput();
+	while (!RecentWorldUpdates.empty() && now >= RecentWorldUpdates.front() && now - RecentWorldUpdates.front() >= 1000) RecentWorldUpdates.pop_front();
+	if (Playing && now - LastNetworkLog >= 2000) {
+		LastNetworkLog = now;
+		// Bounded diagnostics contain timing and counters only, never room codes,
+		// passwords, peer addresses or reconnect credentials.
+		const bool host = State == Mode::Host;
+		std::ofstream log(System::GetUserdataDirectory() + (host ? "LogMultiplayer-host.txt" : "LogMultiplayer-guest.txt"), NetworkLogSamples++ % 1800 ? std::ios::app : std::ios::trunc);
+		log << "time_ms=" << now << " playing=" << Playing;
+		if (host) {
+			for (int i = 1; i < 4; ++i) if (Players[i].Connected) log << " guest=" << i << " ack_age_ms=" << (now >= Players[i].LastAck ? now - Players[i].LastAck : 0) << " resource_flight=" << Players[i].ResourceFlight.Bytes() << ' ' << Net.Diagnostics(Players[i].Address);
+		} else log << " render_fps=" << FPS << " world_hz=" << RecentWorldUpdates.size() << " update_age_ms=" << (LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0) << " transport_ping_ms=" << Net.Ping(ServerAddress) << " snapshot_chunks=" << SnapshotChunksReceived << " assembled=" << SnapshotsAssembled << ' ' << Net.Diagnostics(ServerAddress);
+		log << '\n';
+	}
 	if (State == Mode::Client && Playing && (!PendingWorlds.empty() || !MissingResources.empty() || !SceneMissing.empty()) && now - LastResourceRequest > 1000) {
 		LastResourceRequest = now;
 		std::unordered_set<uint64_t> missing = MissingResources;
@@ -1038,6 +1072,9 @@ void MultiplayerMan::Impl::SmokeTick() {
 
 void MultiplayerMan::Impl::EncounterTick() {
 	const auto now = Now();
+	// A stall that lasts through disconnect or lobby return has no next frame
+	// to close its interval. Include that time in the delivery assertion too.
+	if (State != Mode::Host && SmokeStage == 1 && SmokeEncounterLastUpdate) SmokeEncounterGap = std::max(SmokeEncounterGap, now - SmokeEncounterLastUpdate);
 	if (Playing && now - SmokeLastStats > 1000) {
 		SmokeLastStats = now;
 		Verify("PERFORMANCE: fps=" + std::to_string(State == Mode::Client ? FPS : 1000.0f / std::max(.01f, g_PerformanceMan.GetMSPFAverage())) + " updates=" + std::to_string(World.Updates()));
@@ -1049,7 +1086,10 @@ void MultiplayerMan::Impl::EncounterTick() {
 		if (Playing && World.Ready() && SmokeStage == 0) { SmokeStage = 1; Verify("ENCOUNTER: guest world loaded"); }
 		if (!Playing && SmokeStage == 1) {
 			if (SmokeNativeBaseline) Verify("PASS: native simulation performance comparison completed");
-			else Verify(std::string(SmokeEncounterUpdates > 100 && SmokeEncounterGap < 500 ? "PASS: " : "FAIL: ") + "delivered soldier combat updates=" + std::to_string(SmokeEncounterUpdates) + " largest gap ms=" + std::to_string(SmokeEncounterGap));
+			else {
+				Verify(std::string(SmokeEncounterUpdates > 100 && SmokeEncounterGap < 500 ? "PASS: " : "FAIL: ") + "delivered soldier combat updates=" + std::to_string(SmokeEncounterUpdates) + " largest gap ms=" + std::to_string(SmokeEncounterGap));
+				Verify(std::string(AudioReceived > 20 ? "PASS: " : "FAIL: ") + "combat network audio remains enabled; messages=" + std::to_string(AudioReceived));
+			}
 			SmokeStage = 2;
 		}
 		if (State == Mode::Idle && SmokeStage == 2) System::SetQuit();
@@ -1089,6 +1129,7 @@ void MultiplayerMan::Impl::EncounterTick() {
 			game->SetObservationTarget(g_SceneMan.MovePointToGround(Vector(1570, 0), 40, 1), player); game->SetViewState(Activity::Observe, player);
 		}
 		SmokeStage = 3; SmokeEncounterStart = now; SmokeCapture = true;
+		if (const char* upload = std::getenv("CCCP_MPSMOKE_UPLOAD")) BandwidthMbps = std::clamp(std::atoi(upload), 1, 48);
 		if (SmokeExplosionBurst) { BandwidthMbps = std::getenv("CCCP_MPSMOKE_BURST_UPLOAD") ? std::clamp(std::atoi(std::getenv("CCCP_MPSMOKE_BURST_UPLOAD")), 1, 24) : 4; Verify("BURST: combat upload Mbps=" + std::to_string(BandwidthMbps)); }
 		if (SmokeNativeBaseline) { World.Reset(); Verify("BASELINE: native AI battle with guest capture disabled"); }
 	}
@@ -1266,27 +1307,64 @@ void MultiplayerMan::Impl::SendAudio(int player) {
 	std::erase_if(peer.Loops, [](const auto& entry) { FMOD::Channel* channel = nullptr; bool playing = false; auto* audio = g_AudioMan.GetAudioSystem(); return !audio || audio->getChannel(entry.first, &channel) != FMOD_OK || channel->isPlaying(&playing) != FMOD_OK || !playing; });
 	if (!peer.Connected || !peer.AudioReady) return;
 	if (Net.QueuedBytes(peer.Address) > 512 * 1024) { Net.Close(peer.Address); peer.Connected = peer.Ready = false; peer.ReservedUntil = Now() + 60000; peer.Inputs.ReleaseControls(); ClearWorldPackets(peer); g_UInputMan.ClearRemoteInput(player); Lobby(); return; }
-	auto send = [&](const AudioMan::NetworkSoundData& event) {
+	const uint64_t now = Now();
+	const double elapsed = peer.LastAudioBudget ? std::min<uint64_t>(100, now - peer.LastAudioBudget) / 1000.0 : .050;
+	peer.LastAudioBudget = now;
+	peer.AudioBudget = std::min(2400.0, peer.AudioBudget + elapsed * std::min(48000.0, BandwidthMbps * 125000.0 * .10));
+	auto send = [&](const AudioMan::NetworkSoundData& event, bool essential = false) {
 		const auto path = event.State == AudioMan::SOUND_PLAY ? ContentFile::GetPathFromHash(event.SoundFileHash) : "";
-		if (event.State == AudioMan::SOUND_PLAY && !AssetPath(path)) return;
+		if (event.State == AudioMan::SOUND_PLAY && (!AssetPath(path) || (peer.AudioChannels.size() >= 512 && !peer.AudioChannels.contains(event.Channel)))) return false;
 		MP::Writer writer(Kind::Sound, Session, Epoch); writer.U8(event.State); writer.U32(static_cast<uint32_t>(event.Channel)); writer.Text(path, 240); writer.U8(event.Immobile); writer.U8(event.AffectedByGlobalPitch);
 		writer.U32(static_cast<uint32_t>(event.Loops)); writer.U32(static_cast<uint32_t>(event.Priority)); writer.U32(static_cast<uint32_t>(event.FadeOutTime));
 		writer.F32(event.AttenuationStartDistance); writer.F32(event.CustomPanValue); writer.F32(event.PanningStrengthMultiplier); writer.F32(event.Position[0]); writer.F32(event.Position[1]); writer.F32(event.Volume); writer.F32(event.Pitch);
-		Net.Send(peer.Address, writer.Data, Delivery::Audio);
+		const double cost = writer.Data.size() + 80;
+		if (!essential && (peer.AudioBudget < cost || Net.QueuedBytes(peer.Address) > 16 * 1024)) return false;
+		if (!Net.Send(peer.Address, writer.Data, Delivery::Audio)) return false;
+		peer.AudioBudget -= cost;
+		if (event.State == AudioMan::SOUND_PLAY) peer.AudioChannels.insert(event.Channel);
+		if (event.State == AudioMan::SOUND_SET_GLOBAL_PITCH) peer.SentGlobalPitch = event.Pitch;
+		return true;
 	};
-	size_t oneShots = 0;
+	auto clearChanges = [&](int channel) { std::erase_if(peer.PendingSoundChanges, [&](const auto& entry) { return entry.first.first == channel && entry.first.second != AudioMan::SOUND_SET_GLOBAL_PITCH; }); };
 	for (const auto* event: ordered) {
 		if (!event) continue;
 		if (event->State == AudioMan::SOUND_PLAY) {
-			if (event->Loops != 0 && peer.ReplayLoops) continue;
-			if (event->Loops == 0 && (++oneShots > 256 || Net.QueuedBytes(peer.Address) > 128 * 1024)) continue;
+			clearChanges(event->Channel);
+			if (event->Loops != 0 && peer.ReplayLoops && !peer.AudioChannels.contains(event->Channel)) continue;
+			if (!send(*event)) {
+				// A reused host channel must not leave an old guest loop playing
+				// when its replacement one-shot is omitted under congestion.
+				if (peer.AudioChannels.contains(event->Channel)) { auto stop = *event; stop.State = AudioMan::SOUND_STOP; send(stop, true); peer.AudioChannels.erase(event->Channel); }
+				if (event->Loops != 0) peer.ReplayLoops = true;
+			}
+		} else if (event->State == AudioMan::SOUND_STOP || event->State == AudioMan::SOUND_FADE_OUT) {
+			clearChanges(event->Channel);
+			if (peer.AudioChannels.contains(event->Channel)) { send(*event, true); if (event->State == AudioMan::SOUND_STOP) peer.AudioChannels.erase(event->Channel); }
+		} else if (event->State == AudioMan::SOUND_SET_GLOBAL_PITCH) {
+			if (event->Pitch != peer.SentGlobalPitch) peer.PendingSoundChanges[{0, event->State}] = *event;
+			else peer.PendingSoundChanges.erase({0, event->State});
+		} else if (peer.AudioChannels.contains(event->Channel)) {
+			// Coalesce across simulation/render ticks. Sending every positional
+			// sound change reliably used to fill the link and stop world updates.
+			peer.PendingSoundChanges[{event->Channel, event->State}] = *event;
 		}
-		send(*event);
 	}
 	if (peer.ReplayLoops) {
-		for (const auto& [channel, loop]: peer.Loops) send(loop);
-		AudioMan::NetworkSoundData pitch{}; pitch.State = AudioMan::SOUND_SET_GLOBAL_PITCH; pitch.Pitch = g_AudioMan.GetGlobalPitch(); send(pitch);
 		peer.ReplayLoops = false;
+		for (const auto& [channel, loop]: peer.Loops) if (!peer.AudioChannels.contains(channel) && !send(loop)) peer.ReplayLoops = true;
+		AudioMan::NetworkSoundData pitch{}; pitch.State = AudioMan::SOUND_SET_GLOBAL_PITCH; pitch.Pitch = g_AudioMan.GetGlobalPitch();
+		if (pitch.Pitch != peer.SentGlobalPitch) peer.PendingSoundChanges[{0, pitch.State}] = pitch;
+	}
+	if (now - peer.LastAudioChanges >= 50) {
+		peer.LastAudioChanges = now;
+		// Resume after the last transmitted property, so busy low-numbered
+		// channels cannot starve the remaining sounds on a slower connection.
+		for (size_t remaining = peer.PendingSoundChanges.size(); remaining && !peer.PendingSoundChanges.empty(); --remaining) {
+			auto it = peer.PendingSoundChanges.upper_bound(peer.AudioCursor);
+			if (it == peer.PendingSoundChanges.end()) it = peer.PendingSoundChanges.begin();
+			if (!send(it->second)) break;
+			peer.AudioCursor = it->first; peer.PendingSoundChanges.erase(it);
+		}
 	}
 }
 
@@ -1361,8 +1439,9 @@ MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 		view.LoadingMessage = SceneReceived ? "Preparing the terrain and scenery: " + std::to_string(SceneManifest.size() - std::min(SceneManifest.size(), SceneMissing.size())) + " / " + std::to_string(SceneManifest.size()) : "Waiting for the battlefield from your host...";
 	}
 	view.Title = State == Mode::Idle ? "M U L T I P L A Y E R" : Playing ? "M A T C H   S E S S I O N" : "M U L T I P L A Y E R   L O B B Y";
-	view.Subtitle = State == Mode::Idle ? "Gather your group. Choose a battlefield. Stay together between rounds." : State == Mode::Reconnecting ? "Connection interrupted - restoring your original player slot." : State == Mode::Connecting ? "Joining your host..." : RoomName + (view.Host ? "  /  You are the host" : "  /  " + std::to_string(Net.Ping(ServerAddress)) + " ms");
+	view.Subtitle = State == Mode::Idle ? "Gather your group. Choose a battlefield. Stay together between rounds." : State == Mode::Reconnecting ? "Connection interrupted - restoring your original player slot." : State == Mode::Connecting ? "Joining your host..." : RoomName + (view.Host ? "  /  You are the host" : std::string(Online ? "  /  Relay " : "  /  Host ") + std::to_string(Net.Ping(ServerAddress)) + " ms");
 	if (State == Mode::Client && Playing) view.Subtitle += "  /  " + std::to_string(static_cast<int>(FPS)) + " fps";
+	if (State == Mode::Client && Playing) view.NetworkStatus = "World updates: " + std::to_string(RecentWorldUpdates.size()) + "/s   Last update: " + (LastFrameReceived ? std::to_string(Now() - LastFrameReceived) + " ms ago" : "waiting");
 	for (const auto* activity: Activities) view.Activities.push_back(activity->GetPresetName());
 	for (const auto* scene: Scenes) view.Scenes.push_back(scene->GetPresetName());
 	view.ActivityIndex = ActivityIndex; view.SceneIndex = SceneIndex;
@@ -1413,7 +1492,7 @@ void MultiplayerMan::Impl::UpdateMenu() {
 		else if (control == "Code") copy(JoinCode);
 		else if (control == "Address") copy(HostAddress);
 		else if (control == "Service") copy(ServiceAddress);
-		else if (control == "Bandwidth") number(BandwidthMbps, 6, 48);
+		else if (control == "Bandwidth") number(BandwidthMbps, 1, 48);
 		else if (control == "Port") number(Port, 1, 65535);
 		else if (control == "Quality") Quality = std::clamp(event.Value, 0, 1);
 		else if (control == "Online") { Online = event.Value == 0; Error.clear(); }

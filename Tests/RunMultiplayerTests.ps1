@@ -1,4 +1,4 @@
-param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$GuestInput, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$GuestInput, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [switch]$SkipTransportTests, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
 if ($ExplosionBurst) { $Smoke = $Encounter = $CombatStress = $true }
 if ($GuestInput) { $Smoke = $Deployment = $true }
@@ -13,12 +13,14 @@ try {
     if (!(Test-Path -LiteralPath $devShell)) { throw 'Install Visual Studio 2022 C++ tools, or adjust devShell in this script.' }
     New-Item -ItemType Directory -Path build-mp -Force | Out-Null
     $compile = 'call "' + $devShell + '" -arch=x64 -host_arch=x64 > nul && cl /nologo /std:c++20 /EHsc /O2 /MD /DNOMINMAX /I Source\System /I external\sources\RakNet\include Tests\MultiplayerTests.cpp Source\System\MultiplayerTransport.cpp /Fo:build-mp\ /Fe:build-mp\MultiplayerTests.exe /link external\sources\RakNet\_Bin\raknet-release.lib ws2_32.lib winmm.lib'
-    & cmd /c $compile
-    if ($LASTEXITCODE) { throw 'Multiplayer test compilation failed.' }
-    & ./build-mp/MultiplayerTests.exe
-    if ($LASTEXITCODE) { throw 'Multiplayer protocol/transport tests failed.' }
+    if (!$SkipTransportTests) {
+        & cmd /c $compile
+        if ($LASTEXITCODE) { throw 'Multiplayer test compilation failed.' }
+        & ./build-mp/MultiplayerTests.exe
+        if ($LASTEXITCODE) { throw 'Multiplayer protocol/transport tests failed.' }
+    }
     if ($Smoke) {
-        if ($Relay) { & ./Services/RoomService/Build.ps1 -Test }
+        if ($Relay -and !$SkipTransportTests) { & ./Services/RoomService/Build.ps1 -Test }
         if (!$GameDirectory) {
             & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
             if ($LASTEXITCODE) { throw 'Game build failed.' }
