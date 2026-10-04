@@ -7,6 +7,10 @@
 #include "SLBackground.h"
 #include "ActivityMan.h"
 #include "Activity.h"
+#include "GameActivity.h"
+#include "SceneEditorGUI.h"
+#include "Actor.h"
+#include "UInputMan.h"
 #include "FrameMan.h"
 #include "CameraMan.h"
 #include "PostProcessMan.h"
@@ -16,12 +20,14 @@
 #include "Shader.h"
 #include "GraphicalPrimitive.h"
 #include "Draw.h"
+#include "PieMenu.h"
 #include "allegro.h"
 #include "allegro/internal/aintern.h"
 #include <unordered_map>
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <ostream>
 
 using namespace RTE;
 using namespace RTE::MP::World;
@@ -38,15 +44,31 @@ struct MultiplayerWorld::Impl {
     std::deque<Node> Trails;
     std::mutex TrailMutex;
     uint64_t TrailSequence = 0, TrailTime = 0, TrailDuration = 17;
+    size_t TrailPixels = 0;
+    struct TrailPixel { uint64_t Key = 0; Node* Path = nullptr; uint32_t Index = 0, Generation = 0; };
+    static constexpr size_t TrailSlots = 524288;
+    std::unique_ptr<TrailPixel[]> CurrentTrailPixels;
+    struct TrailBucket { uint64_t Key = 0; Node* Path = nullptr; uint32_t Generation = 0; };
+    static constexpr size_t TrailBucketSlots = 16384;
+    std::unique_ptr<TrailBucket[]> CurrentTrailBuckets;
+    uint32_t TrailGeneration = 0;
     uint64_t HUDParent = 0;
     Vector HUDAnchor;
+    Interaction HUDControl = Interaction::None;
+    MP::Input LocalInput;
+    LocalCamera CameraPrediction;
+    bool LocalInputEnabled = false;
     std::unordered_map<uint64_t, Vector> ObjectAnchors;
     bool PrimitiveStyle = false;
     Node CurrentStyle;
     std::unordered_map<uint64_t, uint8_t> Ordinals;
     std::unordered_map<uint64_t, Resource> Resources;
+    std::unordered_set<uint64_t> EmptyMaskedAssets;
+    std::unordered_set<uint64_t> SceneAssets;
     std::unordered_map<uint64_t, Texture2D> Textures;
     std::unordered_map<BITMAP*, uint64_t> StaticAssets;
+    std::unordered_map<BITMAP*, std::unordered_map<uint64_t, uint64_t>> BitmapRegions;
+    size_t BitmapRegionEntries = 0;
     std::unordered_map<uint64_t, uint64_t> LastUsed;
     size_t ResourceBytes = 0;
     Timeline States;
@@ -57,6 +79,7 @@ struct MultiplayerWorld::Impl {
     Snapshot LastSample;
     std::unordered_map<uint64_t, Node> LastVisuals;
     BITMAP* GUI = nullptr;
+    BITMAP* CanvasTarget = nullptr;
     GFX_VTABLE* OriginalVTable = nullptr;
     GFX_VTABLE CanvasVTable{};
     Vector Camera;
@@ -65,34 +88,49 @@ struct MultiplayerWorld::Impl {
         const auto id = resource.ID; const uint64_t now = WorldNow(); LastUsed[id] = now;
         if (Resources.contains(id)) return true;
         if (ResourceBytes + resource.Pixels.size() > ResourceLimit) {
-            auto pinned = States.Resources(); for (const auto& [id, visual] : LastVisuals) if (visual.Asset) pinned.insert(visual.Asset);
+            auto pinned = States.Resources(); pinned.insert(SceneAssets.begin(), SceneAssets.end()); for (const auto& [id, visual] : LastVisuals) if (visual.Asset) pinned.insert(visual.Asset);
             std::vector<std::pair<uint64_t, uint64_t>> candidates;
-            for (const auto& [key, used] : LastUsed) if (now - used > 5000 && !pinned.contains(key)) candidates.emplace_back(used, key);
+            for (const auto& [key, used] : LastUsed) if (!pinned.contains(key)) candidates.emplace_back(used, key);
             std::sort(candidates.begin(), candidates.end());
             for (const auto& [used, key] : candidates) {
                 auto found = Resources.find(key); if (found == Resources.end()) continue;
-                ResourceBytes -= found->second.Pixels.size(); Resources.erase(found); LastUsed.erase(key);
+                ResourceBytes -= found->second.Pixels.size(); Resources.erase(found); EmptyMaskedAssets.erase(key); LastUsed.erase(key);
                 if (auto texture = Textures.find(key); texture != Textures.end()) { rlUnloadTexture(texture->second.id); Textures.erase(texture); }
                 if (ResourceBytes + resource.Pixels.size() <= ResourceLimit * 9 / 10) break;
             }
         }
         if (ResourceBytes + resource.Pixels.size() > ResourceLimit) { LastUsed.erase(id); return false; }
+        if (resource.Depth == 8 && std::all_of(resource.Pixels.begin(), resource.Pixels.end(), [](uint8_t color) { return color == g_MaskColor; })) EmptyMaskedAssets.insert(id);
         ResourceBytes += resource.Pixels.size(); Resources.emplace(id, std::move(resource)); return true;
     }
 
-    uint64_t Asset(BITMAP* bitmap, int sx = 0, int sy = 0, int width = -1, int height = -1) {
+    uint64_t Asset(BITMAP* bitmap, int sx = 0, int sy = 0, int width = -1, int height = -1, bool immutable = false) {
         if (!bitmap || (bitmap_color_depth(bitmap) != 8 && bitmap_color_depth(bitmap) != 32)) return 0;
         width = width < 0 ? bitmap->w : width; height = height < 0 ? bitmap->h : height;
         sx = std::clamp(sx, 0, bitmap->w); sy = std::clamp(sy, 0, bitmap->h);
         width = std::clamp(width, 0, bitmap->w - sx); height = std::clamp(height, 0, bitmap->h - sy);
         if (!width || !height || width > 4096 || height > 4096 || uint64_t(width) * height * (bitmap_color_depth(bitmap) / 8) > MaxPayload - 256) return 0;
+        const uint64_t region = (uint64_t(uint16_t(sx)) << 48) | (uint64_t(uint16_t(sy)) << 32) | (uint64_t(uint16_t(width)) << 16) | uint16_t(height);
+        if (BitmapRegionEntries >= 65536) { BitmapRegions.clear(); BitmapRegionEntries = 0; }
+        auto& regions = BitmapRegions[bitmap];
+        if (auto cached = regions.find(region); cached != regions.end()) if (auto old = Resources.find(cached->second); old != Resources.end() && old->second.Depth == bitmap_color_depth(bitmap)) {
+            // StaticSceneLayer's native contract uploads pixels only once.
+            // Its immutable backdrops need no repeated full-region comparison.
+            if (immutable) { LastUsed[cached->second] = WorldNow(); return cached->second; }
+            const auto& previous = old->second; const int stride = width * (previous.Depth / 8);
+            bool unchanged = true;
+            for (int y = 0; unchanged && y < height; ++y) unchanged = std::memcmp(previous.Pixels.data() + size_t(y) * stride, bitmap->line[sy + y] + sx * (previous.Depth / 8), stride) == 0;
+            if (unchanged) { LastUsed[cached->second] = WorldNow(); return cached->second; }
+        }
         Resource resource; resource.Width = uint16_t(width); resource.Height = uint16_t(height); resource.Depth = uint8_t(bitmap_color_depth(bitmap));
         const int stride = width * (resource.Depth / 8); resource.Pixels.resize(size_t(stride) * height);
         for (int y = 0; y < height; ++y) {
             std::memcpy(resource.Pixels.data() + size_t(y) * stride, bitmap->line[sy + y] + sx * (resource.Depth / 8), stride);
         }
         resource.ID = ResourceHash(resource); const uint64_t id = resource.ID;
-        return Store(std::move(resource)) ? id : 0;
+        if (!Store(std::move(resource))) return 0;
+        if (!regions.contains(region)) ++BitmapRegionEntries;
+        regions[region] = id; return id;
     }
     uint64_t StaticAsset(BITMAP* bitmap) {
         if (auto found = StaticAssets.find(bitmap); found != StaticAssets.end() && Resources.contains(found->second)) { LastUsed[found->second] = WorldNow(); return found->second; }
@@ -100,6 +138,13 @@ struct MultiplayerWorld::Impl {
     }
     void AppendCanvas(Node node) {
         node.ID = (uint64_t(1) << 63) | uint64_t(Canvas.size() + 1); node.Flags |= ScreenSpace;
+        node.Control = HUDControl;
+        BITMAP* target = CanvasTarget ? CanvasTarget : GUI;
+        const float dx = target && GUI ? float(target->x_ofs - GUI->x_ofs) : 0;
+        const float dy = target && GUI ? float(target->y_ofs - GUI->y_ofs) : 0;
+        node.X += dx; node.Y += dy;
+        if (node.Type == Shape::Line || node.Type == Shape::Triangle || node.Type == Shape::Spline) { node.X2 += dx; node.Y2 += dy; node.X3 += dx; node.Y3 += dy; }
+        if (node.Type == Shape::Spline) { node.Width += dx; node.Height += dy; }
 		if (PrimitiveStyle) { node.BlendMode = CurrentStyle.BlendMode; node.TintR = CurrentStyle.TintR; node.TintG = CurrentStyle.TintG; node.TintB = CurrentStyle.TintB; node.Alpha = uint8_t(unsigned(node.Alpha) * CurrentStyle.Alpha / 255); }
 		else if (_drawing_mode == DRAW_MODE_TRANS) node.Alpha = uint8_t(unsigned(node.Alpha) * g_FrameMan.GetCurrentAlpha() / 255);
 		if (HUDParent) {
@@ -107,7 +152,14 @@ struct MultiplayerWorld::Impl {
 			if (node.Type == Shape::Line || node.Type == Shape::Triangle || node.Type == Shape::Spline) { node.X2 -= HUDAnchor.GetX(); node.Y2 -= HUDAnchor.GetY(); node.X3 -= HUDAnchor.GetX(); node.Y3 -= HUDAnchor.GetY(); }
 			if (node.Type == Shape::Spline) { node.Width -= HUDAnchor.GetX(); node.Height -= HUDAnchor.GetY(); }
 		}
-		if (GUI && GUI->clip) { node.ClipX = uint16_t(std::max(0, GUI->cl)); node.ClipY = uint16_t(std::max(0, GUI->ct)); node.ClipWidth = uint16_t(std::max(0, GUI->cr - GUI->cl)); node.ClipHeight = uint16_t(std::max(0, GUI->cb - GUI->ct)); }
+        if (target && GUI) {
+            const int left = std::max(GUI->clip ? GUI->cl : 0, int(dx) + (target->clip ? target->cl : 0));
+            const int top = std::max(GUI->clip ? GUI->ct : 0, int(dy) + (target->clip ? target->ct : 0));
+            const int right = std::min(GUI->clip ? GUI->cr : GUI->w, int(dx) + (target->clip ? target->cr : target->w));
+            const int bottom = std::min(GUI->clip ? GUI->cb : GUI->h, int(dy) + (target->clip ? target->cb : target->h));
+            node.ClipX = uint16_t(std::max(0, left)); node.ClipY = uint16_t(std::max(0, top));
+            node.ClipWidth = uint16_t(std::max(0, right - left)); node.ClipHeight = uint16_t(std::max(0, bottom - top));
+        }
         if (Canvas.size() < MaxNodes && Valid(node)) Canvas.push_back(node);
     }
     void AppendObject(const MovableObject& owner, Node node) {
@@ -118,7 +170,10 @@ struct MultiplayerWorld::Impl {
         if (Objects.size() < MaxNodes && Valid(node)) Objects.push_back(node);
     }
     static Impl* CanvasFor(BITMAP* bitmap) {
-        return canvasCollector && canvasCollector->m_Impl->GUI == bitmap ? canvasCollector->m_Impl.get() : nullptr;
+        if (!canvasCollector || !bitmap) return nullptr;
+        auto& impl = *canvasCollector->m_Impl;
+        if (impl.GUI != bitmap && (!impl.GUI || !(bitmap->id & BMP_ID_SUB) || !(bitmap->id & BMP_ID_MASK) || (bitmap->id & BMP_ID_MASK) != (impl.GUI->id & BMP_ID_MASK))) return nullptr;
+        impl.CanvasTarget = bitmap; return &impl;
     }
     static void Rectangle(BITMAP* bitmap, int x1, int y1, int x2, int y2, int color) {
         if (auto* impl = CanvasFor(bitmap)) { Node n; n.Type = Shape::Rectangle; n.X = float(x1); n.Y = float(y1); n.Width = float(x2 - x1 + 1); n.Height = float(y2 - y1 + 1); n.Color = uint8_t(color); impl->AppendCanvas(n); }
@@ -204,8 +259,12 @@ struct MultiplayerWorld::Impl {
           for (int y = firstY; y < lastY; ++y) for (int x = firstX; x < lastX; ++x) {
             int sx = x * TileSize, sy = y * TileSize, w = std::min<int>(TileSize, bitmap->w - sx), h = std::min<int>(TileSize, bitmap->h - sy);
             Node n; n.ID = (uint64_t(1) << 62) | (uint64_t(ordinal) << 48) | (uint64_t(uint16_t(ry * rows + y)) << 24) | uint16_t(rx * columns + x);
-            n.Asset = Asset(bitmap, sx, sy, w, h); n.SourceWidth = float(w); n.SourceHeight = float(h); n.Width = w * scale.GetX(); n.Height = h * scale.GetY();
+            n.Asset = Asset(bitmap, sx, sy, w, h, std::is_base_of_v<StaticSceneLayer, LayerType>);
+            if (layer->GetDrawMasked() && EmptyMaskedAssets.contains(n.Asset)) continue;
+            n.SourceWidth = float(w); n.SourceHeight = float(h); n.Width = w * scale.GetX(); n.Height = h * scale.GetY();
             n.Flags = ScreenSpace | MP::World::Layer | (layer->GetDrawMasked() ? Masked : 0);
+            n.X3 = n.Y3 = 1;
+            if constexpr (std::is_same_v<LayerType, SLBackground>) { n.X3 = layer->GetScrollRatio().GetX(); n.Y3 = layer->GetScrollRatio().GetY(); }
             n.X2 = layer->WrapsX() ? spanX : 0; n.Y2 = layer->WrapsY() ? spanY : 0;
             n.X = boxX + rx * spanX + sx * scale.GetX() - offset.GetX(); n.Y = boxY + ry * spanY + sy * scale.GetY() - offset.GetY();
             n.ClipX = boxX; n.ClipY = boxY; n.ClipWidth = width - boxX * 2; n.ClipHeight = height - boxY * 2;
@@ -240,21 +299,53 @@ void MultiplayerWorld::Reset() {
 }
 void MultiplayerWorld::ResetPresentation() {
     auto& impl = *m_Impl;
-    impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear();
+    impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.SceneAssets.clear();
+    impl.CameraPrediction.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
 }
 void MultiplayerWorld::BeginObjects() { m_Impl->Objects.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); objectCollector = this; }
 void MultiplayerWorld::BeginTrails() {
     auto& impl = *m_Impl; const uint64_t now = WorldNow(); std::lock_guard lock(impl.TrailMutex);
+    if (!++impl.TrailGeneration) { impl.CurrentTrailPixels.reset(); impl.CurrentTrailBuckets.reset(); ++impl.TrailGeneration; }
     impl.TrailDuration = impl.TrailTime ? std::clamp<uint64_t>(now - impl.TrailTime, 8, 100) : 17; impl.TrailTime = now;
-    while (!impl.Trails.empty() && impl.Trails.front().EndTime + 250 < now) impl.Trails.pop_front(); trailCollector.store(this);
+    while (!impl.Trails.empty() && impl.Trails.front().EndTime + 250 < now) { impl.TrailPixels -= impl.Trails.front().Pixels.size(); impl.Trails.pop_front(); } trailCollector.store(this);
 }
 void MultiplayerWorld::Trail(std::span<const std::pair<int, int>> positions, uint8_t color) {
-    if (!color) return;
-    auto* collector = trailCollector.load(); if (!collector) return; auto& impl = *collector->m_Impl; std::lock_guard lock(impl.TrailMutex);
-    for (const auto& [x, y] : positions) { if (impl.Trails.size() >= MaxNodes / 2) break;
-        Node n; n.ID = (uint64_t(1) << 59) | ++impl.TrailSequence; n.Type = Shape::Pixel; n.X = float(x); n.Y = float(y); n.Color = color; n.Flags = Discontinuous; n.StartTime = impl.TrailTime; n.EndTime = n.StartTime + impl.TrailDuration; impl.Trails.push_back(n);
+    if (!color || positions.empty()) return;
+    auto* collector = trailCollector.load(); if (!collector) return;
+    auto& impl = *collector->m_Impl; std::lock_guard lock(impl.TrailMutex);
+    if (!impl.CurrentTrailPixels) impl.CurrentTrailPixels = std::make_unique<Impl::TrailPixel[]>(Impl::TrailSlots);
+    if (!impl.CurrentTrailBuckets) impl.CurrentTrailBuckets = std::make_unique<Impl::TrailBucket[]>(Impl::TrailBucketSlots);
+    for (const auto& [x, y] : positions) {
+        const uint64_t key = (uint64_t(uint32_t(x)) << 32) | uint32_t(y);
+        const uint64_t mixed = (key ^ (key >> 17) ^ (key >> 29)) * 0x9e3779b185ebca87ULL;
+        size_t slot = size_t(mixed >> 32) & (Impl::TrailSlots - 1);
+        while (impl.CurrentTrailPixels[slot].Generation == impl.TrailGeneration && impl.CurrentTrailPixels[slot].Key != key) slot = (slot + 1) & (Impl::TrailSlots - 1);
+        auto& pixel = impl.CurrentTrailPixels[slot];
+        if (pixel.Generation == impl.TrailGeneration) {
+            pixel.Path->PixelColors[pixel.Index] = color;
+            continue;
+        }
+        if (impl.TrailPixels >= 262144) break;
+        const int tileX = int((int64_t(x) - (x < 0 ? 255 : 0)) / 256), tileY = int((int64_t(y) - (y < 0 ? 255 : 0)) / 256);
+        const uint64_t tileKey = (uint64_t(uint32_t(tileX)) << 32) | uint32_t(tileY);
+        const uint64_t tileMixed = (tileKey ^ (tileKey >> 17) ^ (tileKey >> 29)) * 0x9e3779b185ebca87ULL;
+        size_t bucketSlot = size_t(tileMixed >> 32) & (Impl::TrailBucketSlots - 1);
+        while (impl.CurrentTrailBuckets[bucketSlot].Generation == impl.TrailGeneration && impl.CurrentTrailBuckets[bucketSlot].Key != tileKey) bucketSlot = (bucketSlot + 1) & (Impl::TrailBucketSlots - 1);
+        auto& bucket = impl.CurrentTrailBuckets[bucketSlot];
+        Node* path = bucket.Generation == impl.TrailGeneration ? bucket.Path : nullptr;
+        if (!path || path->Pixels.size() >= 16384) {
+            if (impl.Trails.size() >= 4096) break;
+            Node n; n.ID = (uint64_t(1) << 59) | ++impl.TrailSequence; n.Type = Shape::PixelPath;
+            n.X = float(tileX * 256); n.Y = float(tileY * 256); n.Width = n.Height = 256; n.Color = color; n.Flags = Discontinuous;
+            n.StartTime = impl.TrailTime; n.EndTime = n.StartTime + impl.TrailDuration;
+            impl.Trails.push_back(std::move(n)); path = &impl.Trails.back();
+            bucket = {tileKey, path, impl.TrailGeneration};
+        }
+        pixel = {key, path, uint32_t(path->Pixels.size()), impl.TrailGeneration};
+        path->Pixels.emplace_back(int16_t(x - int(path->X)), int16_t(y - int(path->Y)));
+        path->PixelColors.push_back(color); ++impl.TrailPixels;
     }
 }
 bool MultiplayerWorld::Flash(int width, int height, uint8_t color) { if (!canvasCollector) return false; Node n; n.Type = Shape::Flash; n.Width = float(width); n.Height = float(height); n.Color = color; canvasCollector->m_Impl->AppendCanvas(n); return true; }
@@ -264,6 +355,18 @@ void MultiplayerWorld::BeginHUD(const MovableObject& owner) {
     impl.HUDAnchor = Vector(impl.GUI->w / 2 + Displacement(impl.Camera.GetX() + impl.GUI->w / 2, anchor.GetX(), g_SceneMan.GetSceneWidth(), g_SceneMan.SceneWrapsX()), impl.GUI->h / 2 + Displacement(impl.Camera.GetY() + impl.GUI->h / 2, anchor.GetY(), g_SceneMan.GetSceneHeight(), g_SceneMan.SceneWrapsY()));
 }
 void MultiplayerWorld::EndHUD() { if (canvasCollector) canvasCollector->m_Impl->HUDParent = 0; }
+void MultiplayerWorld::BeginAim(const Actor& actor, int screen) {
+    if (!canvasCollector) return;
+    auto* activity = g_ActivityMan.GetActivity();
+    const int player = activity ? activity->PlayerOfScreen(screen) : -1;
+    if (player >= 0 && activity->GetControlledActor(player) == &actor) canvasCollector->m_Impl->HUDControl = Interaction::Aim;
+}
+void MultiplayerWorld::BeginRadialCursor() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::RadialCursor; }
+void MultiplayerWorld::BeginRadialBackground() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::RadialBackground; }
+void MultiplayerWorld::BeginPointer() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::Pointer; }
+void MultiplayerWorld::BeginWorldCursor() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::WorldCursor; }
+void MultiplayerWorld::EndInteraction() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::None; }
+void MultiplayerWorld::SetLocalInput(const MP::Input& input, bool enabled) { m_Impl->LocalInput = input; m_Impl->LocalInputEnabled = enabled; }
 void MultiplayerWorld::EndObjects() { if (objectCollector == this) objectCollector = nullptr; }
 void MultiplayerWorld::Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& pos, const Vector& pivot, float angle, float scale, bool flip, bool white, uint8_t alpha) {
     if (!objectCollector || !bitmap) return;
@@ -274,7 +377,7 @@ void MultiplayerWorld::Pixel(const MovableObject& owner, const Vector& pos, uint
     Node n; n.Type = Shape::Pixel; n.X = pos.GetX(); n.Y = pos.GetY(); n.Color = color; objectCollector->m_Impl->AppendObject(owner, n);
 }
 void MultiplayerWorld::BeginView(BITMAP* gui, const Vector& camera) {
-    auto& impl = *m_Impl; impl.Canvas.clear(); impl.GUI = gui; impl.Camera = camera; impl.OriginalVTable = gui->vtable; impl.CanvasVTable = *gui->vtable;
+    auto& impl = *m_Impl; impl.Canvas.clear(); impl.GUI = impl.CanvasTarget = gui; impl.Camera = camera; impl.OriginalVTable = gui->vtable; impl.CanvasVTable = *gui->vtable;
     auto& v = impl.CanvasVTable; v.putpixel = Impl::PutPixel; v.hline = v.hfill = Impl::HLine; v.vline = Impl::VLine; v.line = v.fastline = Impl::Line; v.rectfill = Impl::Rectangle; v.triangle = Impl::Triangle;
     v.clear_to_color = Impl::Clear; v.draw_sprite = v.draw_256_sprite = Impl::PlainSprite; v.draw_trans_sprite = v.draw_trans_rgba_sprite = Impl::TransSprite; v.draw_sprite_h_flip = Impl::HFlip; v.draw_sprite_v_flip = Impl::VFlip; v.draw_sprite_vh_flip = Impl::VHFlip; v.draw_character = Impl::Character;
     v.draw_rle_sprite = Impl::RLE; v.draw_trans_rle_sprite = v.draw_trans_rgba_rle_sprite = Impl::TransRLE; v.draw_lit_rle_sprite = Impl::LitRLE; v.draw_lit_sprite = Impl::LitSprite; v.draw_glyph = Impl::Glyph;
@@ -285,11 +388,44 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
     auto& impl = *m_Impl; if (impl.GUI) impl.GUI->vtable = impl.OriginalVTable; canvasCollector = nullptr;
     Snapshot snapshot; snapshot.ID = id; snapshot.InputSequence = inputSequence; snapshot.Time = time; snapshot.Width = uint16_t(impl.GUI->w); snapshot.Height = uint16_t(impl.GUI->h); snapshot.CameraX = impl.Camera.GetX(); snapshot.CameraY = impl.Camera.GetY();
     snapshot.SceneWidth = uint16_t(g_SceneMan.GetSceneWidth()); snapshot.SceneHeight = uint16_t(g_SceneMan.GetSceneHeight()); snapshot.Wrap = (g_SceneMan.SceneWrapsX() ? 1 : 0) | (g_SceneMan.SceneWrapsY() ? 2 : 0);
+    auto* active = g_ActivityMan.GetActivity();
+    if (active) {
+        snapshot.Paused = active->IsPaused();
+        snapshot.ViewMode = uint8_t(active->GetViewState(player));
+        const int screen = active->ScreenOfPlayer(player);
+        const Vector target = g_CameraMan.GetScrollTarget(screen) - Vector(snapshot.Width / 2, snapshot.Height / 2) - g_CameraMan.GetScreenOcclusion(screen) / 2;
+        snapshot.CameraTargetX = target.GetX(); snapshot.CameraTargetY = target.GetY();
+        if (active->GetViewState(player) == Activity::Observe) snapshot.MouseScale = 1.2f;
+        else if (active->GetViewState(player) == Activity::ActorSelect || active->GetViewState(player) == Activity::AIGoToPoint) snapshot.MouseScale = 1;
+        if (active->GetActivityState() == Activity::Editing) if (auto* game = dynamic_cast<GameActivity*>(active); game && game->GetEditorGUI(player)) {
+            const auto mode = game->GetEditorGUI(player)->GetEditorGUIMode();
+            snapshot.ViewMode = uint8_t(10 + mode); snapshot.ScrollSpeed = .3f;
+            snapshot.MouseScale = mode == SceneEditorGUI::PICKINGOBJECT || mode == SceneEditorGUI::DONEEDITING || mode == SceneEditorGUI::INACTIVE ? 0 : mode >= SceneEditorGUI::MOVINGOBJECT ? .5f : 1;
+        }
+    }
+    if (auto* actor = active ? active->GetControlledActor(player) : nullptr) {
+        snapshot.ControlledActor = uint64_t(actor->GetUniqueID()) << 8;
+        const Vector aim = g_UInputMan.AnalogAimValues(player);
+        snapshot.AimX = aim.GetX(); snapshot.AimY = aim.GetY();
+        if (!actor->GetController()->IsState(PIE_MENU_ACTIVE)) { const Vector look = actor->GetViewPoint() - actor->GetPos(); snapshot.LookX = look.GetX(); snapshot.LookY = look.GetY(); }
+    }
     auto* scene = g_SceneMan.GetScene(); if (!scene) return snapshot;
     uint16_t layerID = 1;
     for (auto it = scene->GetBackLayers().rbegin(); it != scene->GetBackLayers().rend(); ++it) impl.Layer(snapshot.Nodes, *it, layerID++, impl.Camera, snapshot.Width, snapshot.Height);
     impl.Layer(snapshot.Nodes, scene->GetTerrain()->GetBGSceneLayer(), 100, impl.Camera, snapshot.Width, snapshot.Height);
-    { std::lock_guard lock(impl.TrailMutex); for (const auto& n : impl.Trails) if (std::abs(Displacement(impl.Camera.GetX() + snapshot.Width / 2, n.X, snapshot.SceneWidth, snapshot.Wrap & 1)) < snapshot.Width / 2 + 128 && std::abs(Displacement(impl.Camera.GetY() + snapshot.Height / 2, n.Y, snapshot.SceneHeight, snapshot.Wrap & 2)) < snapshot.Height / 2 + 128) snapshot.Nodes.push_back(n); }
+    { std::lock_guard lock(impl.TrailMutex);
+      for (const auto& path : impl.Trails) {
+        const float dx = Displacement(impl.Camera.GetX() + snapshot.Width / 2, path.X + path.Width / 2, snapshot.SceneWidth, snapshot.Wrap & 1);
+        const float dy = Displacement(impl.Camera.GetY() + snapshot.Height / 2, path.Y + path.Height / 2, snapshot.SceneHeight, snapshot.Wrap & 2);
+        if (std::abs(dx) >= snapshot.Width / 2 + 128 + path.Width / 2 || std::abs(dy) >= snapshot.Height / 2 + 128 + path.Height / 2) continue;
+        if (std::abs(dx) + path.Width / 2 < snapshot.Width / 2 + 128 && std::abs(dy) + path.Height / 2 < snapshot.Height / 2 + 128) { snapshot.Nodes.push_back(path); continue; }
+        Node visible; visible.ID = path.ID; visible.Type = path.Type; visible.Flags = path.Flags; visible.Color = path.Color;
+        visible.X = path.X; visible.Y = path.Y; visible.Width = path.Width; visible.Height = path.Height; visible.StartTime = path.StartTime; visible.EndTime = path.EndTime;
+        visible.Pixels.reserve(path.Pixels.size()); visible.PixelColors.reserve(path.PixelColors.size());
+        for (size_t i = 0; i < path.Pixels.size(); ++i) { const auto [x, y] = path.Pixels[i]; if (std::abs(Displacement(impl.Camera.GetX() + snapshot.Width / 2, path.X + x, snapshot.SceneWidth, snapshot.Wrap & 1)) < snapshot.Width / 2 + 128 && std::abs(Displacement(impl.Camera.GetY() + snapshot.Height / 2, path.Y + y, snapshot.SceneHeight, snapshot.Wrap & 2)) < snapshot.Height / 2 + 128) { visible.Pixels.emplace_back(x, y); visible.PixelColors.push_back(path.PixelColors[i]); } }
+        if (!visible.Pixels.empty()) snapshot.Nodes.push_back(std::move(visible));
+      }
+    }
     for (const auto& node : impl.Objects) {
         const float dx = Displacement(impl.Camera.GetX() + snapshot.Width / 2, node.X, snapshot.SceneWidth, snapshot.Wrap & 1), dy = Displacement(impl.Camera.GetY() + snapshot.Height / 2, node.Y, snapshot.SceneHeight, snapshot.Wrap & 2);
         if (std::abs(dx) < snapshot.Width / 2 + node.Width + 128 && std::abs(dy) < snapshot.Height / 2 + node.Height + 128) snapshot.Nodes.push_back(node);
@@ -308,10 +444,35 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         n.Width = n.SourceWidth = float(effect.m_Bitmap->w); n.Height = n.SourceHeight = float(effect.m_Bitmap->h); n.PivotX = n.Width / 2; n.PivotY = n.Height / 2;
         n.Flags = Additive | Discontinuous; n.TintR = n.TintG = n.TintB = uint8_t(std::clamp(effect.m_Strength, 0, 255)); if (Valid(n)) snapshot.Nodes.push_back(n);
     }
-    if (snapshot.Nodes.size() > MaxNodes) snapshot.Nodes.resize(MaxNodes);
+    BoundSnapshot(snapshot);
     return snapshot;
 }
 const Resource* MultiplayerWorld::FindResource(uint64_t id) const { auto found = m_Impl->Resources.find(id); return found == m_Impl->Resources.end() ? nullptr : &found->second; }
+std::vector<uint64_t> MultiplayerWorld::PrepareScene() {
+    auto& impl = *m_Impl;
+    auto* scene = g_SceneMan.GetScene(); if (!scene) return {};
+    auto cache = [&](BITMAP* bitmap) {
+        if (!bitmap) return;
+        for (int y = 0; y < bitmap->h; y += TileSize) for (int x = 0; x < bitmap->w; x += TileSize) {
+            const auto id = impl.Asset(bitmap, x, y, std::min<int>(TileSize, bitmap->w - x), std::min<int>(TileSize, bitmap->h - y));
+            if (id) impl.SceneAssets.insert(id);
+        }
+    };
+    for (const auto* layer : scene->GetBackLayers()) cache(layer->GetBitmap());
+    cache(scene->GetTerrain()->GetBGSceneLayer()->GetBitmap());
+    cache(scene->GetTerrain()->GetFGSceneLayer()->GetBitmap());
+    return {impl.SceneAssets.begin(), impl.SceneAssets.end()};
+}
+void MultiplayerWorld::PinScene(const std::unordered_set<uint64_t>& assets) { m_Impl->SceneAssets = assets; }
+void MultiplayerWorld::PrimeSceneBackdrops(const Scene& scene) {
+    // Preset backdrops already contain passive, installed bitmap resources.
+    // Only matching content hashes are reused; terrain and gameplay stay on
+    // the host, and this never constructs actors or runs activity scripts.
+    for (const auto* layer : scene.GetBackLayers()) if (auto* bitmap = layer->GetBitmap()) {
+        for (int y = 0; y < bitmap->h; y += TileSize) for (int x = 0; x < bitmap->w; x += TileSize)
+            m_Impl->Asset(bitmap, x, y, std::min<int>(TileSize, bitmap->w - x), std::min<int>(TileSize, bitmap->h - y));
+    }
+}
 bool MultiplayerWorld::Install(Resource resource) {
     auto& impl = *m_Impl; if (resource.ID != ResourceHash(resource)) return false;
     return impl.Store(std::move(resource));
@@ -321,15 +482,98 @@ std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const 
 }
 bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !Missing(snapshot).empty()) || !m_Impl->States.Push(std::move(snapshot), time)) return false; ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
+bool MultiplayerWorld::Paused() const { return Ready() && m_Impl->States.Latest().Paused; }
 bool MultiplayerWorld::IsDeploying() const { return Ready() && m_Impl->LastSample.Phase == Activity::Editing; }
 int MultiplayerWorld::Width() const { return Ready() ? m_Impl->States.Latest().Width : 0; }
 int MultiplayerWorld::Height() const { return Ready() ? m_Impl->States.Latest().Height : 0; }
 uint64_t MultiplayerWorld::Rendered() const { return m_Impl->RenderCount; }
 uint64_t MultiplayerWorld::Updates() const { return m_Impl->UpdateCount; }
 uint64_t MultiplayerWorld::IntermediateFrames() const { return m_Impl->IntermediateCount; }
+bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
+    bool passed = true;
+    auto check = [&](bool result, const char* name) { log << (result ? "OK: " : "FAIL: ") << name << '\n'; passed &= result; };
+    BITMAP* gui = create_bitmap_ex(8, 640, 360);
+    Controller controller;
+    auto* preset = dynamic_cast<const PieMenu*>(g_PresetMan.GetEntityPreset("PieMenu", "Default Human Pie Menu", "Base.rte"));
+    check(preset != nullptr, "native radial menu fixture loaded");
+    if (preset) {
+        std::unique_ptr<PieMenu> pie(static_cast<PieMenu*>(preset->Clone()));
+        pie->SetMenuController(&controller); pie->SetPos(Vector(320, 180));
+        pie->SetEnabled(true, false); pie->FreezeAtRadius(30); pie->Update();
+        BeginView(gui, Vector()); pie->Draw(gui, Vector());
+        check(std::any_of(m_Impl->Canvas.begin(), m_Impl->Canvas.end(), [](const Node& n) { return n.Type == Shape::Sprite && n.Width >= 60 && n.Height >= 60; }), "native radial background reaches the guest canvas");
+        gui->vtable = m_Impl->OriginalVTable; canvasCollector = nullptr; m_Impl->GUI = nullptr;
+    }
+    BeginView(gui, Vector());
+    line(gui, 200, 90, 220, 90, g_WhiteColor);
+    check(m_Impl->Canvas.size() == 1 && m_Impl->Canvas[0].X2 - m_Impl->Canvas[0].X == 20, "HUD line keeps its short native endpoints");
+    BITMAP* sub = create_sub_bitmap(gui, 100, 100, 100, 100);
+    line(sub, 10, 10, 30, 10, g_WhiteColor);
+    check(m_Impl->Canvas.size() == 2 && m_Impl->Canvas.back().X == 110 && m_Impl->Canvas.back().Y == 110, "clipped GUI sub-bitmap commands reach the guest in screen coordinates");
+    BITMAP* preview = create_bitmap_ex(8, 16, 16); clear_to_color(preview, 0); putpixel(preview, 5, 7, g_WhiteColor);
+    const auto originalAsset = m_Impl->Asset(preview);
+    check(originalAsset && m_Impl->Asset(preview) == originalAsset, "unchanged mutable bitmaps reuse their resource without hashing or allocating again");
+    putpixel(preview, 6, 7, g_WhiteColor);
+    check(m_Impl->Asset(preview) != originalAsset, "bitmap-region cache detects native terrain and GUI pixel changes");
+    check(CanvasOverlay(preview, gui) && m_Impl->Canvas.back().Width == 2 && m_Impl->Canvas.back().Height == 1, "deployment preview texture reaches the guest as a cropped native overlay");
+    {
+        SceneLayer emptyLayer; BITMAP* transparent = create_bitmap_ex(8, 64, 64); clear_to_color(transparent, g_MaskColor);
+        emptyLayer.Create(transparent, true, Vector(), false, false, Vector(-1, -1));
+        std::vector<Node> tiles; m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
+        check(tiles.empty(), "fully transparent masked terrain tiles require no scene commands");
+        putpixel(transparent, 10, 10, g_WhiteColor); m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
+        check(!tiles.empty() && !m_Impl->EmptyMaskedAssets.contains(tiles.front().Asset), "changed terrain immediately restores a formerly transparent tile");
+    }
+    destroy_bitmap(preview);
+    destroy_bitmap(sub);
+    gui->vtable = m_Impl->OriginalVTable; canvasCollector = nullptr; m_Impl->GUI = nullptr;
+    destroy_bitmap(gui); Reset();
+    Resource strip; strip.Width = 400; strip.Height = 1; strip.Pixels.assign(400, uint8_t(g_WhiteColor)); strip.ID = ResourceHash(strip); Install(strip);
+    Snapshot first; first.ID = 1; first.Time = 1000; first.Width = first.SceneWidth = 640; first.Height = first.SceneHeight = 360;
+    Node hud; hud.ID = uint64_t(1) << 63; hud.Flags = ScreenSpace | Masked; hud.Asset = strip.ID; hud.X = 20; hud.Y = 50; hud.Width = hud.SourceWidth = 400; hud.Height = hud.SourceHeight = 1; first.Nodes.push_back(hud);
+    Install(first, 1020); Render(1020);
+    auto second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].Asset = strip.ID + 1; second.Nodes[0].X = 200; second.Nodes[0].Y = 80; second.Nodes[0].Width = second.Nodes[0].SourceWidth = 8; second.Nodes[0].Height = second.Nodes[0].SourceHeight = 8;
+    Install(second, 1070); const unsigned rendered = Render(1250);
+    auto* pixels = static_cast<unsigned char*>(rlReadTexturePixels(rendered, 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+    size_t colored = 0; if (pixels) for (size_t i = 0; i < 640 * 360 * 4; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) ++colored;
+    check(pixels && colored == 0, "missing HUD icon does not reuse an unrelated 400-pixel strip");
+    MemFree(pixels); Reset();
+    Install(strip); first.Nodes[0].Flags = Masked | Discontinuous; first.Nodes[0].ID = uint64_t(1) << 60;
+    second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].Asset = strip.ID + 1; second.Nodes[0].X = 200; second.Nodes[0].Width = second.Nodes[0].SourceWidth = 8;
+    Install(first, 1020); Render(1020); Install(second, 1070);
+    pixels = static_cast<unsigned char*>(rlReadTexturePixels(Render(1250), 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+    colored = 0; if (pixels) for (size_t i = 0; i < 640 * 360 * 4; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) ++colored;
+    check(pixels && colored == 0, "missing transient world effect does not reuse another effect ordinal as a horizontal strip");
+    MemFree(pixels); Reset();
+    BeginTrails();
+    std::vector<std::pair<int, int>> trail;
+    for (int i = 0; i < 512; ++i) trail.emplace_back(i + 10, 100 + i / 8);
+    for (int i = 0; i < 20; ++i) Trail(trail, uint8_t(g_WhiteColor));
+    check(m_Impl->Trails.size() <= 20, "twenty long bullet trails require at most twenty retained commands");
+    Snapshot combat; combat.ID = 1; combat.Time = m_Impl->TrailTime; combat.Width = combat.SceneWidth = 640; combat.Height = combat.SceneHeight = 360;
+    combat.Nodes.assign(m_Impl->Trails.begin(), m_Impl->Trails.end());
+    MP::Writer wire(MP::Kind::WorldSnapshot); WriteSnapshot(wire, combat);
+    check(wire.Data.size() < 55000, "long bullet trails stay below a 55 KB update budget");
+    Install(combat, combat.Time); const auto trailTexture = Render(combat.Time + InterpolationMS);
+    pixels = static_cast<unsigned char*>(rlReadTexturePixels(trailTexture, 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+    colored = 0; if (pixels) for (size_t i = 0; i < 640 * 360 * 4; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) ++colored;
+    check(pixels && colored == trail.size(), "packed trails retain every native raster pixel without adding connecting lines");
+    MemFree(pixels); Reset();
+    BeginTrails();
+    for (int i = 0; i < 5000; ++i) { const std::pair<int, int> point{i % 640, i / 640}; Trail(std::span(&point, 1), uint8_t(g_WhiteColor)); Trail(std::span(&point, 1), uint8_t(g_YellowGlowColor)); }
+    check(m_Impl->Trails.size() < 20 && m_Impl->TrailPixels == 5000 && std::all_of(m_Impl->Trails.begin(), m_Impl->Trails.end(), [](const auto& path) { return std::all_of(path.PixelColors.begin(), path.PixelColors.end(), [](uint8_t color) { return color == g_YellowGlowColor; }); }), "fragment raster batching deduplicates pixels and preserves the final native color");
+    Reset();
+    return passed;
+}
 unsigned MultiplayerWorld::Render(uint64_t time) {
     auto& impl = *m_Impl; if (impl.States.Empty()) return 0;
     Snapshot scene = impl.States.Sample(time);
+    if (impl.LocalInputEnabled) {
+        const bool radial = (impl.LocalInput.Held & ((uint64_t(1) << INPUT_PIEMENU_ANALOG) | (uint64_t(1) << INPUT_PIEMENU_DIGITAL))) != 0;
+        PredictLocalView(scene, impl.States.Latest(), impl.LocalInput.AimX, impl.LocalInput.AimY, radial);
+        if (impl.LocalInput.Device == DEVICE_MOUSE_KEYB) PredictLocalPointer(scene, impl.States.Latest(), impl.LocalInput.MouseX, impl.LocalInput.MouseY);
+        impl.CameraPrediction.Apply(scene, impl.States.Latest(), impl.LocalInput, time);
+    } else impl.CameraPrediction.Reset();
     if (impl.LastSample.ID == scene.ID && (impl.LastSample.CameraX != scene.CameraX || impl.LastSample.CameraY != scene.CameraY || impl.LastSample.Nodes != scene.Nodes)) ++impl.IntermediateCount;
     impl.LastSample = scene;
     // An animation frame or changed terrain tile can arrive after its pose.
@@ -337,8 +581,9 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     std::unordered_set<uint64_t> visible;
     for (auto& n : scene.Nodes) if (n.Type == Shape::Sprite) {
         visible.insert(n.ID);
-        if (impl.Resources.contains(n.Asset)) impl.LastVisuals[n.ID] = n;
-        else if (auto previous = impl.LastVisuals.find(n.ID); previous != impl.LastVisuals.end()) {
+        const bool retained = !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
+        if (impl.Resources.contains(n.Asset)) { if (retained) impl.LastVisuals[n.ID] = n; }
+        else if (auto previous = impl.LastVisuals.find(n.ID); retained && previous != impl.LastVisuals.end()) {
             const auto& old = previous->second;
             n.Asset = old.Asset; n.SourceX = old.SourceX; n.SourceY = old.SourceY; n.SourceWidth = old.SourceWidth; n.SourceHeight = old.SourceHeight;
             n.Width = old.Width; n.Height = old.Height; n.PivotX = old.PivotX; n.PivotY = old.PivotY;
@@ -384,7 +629,14 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
             DrawTexturePro(texture, source, {x, y, n.Width, n.Height}, {n.PivotX, n.PivotY}, n.Angle, {255, 255, 255, n.Alpha});
         } else {
             RLColor color{n.Color, 0, 0, n.Alpha};
-            if (n.Type == Shape::Pixel) DrawRectangle(int(x), int(y), 1, 1, color);
+            if (n.Type == Shape::PixelPath) {
+                for (size_t i = 0; i < n.Pixels.size(); ++i) { const auto [px, py] = n.Pixels[i];
+                    const int tx = int(scene.Width / 2 + Displacement(scene.CameraX + scene.Width / 2, n.X + px, scene.SceneWidth, scene.Wrap & 1));
+                    const int ty = int(scene.Height / 2 + Displacement(scene.CameraY + scene.Height / 2, n.Y + py, scene.SceneHeight, scene.Wrap & 2));
+                    if (tx >= 0 && ty >= 0 && tx < scene.Width && ty < scene.Height) DrawRectangle(tx, ty, 1, 1, {n.PixelColors[i], 0, 0, n.Alpha});
+                }
+            }
+            else if (n.Type == Shape::Pixel) DrawRectangle(int(x), int(y), 1, 1, color);
             else if (n.Type == Shape::Rectangle) DrawRectangle(int(x), int(y), int(n.Width), int(n.Height), color);
             else if (n.Type == Shape::Line) DrawLineEx({x, y}, {n.X2 + dx, n.Y2 + dy}, n.Width, color);
             else if (n.Type == Shape::Triangle) DrawTriangle({x, y}, {n.X2 + dx, n.Y2 + dy}, {n.X3 + dx, n.Y3 + dy}, color);
@@ -406,14 +658,27 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     rlDrawRenderBatchActive(); glDisable(GL_SCISSOR_TEST); rlSetBlendMode(RL_BLEND_ALPHA); shader.End(); impl.Target->End(); ++impl.RenderCount; return impl.Target->GetColorTexture().id;
 }
 bool MultiplayerWorld::CanvasSprite(BITMAP* bitmap, Rectangle source, Rectangle dest, Vector2 pivot, float angle, RLColor tint, BITMAP* target) {
-    if (!canvasCollector || (target && canvasCollector->m_Impl->GUI != target)) return false;
+    if (!canvasCollector || !Impl::CanvasFor(target ? target : canvasCollector->m_Impl->GUI)) return false;
     auto& impl = *canvasCollector->m_Impl; Node n; n.Asset = impl.Asset(bitmap); n.X = dest.x; n.Y = dest.y; n.Width = std::abs(dest.width); n.Height = std::abs(dest.height); n.PivotX = pivot.x; n.PivotY = pivot.y; n.Angle = angle;
     n.SourceX = source.x; n.SourceY = source.y; n.SourceWidth = std::abs(source.width); n.SourceHeight = std::abs(source.height); n.Flags = Masked | (source.width < 0 || dest.width < 0 ? FlipX : 0) | (source.height < 0 || dest.height < 0 ? FlipY : 0); n.Alpha = tint.a; impl.AppendCanvas(n); return true;
+}
+size_t MultiplayerWorld::CanvasCheckpoint(BITMAP* target) { const auto* impl = Impl::CanvasFor(target); return impl ? impl->Canvas.size() : SIZE_MAX; }
+bool MultiplayerWorld::CanvasOverlay(BITMAP* bitmap, BITMAP* target, size_t before) {
+    auto* impl = Impl::CanvasFor(target); if (!impl) return false;
+    int left = bitmap->w, top = bitmap->h, right = -1, bottom = -1;
+    for (int y = 0; y < bitmap->h; ++y) for (int x = 0; x < bitmap->w; ++x) if (bitmap->line[y][x] != g_MaskColor) { left = std::min(left, x); top = std::min(top, y); right = std::max(right, x); bottom = std::max(bottom, y); }
+    if (right < left) return true;
+    Node n; n.Asset = impl->Asset(bitmap, left, top, right - left + 1, bottom - top + 1); if (!n.Asset) return true;
+    if (impl->Canvas.size() >= MaxNodes) return true;
+    n.X = float(left); n.Y = float(top); n.Width = n.SourceWidth = float(right - left + 1); n.Height = n.SourceHeight = float(bottom - top + 1);
+    const auto previous = impl->HUDControl; impl->HUDControl = Interaction::WorldOverlay; impl->AppendCanvas(n); impl->HUDControl = previous;
+    if (before < impl->Canvas.size() - 1) std::rotate(impl->Canvas.begin() + before, std::prev(impl->Canvas.end()), impl->Canvas.end());
+    return true;
 }
 bool MultiplayerWorld::Primitive(const GraphicalPrimitive& primitive, const Vector& offset) {
     if (!canvasCollector) return false;
     using P = GraphicalPrimitive::PrimitiveType;
-    auto& impl = *canvasCollector->m_Impl; Node n; n.X = primitive.m_StartPos.GetX() + offset.GetX(); n.Y = primitive.m_StartPos.GetY() + offset.GetY(); n.X2 = primitive.m_EndPos.GetX() + offset.GetX(); n.Y2 = primitive.m_EndPos.GetY() + offset.GetY(); n.Color = primitive.m_Color;
+    auto& impl = *canvasCollector->m_Impl; impl.CanvasTarget = impl.GUI; Node n; n.X = primitive.m_StartPos.GetX() + offset.GetX(); n.Y = primitive.m_StartPos.GetY() + offset.GetY(); n.X2 = primitive.m_EndPos.GetX() + offset.GetX(); n.Y2 = primitive.m_EndPos.GetY() + offset.GetY(); n.Color = primitive.m_Color;
     n.BlendMode = uint8_t(primitive.m_BlendMode);
     if (n.BlendMode) { const auto& blend = primitive.m_ColorChannelBlendAmounts; n.TintR = uint8_t(std::clamp(blend[0], 0, 100) * 255 / 100); n.TintG = uint8_t(std::clamp(blend[1], 0, 100) * 255 / 100); n.TintB = uint8_t(std::clamp(blend[2], 0, 100) * 255 / 100); n.Alpha = uint8_t(std::clamp(blend[3], 0, 100) * 255 / 100); }
     if (primitive.GetPrimitiveType() == P::Text || primitive.GetPrimitiveType() == P::Bitmap) { impl.CurrentStyle = n; impl.PrimitiveStyle = true; return false; }

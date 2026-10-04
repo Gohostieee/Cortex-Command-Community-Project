@@ -248,6 +248,7 @@ void MultiplayerMenuGUI::Sync(const View& view) {
 	SetField("Code", view.Code); SetField("Address", view.Address); SetField("Service", view.Service);
 	if (auto* rooms = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("LANRooms")); rooms && rooms->GetCount() != view.LANRooms.size()) { rooms->ClearList(); for (const auto& room: view.LANRooms) rooms->AddItem(room); }
 	if (auto* mode = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("Online")); mode && !mode->IsDropped() && mode->GetSelectedIndex() != (view.Online ? 0 : 1)) mode->SetSelectedIndex(view.Online ? 0 : 1);
+	if (view.Page == Screen::Loading) SetLabel("ConnectInfo", view.LoadingMessage.empty() ? "Preparing your battlefield..." : view.LoadingMessage);
 	if (m_ConfirmLeave) return;
 	if (auto* log = dynamic_cast<GUIListBox*>(m_Manager->GetControl("ChatLog")); log && m_LastChat != view.Chat) {
 		log->ClearList(); for (const auto& line: view.Chat) log->AddItem(line); log->ScrollToBottom(); m_LastChat = view.Chat;

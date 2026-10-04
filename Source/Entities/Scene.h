@@ -346,6 +346,7 @@ namespace RTE {
 		/// @return A reference to the std::list containing all the background layers.
 		/// Ownership is NOT transferred!
 		std::list<SLBackground*>& GetBackLayers() { return m_BackLayerList; }
+		const std::list<SLBackground*>& GetBackLayers() const { return m_BackLayerList; }
 
 		/// Adds area to the list if this scene's areas.
 		/// @param m_AreaList.push_back(newArea Area to add.

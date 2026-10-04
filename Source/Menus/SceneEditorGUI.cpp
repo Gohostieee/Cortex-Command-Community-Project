@@ -5,6 +5,7 @@
 #include "PresetMan.h"
 #include "ActivityMan.h"
 #include "GameActivity.h"
+#include "MultiplayerWorld.h"
 #include "SceneEditor.h"
 #include "UInputMan.h"
 
@@ -1188,8 +1189,9 @@ void SceneEditorGUI::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 	// Done, so don't draw the UI
 	if (m_EditorGUIMode == DONEEDITING)
 		return;
+	const size_t overlayOrder = MultiplayerWorld::CanvasCheckpoint(pTargetBitmap);
 
-	if (!m_DrawTexture || (m_DrawTexture->m_Width != pTargetBitmap->w && m_DrawTexture->m_Height != pTargetBitmap->h)) {
+	if (!m_DrawTexture || m_DrawTexture->m_Width != pTargetBitmap->w || m_DrawTexture->m_Height != pTargetBitmap->h) {
 		BITMAP* temp = create_bitmap_ex(bitmap_color_depth(pTargetBitmap), pTargetBitmap->w, pTargetBitmap->h);
 		m_DrawBitmap = std::unique_ptr<BITMAP, BitmapDeleter>(temp);
 		m_DrawTexture = std::make_unique<BigTexture>(m_DrawBitmap.get());
@@ -1336,10 +1338,12 @@ void SceneEditorGUI::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 
 	m_pPicker->Draw(pTargetBitmap);
 
-	m_DrawTexture->Update(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
-	rlZDepth(-1);
-	m_DrawTexture->Draw(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height), Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
-	rlZDepth(0);
+	if (!MultiplayerWorld::CanvasOverlay(m_DrawBitmap.get(), pTargetBitmap, overlayOrder)) {
+		m_DrawTexture->Update(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
+		rlZDepth(-1);
+		m_DrawTexture->Draw(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height), Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
+		rlZDepth(0);
+	}
 
 	// Draw the pie menu
 	m_PieMenu->Draw(pTargetBitmap, targetPos);

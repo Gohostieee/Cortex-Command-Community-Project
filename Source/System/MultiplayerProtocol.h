@@ -15,14 +15,14 @@ namespace RTE::MP {
 
 inline constexpr uint8_t PacketID = 220;
 inline constexpr uint32_t Magic = 0x43434D50;
-inline constexpr uint16_t Version = 3;
+inline constexpr uint16_t Version = 5;
 inline constexpr size_t MaxPlayers = 4;
 inline constexpr size_t InputCount = 64;
 inline constexpr uint16_t ChunkBytes = 1100, ParityGroup = 8;
 inline constexpr uint32_t InputTimeoutMS = 250;
 
 // Values 5 and 6 belonged to the retired framebuffer stream.
-enum class Kind : uint8_t { Hello = 0, Welcome, Lobby, Ready, Input, Leave = 7, Reject, Sound, Announcement, Chat, TextInput, WorldSnapshot, WorldResource, WorldAck };
+enum class Kind : uint8_t { Hello = 0, Welcome, Lobby, Ready, Input, Leave = 7, Reject, Sound, Announcement, Chat, TextInput, WorldSnapshot, WorldResource, WorldAck, WorldManifest };
 inline bool Newer(uint32_t value, uint32_t previous) { return value != previous && uint32_t(value - previous) < 0x80000000u; }
 
 // The wire format is explicit big endian. No engine structures, pointers, hashes,
@@ -61,7 +61,7 @@ struct Header { Kind Type{}; uint64_t Session = 0; uint32_t Epoch = 0; };
 inline bool ReadHeader(Reader& reader, Header& header) {
 	uint8_t id, kind; uint32_t magic; uint16_t version;
 	if (!reader.U8(id) || !reader.U32(magic) || !reader.U16(version) || !reader.U8(kind) || !reader.U64(header.Session) || !reader.U32(header.Epoch)) return false;
-	if (id != PacketID || magic != Magic || version != Version || kind == 5 || kind == 6 || kind > static_cast<uint8_t>(Kind::WorldAck)) return false;
+	if (id != PacketID || magic != Magic || version != Version || kind == 5 || kind == 6 || kind > static_cast<uint8_t>(Kind::WorldManifest)) return false;
 	header.Type = static_cast<Kind>(kind); return true;
 }
 
@@ -119,22 +119,29 @@ public:
 		m_State.Snapshot = input; m_LastTime = now; m_HaveInput = true; return true;
 	}
 	InputState Consume(uint64_t now) {
-		if (m_HaveInput && now - m_LastTime > InputTimeoutMS) {
-			m_State.Pressed = 0; m_State.MousePressed = 0; m_State.MouseDX = m_State.MouseDY = m_State.WheelDelta = 0;
-			m_State.Released |= m_State.Snapshot.Held; m_State.MouseReleased |= m_State.Snapshot.MouseHeld;
-			m_State.Snapshot.Held = 0; m_State.Snapshot.MouseHeld = 0;
-			m_State.Snapshot.AimX = m_State.Snapshot.AimY = m_State.Snapshot.MoveX = m_State.Snapshot.MoveY = 0;
-		}
+		if (m_HaveInput && now - m_LastTime > InputTimeoutMS) ReleaseControls();
 		InputState result = m_State;
+		m_AppliedInput = result.Snapshot;
 		m_State.Pressed = m_State.Released = 0; m_State.MousePressed = m_State.MouseReleased = 0;
 		m_State.MouseDX = m_State.MouseDY = m_State.WheelDelta = 0; return result;
 	}
+	// Same-match reconnects retain sequence and cumulative counters so delayed
+	// datagrams cannot replay earlier motion or presses.
+	void ReleaseControls() {
+		m_State.Pressed = 0; m_State.MousePressed = 0; m_State.MouseDX = m_State.MouseDY = m_State.WheelDelta = 0;
+		m_State.Released |= m_State.Snapshot.Held; m_State.MouseReleased |= m_State.Snapshot.MouseHeld;
+		m_State.Snapshot.Held = 0; m_State.Snapshot.MouseHeld = 0;
+		m_State.Snapshot.AimX = m_State.Snapshot.AimY = m_State.Snapshot.MoveX = m_State.Snapshot.MoveY = 0;
+	}
 	void Reset() { *this = InputReceiver(); }
 	uint32_t LastSequence() const { return m_State.Snapshot.Sequence; }
+	// Presentation must acknowledge only input that reached a simulation step.
+	const Input& LastInput() const { return m_AppliedInput; }
 private:
 	static bool Changed(uint16_t value, uint16_t previous) { const uint16_t delta = value - previous; return delta != 0 && delta <= 64; }
 	static int32_t Delta(uint32_t value, uint32_t previous, int32_t limit) { return std::clamp(std::bit_cast<int32_t>(value - previous), -limit, limit); }
 	InputState m_State{};
+	Input m_AppliedInput{};
 	uint64_t m_LastTime = 0;
 	bool m_HaveInput = false;
 };

@@ -1,5 +1,6 @@
 #include "GameActivity.h"
 #include "MultiplayerMan.h"
+#include "MultiplayerWorld.h"
 
 #include "CameraMan.h"
 #include "PresetMan.h"
@@ -2056,8 +2057,10 @@ void GameActivity::DrawGUI(BITMAP* pTargetBitmap, const Vector& targetPos, int w
 
 	// Draw actor picking crosshairs if applicable
 	if (m_ViewState[PoS] == ViewState::ActorSelect && m_IsActive[PoS] && m_IsHuman[PoS]) {
+		MultiplayerWorld::BeginWorldCursor();
 		Vector center = m_ActorCursor[PoS] - targetPos;
 		circle(pTargetBitmap, center.m_X, center.m_Y, m_CursorTimer.AlternateReal(150) ? 6 : 8, g_YellowGlowColor);
+		MultiplayerWorld::EndInteraction();
 		// Add pixel glow area around it, in scene coordinates
 		g_PostProcessMan.RegisterGlowArea(m_ActorCursor[PoS], 10);
 		/* Crosshairs
@@ -2070,9 +2073,11 @@ void GameActivity::DrawGUI(BITMAP* pTargetBitmap, const Vector& targetPos, int w
 	}
 	// AI point commands cursor
 	else if (m_ViewState[PoS] == ViewState::AIGoToPoint) {
+		MultiplayerWorld::BeginWorldCursor();
 		Vector center = m_ActorCursor[PoS] - targetPos;
 		circle(pTargetBitmap, center.m_X, center.m_Y, m_CursorTimer.AlternateReal(150) ? 6 : 8, g_YellowGlowColor);
 		circlefill(pTargetBitmap, center.m_X, center.m_Y, 2, g_YellowGlowColor);
+		MultiplayerWorld::EndInteraction();
 		//            putpixel(pTargetBitmap, center.m_X, center.m_Y, g_YellowGlowColor);
 		// Add pixel glow area around it, in scene coordinates
 		g_PostProcessMan.RegisterGlowArea(m_ActorCursor[PoS], 10);

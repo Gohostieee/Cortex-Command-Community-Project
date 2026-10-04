@@ -1,6 +1,7 @@
 #include "GUI.h"
 #include "GUIReader.h"
 #include "PresetMan.h"
+#include "MultiplayerWorld.h"
 
 #include <cassert>
 
@@ -269,7 +270,9 @@ void GUISkin::DrawMouse(int Image, int X, int Y, GUIScreen* guiScreenOverride) {
 	GUIScreen* targetScreen = guiScreenOverride ? guiScreenOverride : m_Screen;
 
 	if (m_MousePointers[Image]) {
+		MultiplayerWorld::BeginPointer();
 		targetScreen->DrawBitmapTrans(m_MousePointers[Image], X - 1, Y - 1, nullptr);
+		MultiplayerWorld::EndInteraction();
 	}
 }
 

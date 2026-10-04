@@ -13,7 +13,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 3, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 5, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	WriteInput(writer, input);
@@ -36,6 +36,9 @@ void Inputs() {
 	Check(state.MouseDX == 5 && state.Pressed == (uint64_t(1) << 10) && state.Released == state.Pressed && state.MousePressed == 1 && state.MouseReleased == 1, "short click lost");
 	++input.Sequence; input.MouseX += 5; Check(receiver.Push(input, 110), "repeated motion rejected");
 	Check(receiver.Consume(110).MouseDX == 5, "identical consecutive motion was discarded");
+	++input.Sequence; input.MouseX += 10; receiver.Push(input, 115);
+	Check(receiver.LastInput().MouseX == 10 && receiver.LastInput().Sequence == 2, "presentation acknowledges mouse motion before a simulation step applies it, causing cursor rebound");
+	receiver.Consume(115);
 	// Simulate a lost press packet and a lost release packet: their counters survive.
 	input.Sequence += 3; input.Presses[14] = input.Releases[14] = 1; input.MouseX += 15;
 	receiver.Push(input, 120); state = receiver.Consume(120);
@@ -48,6 +51,18 @@ void Inputs() {
 	receiver.Reset(); input = {}; input.Sequence = 0xfffffffe; input.MouseX = 0xfffffffe; receiver.Push(input, 400); receiver.Consume(400);
 	input.Sequence = 1; input.MouseX = 3; receiver.Push(input, 410); Check(receiver.Consume(410).MouseDX == 5, "sequence or motion wrap failed");
 	Check(Newer(1, 0xfffffffe) && !Newer(0xfffffffe, 1), "sequence ordering wrap failed");
+	// A resumed player keeps cumulative motion and edge counters. Disconnecting
+	// releases controls without accepting old datagrams or replaying old motion.
+	receiver.Reset(); input = {}; input.Sequence = 700; input.MouseX = 9000;
+	input.Presses[10] = 8; input.Held = uint64_t(1) << 10; input.MouseHeld = 2;
+	receiver.Push(input, 500); receiver.Consume(500);
+	receiver.ReleaseControls();
+	state = receiver.Consume(501);
+	Check(state.Released == (uint64_t(1) << 10) && state.MouseReleased == 2 && !state.Snapshot.Held, "reconnect reset lost held-control releases");
+	Check(!receiver.Push(input, 502), "reconnect admitted an old input datagram");
+	++input.Sequence; input.Held = input.MouseHeld = 0; input.MouseX += 3;
+	receiver.Push(input, 503); state = receiver.Consume(503);
+	Check(state.MouseDX == 3 && !state.Pressed && !state.MousePressed, "reconnect replayed cumulative mouse motion or old button presses");
 }
 void Worlds() {
     namespace W = RTE::MP::World;
@@ -59,7 +74,20 @@ void Worlds() {
     Check(credits.Receipt(1, 0) && !credits.Receipt(1, 0) && credits.CanSend(1131), "duplicate guest receipts inflated delivery credits");
     credits.Sent(1, 0, 1131); Check(credits.Bytes() == outstanding && credits.Contains(1), "resource receipt did not admit exactly its next fragment");
     credits.Reset(); Check(credits.Bytes() == 0 && !credits.Contains(1) && !credits.Receipt(1, 1) && !credits.CanSend(1401), "match reset retained stale resource credits");
+    W::ResourceRequests repairs; std::unordered_set<uint64_t> missingTiles, requestedTiles;
+    for (uint64_t id = 1; id <= 4096; ++id) missingTiles.insert(id);
+    for (uint64_t time = 1000; time <= 64000; time += 1000) {
+        const auto batch = repairs.Select(missingTiles, time);
+        Check(batch.size() == 64, "large scene repair traffic is not bounded to 64 requests per second");
+        for (auto id : batch) Check(requestedTiles.insert(id).second, "scene repair starved a missing tile by retrying earlier tiles");
+    }
+    Check(requestedTiles == missingTiles, "scene repair failed to reach the last missing tile");
+    missingTiles = {4096}; Check(repairs.Select(missingTiles, 64001).empty(), "scene repair immediately duplicated an in-flight request");
+    Check(repairs.Select(missingTiles, 69000) == std::vector<uint64_t>{4096}, "scene repair never retried a lost resource");
     W::Resource resource; resource.Width = 4; resource.Height = 3; resource.Pixels = {1,2,3,4,5,6,7,8,9,10,11,12}; resource.ID = W::ResourceHash(resource);
+    { std::vector<uint64_t> manifest{resource.ID, 1234}; Writer writer(Kind::WorldManifest); W::WriteManifest(writer, manifest); Reader reader(writer.Data); Header header; std::unordered_set<uint64_t> assets;
+      Check(ReadHeader(reader, header) && W::ReadManifest(reader, assets) && assets.size() == 2 && assets.contains(resource.ID), "whole-scene warmup manifest changed resource identities");
+      manifest.push_back(resource.ID); Writer duplicate(Kind::WorldManifest); W::WriteManifest(duplicate, manifest); Reader bad(duplicate.Data); Check(ReadHeader(bad, header) && !W::ReadManifest(bad, assets), "duplicate warmup resource accepted"); }
     Writer rw(Kind::WorldResource); W::WriteResource(rw, resource); Reader rr(rw.Data); Header h; W::Resource decoded;
     Check(ReadHeader(rr, h) && W::ReadResource(rr, decoded) && decoded.Pixels == resource.Pixels, "retained resource round trip failed");
     rw.Data.back() ^= 1; Reader corrupt(rw.Data); Check(ReadHeader(corrupt, h) && !W::ReadResource(corrupt, decoded), "resource corruption accepted");
@@ -72,6 +100,23 @@ void Worlds() {
     for (uint64_t time : {uint64_t(0), W::MaxTime + 1, std::numeric_limits<uint64_t>::max()}) { auto invalid = first; invalid.Time = time; Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, invalid); Reader reader(writer.Data); Check(ReadHeader(reader, h) && !W::ReadSnapshot(reader, copy), "unsafe presentation clock accepted"); }
     { auto invalid = first; invalid.Phase = 7; Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, invalid); Reader reader(writer.Data); Check(ReadHeader(reader, h) && !W::ReadSnapshot(reader, copy), "invalid activity phase accepted"); }
     auto invalidEvent = node; invalidEvent.StartTime = W::MaxTime; invalidEvent.EndTime = W::MaxTime + 1; Check(!W::Valid(invalidEvent), "overflowing event time accepted");
+    { auto path = first; path.Nodes[0].Type = W::Shape::PixelPath; path.Nodes[0].Pixels = {{0, 0}, {1, -1}, {20, 8}, {-500, 40}}; path.Nodes[0].PixelColors = {1, 255, 8, 0};
+      Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, path); Reader reader(writer.Data);
+      Check(ReadHeader(reader, h) && W::ReadSnapshot(reader, copy) && copy.Nodes == path.Nodes, "native trail gaps, negative offsets or ricochets changed in transit");
+      for (size_t i = writer.Data.size() - 18; i < writer.Data.size(); ++i) { Reader truncated(std::span(writer.Data).first(i)); Check(ReadHeader(truncated, h) && !W::ReadSnapshot(truncated, copy), "truncated raster trail accepted"); }
+      path.Nodes[0].Pixels.resize(16385); Check(!W::Valid(path.Nodes[0]), "unbounded raster trail accepted"); }
+    { auto loaded = first; loaded.Nodes.clear();
+      for (size_t i = 0; i < W::MaxNodes - 18; ++i) { auto pixel = node; pixel.ID = 100 + i; pixel.Type = W::Shape::Pixel; loaded.Nodes.push_back(std::move(pixel)); }
+      for (size_t i = 0; i < 16; ++i) { W::Node trail; trail.ID = 40000 + i; trail.Type = W::Shape::PixelPath; trail.Flags = W::Discontinuous;
+        trail.Pixels.resize(16384); trail.PixelColors.resize(16384, 1); loaded.Nodes.push_back(std::move(trail)); }
+      auto terrain = node; terrain.ID = 50000; terrain.Flags = W::Layer | W::ScreenSpace; loaded.Nodes.push_back(terrain);
+      auto cursor = node; cursor.ID = 50001; cursor.Flags = W::ScreenSpace; cursor.Control = W::Interaction::Pointer; loaded.Nodes.push_back(cursor);
+      W::BoundSnapshot(loaded);
+      Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, loaded);
+      Check(writer.Data.size() <= W::MaxPayload, "a valid heavy combat scene exceeds the packet limit and stops all guest state updates");
+      Reader reader(writer.Data); Check(ReadHeader(reader, h) && W::ReadSnapshot(reader, copy), "bounded heavy combat snapshot cannot be received");
+      Check(std::any_of(copy.Nodes.begin(), copy.Nodes.end(), [](const auto& n) { return n.ID == 50000; }) && std::any_of(copy.Nodes.begin(), copy.Nodes.end(), [](const auto& n) { return n.ID == 50001; }), "combat overload removes terrain or the user cursor");
+    }
     W::Timeline timeline; Check(timeline.Push(first, 1020), "initial state rejected");
     auto second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 10; second.CameraX = 10;
     Check(timeline.Push(second, 1080), "next state rejected"); Check(!timeline.Push(first, 1081), "reordered state accepted");
@@ -80,6 +125,38 @@ void Worlds() {
     for (int frame = 0; frame <= 3; ++frame) { const auto sample = timeline.Sample(1095 + frame * 16); if (sample.Nodes[0].X != previous) ++distinct; previous = sample.Nodes[0].X; }
     Check(distinct == 4, "60 Hz presentation repeats state instead of creating intermediate movement");
     Check(timeline.Sample(1500).Nodes[0].X == timeline.Sample(5000).Nodes[0].X, "lost connection extrapolated without a bound");
+    { W::Timeline hud; auto a = first, b = second; a.Nodes[0].Flags = b.Nodes[0].Flags = W::ScreenSpace;
+      hud.Push(a, 1020); hud.Push(b, 1080);
+      Check(hud.Sample(1120).Nodes[0].X == b.Nodes[0].X, "guest cursor waits behind the world interpolation buffer"); }
+    { auto view = first; view.ControlledActor = 11; view.AimX = 1; view.AimY = 0; view.LookX = 40; view.LookY = 0; view.Wrap = 3;
+      W::Node dot; dot.ID = 30; dot.Parent = 11; dot.Type = W::Shape::Pixel; dot.Flags = W::ScreenSpace; dot.Control = W::Interaction::Aim; dot.X = 30;
+      W::Node terrain = first.Nodes[0]; terrain.ID = 31; terrain.Flags = W::ScreenSpace | W::Layer; terrain.X3 = terrain.Y3 = 1;
+      view.Nodes = {dot, terrain}; auto local = view;
+      W::PredictLocalView(local, view, 0, 1, false);
+      Check(std::abs(local.Nodes[0].X) < 0.001f && std::abs(local.Nodes[0].Y - 30) < 0.001f, "local aim waits for another network state");
+      view.Nodes[0].Type = W::Shape::Sprite; local = view; W::PredictLocalView(local, view, 0, 1, false);
+      Check(std::abs(local.Nodes[0].Angle + 1.57079633f) < .001f, "predicted cursor sprite rotates against its native screen-space direction");
+      view.Nodes[0].Type = W::Shape::Pixel;
+      Check(std::abs(local.CameraX + 40) < 0.001f && std::abs(local.CameraY - 40) < 0.001f && std::abs(local.Nodes[1].X - 40) < 0.001f && std::abs(local.Nodes[1].Y + 40) < 0.001f, "predicted camera detached terrain from actors");
+      float previous = -999; unsigned distinct = 0;
+      for (int frame = 0; frame < 10; ++frame) { auto sample = view; W::PredictLocalView(sample, view, std::cos(frame * 0.05f), std::sin(frame * 0.05f), false); if (sample.Nodes[0].Y != previous) ++distinct; previous = sample.Nodes[0].Y; }
+      Check(distinct == 10, "mouse presentation cannot move between host updates");
+      local = view; local.Nodes[0].Control = W::Interaction::RadialCursor; W::PredictLocalView(local, view, 0, 1, true);
+      Check(std::abs(local.Nodes[0].Y - 30) < 0.001f && local.CameraX == view.CameraX && local.CameraY == view.CameraY, "radial cursor prediction moved the battlefield camera");
+      local = view; W::PredictLocalView(local, view, -1, 0, false); Check(std::hypot(local.CameraX - view.CameraX, local.CameraY - view.CameraY) <= 96.001f, "local camera prediction exceeded retained terrain margins");
+      view.MouseX = 0xfffffffe; view.MouseY = 20; view.Nodes[0].Control = W::Interaction::Pointer; view.Nodes[0].X = 100; view.Nodes[0].Y = 100;
+      local = view; W::PredictLocalPointer(local, view, 3, 22);
+      Check(local.Nodes[0].X == 105 && local.Nodes[0].Y == 102, "GUI cursor prediction lost cumulative mouse wrap or vertical movement");
+      view.ViewMode = 3; view.MouseScale = 1; view.CameraX = view.CameraTargetX = 60; view.CameraY = view.CameraTargetY = 20;
+      W::LocalCamera camera; Input mouse; mouse.MouseX = 20; mouse.MouseY = view.MouseY; view.MouseX = 0;
+      local = view; camera.Apply(local, view, mouse, 1000); const float predicted = local.CameraX;
+      Check(predicted > view.CameraX, "Q camera does not respond between host updates");
+      view.CameraTargetX += 20; view.MouseX = 20;
+      local = view; camera.Apply(local, view, mouse, 1016);
+      Check(local.CameraX >= predicted, "mouse acknowledgement pulls the guest camera backwards before native easing catches up");
+      auto noAimCamera = view; W::PredictLocalView(noAimCamera, view, 0, 1, false);
+      Check(noAimCamera.CameraX == view.CameraX && noAimCamera.CameraY == view.CameraY, "actor aim prediction fights Q camera movement");
+    }
     auto third = second; third.ID = 3; third.Time = 1100; third.Nodes.clear();
     Check(timeline.Push(third, 1120), "despawn state rejected"); Check(timeline.Sample(1170).Nodes.size() == 1 && timeline.Sample(1195).Nodes.empty(), "lifecycle changed before its presentation time");
     timeline.Reset(); first.Nodes[0].X = 995; first.Nodes[0].Angle = 3.1f; second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 5; second.Nodes[0].Angle = -3.1f;

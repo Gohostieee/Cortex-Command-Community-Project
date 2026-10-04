@@ -32,6 +32,7 @@ public:
 		int ActivityIndex = 0, SceneIndex = 0;
 		std::string Name, Room, Code, Address, Password, Service, DefaultService;
 		std::string Title, Subtitle, Error, Notice, StartBlock, Activity, SceneName, Description;
+		std::string LoadingMessage;
 		std::vector<std::string> Activities, Scenes, Factions, FactionLabels, Chat, LANRooms;
 		std::array<std::string, 4> Tech, TeamNames;
 		std::array<Slot, 4> Players;

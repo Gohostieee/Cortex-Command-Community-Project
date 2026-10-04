@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+$')][string]$Version,
-    [string]$RuntimeDirectory = ''
+    [string]$RuntimeDirectory = '',
+    [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe'
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -8,7 +9,7 @@ $endpointFile = Join-Path $taskRoot 'MultiplayerService.txt'
 if (!(Test-Path -LiteralPath $endpointFile)) { throw 'Configure the bundled MultiplayerService.txt before packaging.' }
 $endpoint = (Get-Content -LiteralPath $endpointFile -Raw).Trim()
 if ($endpoint -notmatch '^[A-Za-z0-9.-]+:[0-9]+$') { throw 'The bundled server address must be hostname:port or IPv4:port.' }
-$exe = Join-Path $taskRoot 'Cortex Command.exe'
+$exe = Join-Path $taskRoot $GameExecutable
 if (!(Test-Path -LiteralPath $exe)) { throw 'Build the Final x64 game before packaging.' }
 if (!$RuntimeDirectory) {
     $redist = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC'
@@ -24,9 +25,10 @@ New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $stage = Join-Path $releaseRoot ("$Version-" + [guid]::NewGuid().ToString('N'))
 $game = Join-Path $stage 'CortexCommand-Multiplayer'
 New-Item -ItemType Directory -Path $game -Force | Out-Null
-foreach ($path in @('Data','Licences','LICENSE','MultiplayerService.txt','Cortex Command.exe')) {
+foreach ($path in @('Data','Licences','LICENSE','MultiplayerService.txt')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot $path) -Destination $game -Recurse
 }
+Copy-Item -LiteralPath $exe -Destination (Join-Path $game 'Cortex Command.exe')
 Copy-Item -LiteralPath (Join-Path $taskRoot 'external/lib/win/fmod.dll') -Destination $game
 Get-ChildItem -LiteralPath $RuntimeDirectory -Filter '*.dll' | Copy-Item -Destination $game
 $commit = & git -C $taskRoot rev-parse HEAD

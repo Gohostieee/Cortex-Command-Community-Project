@@ -16,6 +16,7 @@
 #include "SettingsMan.h"
 #include "PostProcessMan.h"
 #include "PieMenu.h"
+#include "MultiplayerWorld.h"
 
 #include "GUI.h"
 #include "AllegroBitmap.h"
@@ -2762,7 +2763,9 @@ void AHuman::DrawHUD(BITMAP* pTargetBitmap, const Vector& targetPos, int whichSc
 		if (m_ArmsState == THROWING_PREP) {
 			DrawThrowingReticle(pTargetBitmap, targetPos, GetThrowProgress());
 		} else if (m_Controller.IsState(AIM_SHARP) || (m_Controller.IsPlayerControlled() && !m_Controller.IsState(PIE_MENU_ACTIVE))) {
+			MultiplayerWorld::BeginAim(*this, whichScreen);
 			m_pFGArm->GetHeldDevice()->DrawHUD(pTargetBitmap, targetPos, whichScreen, m_Controller.IsState(AIM_SHARP) && m_Controller.IsPlayerControlled());
+			MultiplayerWorld::EndInteraction();
 		}
 	}
 

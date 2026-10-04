@@ -2,6 +2,8 @@
 
 #include "FrameMan.h"
 #include "UInputMan.h"
+#include "MultiplayerWorld.h"
+#include "Draw.h"
 #include "PresetMan.h"
 #include "SettingsMan.h"
 #include "LuaMan.h"
@@ -650,14 +652,16 @@ void PieMenu::Draw(BITMAP* targetBitmap, const Vector& targetPos) const {
 
 	rlZDepth(c_GuiDepth);
 	if (m_EnabledState != EnabledState::Disabled) {
+		MultiplayerWorld::BeginRadialBackground();
 		if (m_DrawBackgroundTransparent) {
 			g_FrameMan.SetTransTableFromPreset(TransparencyPreset::MoreTrans);
 			g_GLResourceMan.UpdateDynamicBitmap(m_BGBitmap, true);
-			DrawTexture(g_GLResourceMan.GetStaticTextureFromBitmap(m_BGBitmap), drawPos.GetFloorIntX() - m_BGBitmap->w / 2, drawPos.GetFloorIntY() - m_BGBitmap->h / 2, {255, 255, 255, g_FrameMan.GetCurrentAlpha()});
+			DrawTexture(m_BGBitmap, drawPos.GetFloorIntX() - m_BGBitmap->w / 2, drawPos.GetFloorIntY() - m_BGBitmap->h / 2, {255, 255, 255, g_FrameMan.GetCurrentAlpha()});
 		} else {
 			g_GLResourceMan.UpdateDynamicBitmap(m_BGBitmap, true);
-			DrawTexture(g_GLResourceMan.GetStaticTextureFromBitmap(m_BGBitmap), drawPos.GetFloorIntX() - m_BGBitmap->w / 2, drawPos.GetFloorIntY() - m_BGBitmap->h / 2, {255, 255, 255, 255});
+			DrawTexture(m_BGBitmap, drawPos.GetFloorIntX() - m_BGBitmap->w / 2, drawPos.GetFloorIntY() - m_BGBitmap->h / 2, {255, 255, 255, 255});
 		}
+		MultiplayerWorld::EndInteraction();
 	}
 	rlZDepth(c_DefaultDrawDepth);
 
@@ -1006,7 +1010,9 @@ void PieMenu::DrawPieIcons(BITMAP* targetBitmap, const Vector& drawPos) const {
 void PieMenu::DrawPieCursorAndPieSliceDescriptions(BITMAP* targetBitmap, const Vector& drawPos) const {
 	int nonLineSeparatorCorrection = m_IconSeparatorMode != IconSeparatorMode::Line ? -(m_BackgroundSeparatorSize) : 0;
 	Vector cursorPos = Vector(static_cast<float>(m_CurrentInnerRadius + nonLineSeparatorCorrection), 0.0F).RadRotate(m_CursorAngle);
+	MultiplayerWorld::BeginRadialCursor();
 	pivot_sprite(targetBitmap, s_CursorBitmap, drawPos.GetFloorIntX() + cursorPos.GetFloorIntX(), drawPos.GetFloorIntY() + cursorPos.GetFloorIntY(), s_CursorBitmap->w / 2, s_CursorBitmap->h / 2, ftofix((m_CursorAngle / c_PI) * -128.0F));
+	MultiplayerWorld::EndInteraction();
 
 	if (m_HoveredPieSlice) {
 		float textRotation = NormalizeAngleBetween0And2PI(m_HoveredPieSlice->GetMidAngle() + GetRotAngle());

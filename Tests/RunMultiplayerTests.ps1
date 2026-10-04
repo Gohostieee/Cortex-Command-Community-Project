@@ -1,5 +1,6 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
+if ($NativeBaseline -and !$Encounter) { throw 'Use -Encounter with -NativeBaseline.' }
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 if ($GuestResolutions.Count -gt 1 -and $GuestResolutions.Count -ne $Guests) { throw 'GuestResolutions must specify one size for all guests or one size per guest.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -28,7 +29,13 @@ try {
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
         $previousDeployment = $env:CCCP_MPSMOKE_DEPLOYMENT
         $previousLoss = $env:CCCP_MPSMOKE_WORLD_LOSS
+        $previousCombat = $env:CCCP_MPSMOKE_COMBAT
+        $previousEncounter = $env:CCCP_MPSMOKE_ENCOUNTER
+        $previousBaseline = $env:CCCP_MPSMOKE_BASELINE
         $previousService = $env:CCCP_MP_SERVICE
+        $env:CCCP_MPSMOKE_COMBAT = if ($CombatStress) { '1' } else { $null }
+        $env:CCCP_MPSMOKE_ENCOUNTER = if ($Encounter) { '1' } else { $null }
+        $env:CCCP_MPSMOKE_BASELINE = if ($NativeBaseline) { '1' } else { $null }
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
         $env:CCCP_MPSMOKE_DEPLOYMENT = if ($Deployment) { '1' } else { $null }
         $env:CCCP_MPSMOKE_WORLD_LOSS = if ($Loss) { '1' } else { $null }
@@ -65,15 +72,18 @@ $disabledMods
                 $env:CCCP_SETTINGSPATH = $settings
                 $env:CCCP_MPSMOKE_ROLE = $role
                 if ($Relay -and $role -ne 'host') {
-                    $codeDeadline = [DateTime]::UtcNow.AddSeconds(60)
-                    while (!(Test-Path -LiteralPath $codeFile) -and [DateTime]::UtcNow -lt $codeDeadline) { Start-Sleep -Milliseconds 200 }
+                    $codeDeadline = [DateTime]::UtcNow.AddSeconds(120)
+                    while (!(Test-Path -LiteralPath $codeFile) -and [DateTime]::UtcNow -lt $codeDeadline) {
+                        if ($instances[0].HasExited) { throw "Host exited during startup with $($instances[0].ExitCode)." }
+                        Start-Sleep -Milliseconds 200
+                    }
                     if (!(Test-Path -LiteralPath $codeFile)) { throw 'Host did not receive a room code.' }
                     $roomCode = (Get-Content -LiteralPath $codeFile -Raw).Trim()
                 }
                 $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
                 $instances += Start-Process -FilePath (Join-Path $gameRoot $GameExecutable) -ArgumentList $argument -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
             }
-            $deadline = [DateTime]::UtcNow.AddSeconds(150)
+            $deadline = [DateTime]::UtcNow.AddSeconds(300)
             while (@($instances | Where-Object { !$_.HasExited }).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Seconds 1 }
             foreach ($instance in $instances) { if (!$instance.HasExited) { throw 'Native multiplayer verification timed out.' }; if ($instance.ExitCode) { throw "Game instance exited with $($instance.ExitCode)." } }
             foreach ($role in $roles) {
@@ -89,6 +99,9 @@ $disabledMods
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
             $env:CCCP_MPSMOKE_DEPLOYMENT = $previousDeployment
             $env:CCCP_MPSMOKE_WORLD_LOSS = $previousLoss
+            $env:CCCP_MPSMOKE_COMBAT = $previousCombat
+            $env:CCCP_MPSMOKE_ENCOUNTER = $previousEncounter
+            $env:CCCP_MPSMOKE_BASELINE = $previousBaseline
             $env:CCCP_MP_SERVICE = $previousService
         }
     }

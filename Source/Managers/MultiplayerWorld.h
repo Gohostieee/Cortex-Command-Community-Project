@@ -3,12 +3,15 @@
 #include "Vector.h"
 #include "raylib/raylib.h"
 #include <memory>
+#include <iosfwd>
 
 struct BITMAP;
 namespace RTE {
 class MovableObject;
 class SceneLayer;
 class GraphicalPrimitive;
+class Actor;
+class Scene;
 
 // Passive native presentation replicas. Gameplay objects and scripts stay on
 // the host; guests own retained resources and render state, not actor clones.
@@ -27,14 +30,26 @@ public:
     bool Install(MP::World::Resource resource);
     bool Install(MP::World::Snapshot snapshot, uint64_t time);
     std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
+    std::vector<uint64_t> PrepareScene();
+    void PrimeSceneBackdrops(const Scene& scene);
+    void PinScene(const std::unordered_set<uint64_t>& assets);
     unsigned Render(uint64_t time);
     bool Ready() const;
+    bool Paused() const;
     bool IsDeploying() const;
     int Width() const;
     int Height() const;
     uint64_t Rendered() const;
     uint64_t Updates() const;
     uint64_t IntermediateFrames() const;
+    bool VerifyPresentation(std::ostream& log);
+    void SetLocalInput(const MP::Input& input, bool enabled);
+    static void BeginAim(const Actor& actor, int screen);
+    static void BeginRadialCursor();
+    static void BeginRadialBackground();
+    static void BeginPointer();
+    static void BeginWorldCursor();
+    static void EndInteraction();
     static void Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& position, const Vector& pivot, float angle, float scale, bool flip, bool white = false, uint8_t alpha = 255);
     static void Pixel(const MovableObject& owner, const Vector& position, uint8_t color);
     static void Trail(std::span<const std::pair<int, int>> positions, uint8_t color);
@@ -43,6 +58,8 @@ public:
     static void EndHUD();
     // Native GPU/GUI adapters use the same semantic sprite representation.
     static bool CanvasSprite(BITMAP* bitmap, Rectangle source, Rectangle dest, Vector2 pivot, float angle, RLColor tint, BITMAP* target = nullptr);
+    static size_t CanvasCheckpoint(BITMAP* target);
+    static bool CanvasOverlay(BITMAP* bitmap, BITMAP* target, size_t before = SIZE_MAX);
     static bool Primitive(const GraphicalPrimitive& primitive, const Vector& offset);
     static void EndPrimitive();
 private:
