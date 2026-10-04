@@ -154,12 +154,14 @@ struct MultiplayerMan::Impl {
 	bool Smoke = false, SmokeCapture = false;
 	bool SmokeWorldLoss = false;
 	bool SmokeCombatStress = false;
+	bool SmokeExplosionBurst = false;
 	bool SmokeEncounter = false;
 	bool SmokeNativeBaseline = false;
 	uint64_t SmokeEncounterStart = 0, SmokeEncounterLastUpdate = 0, SmokeEncounterGap = 0;
 	uint64_t SmokeEncounterUpdates = 0;
 	size_t SmokeEncounterPeakNodes = 0, SmokeEncounterPeakTrails = 0, SmokeEncounterPeakBytes = 0;
 	size_t SmokeEncounterPeakPacked = 0;
+	size_t SmokeEncounterPeakPixels = 0, SmokeEncounterPeakSprites = 0;
 	uint64_t SmokeEncounterWireBytes = 0, SmokeEncounterWireUpdates = 0;
 	uint64_t SmokeCaptureStarted = 0;
 	std::vector<uint64_t> SmokeCaptureTimes;
@@ -343,7 +345,7 @@ struct MultiplayerMan::Impl {
 	void SendAudio(int player);
 	void Tick();
 	void SampleInput();
-	bool QueueWorld(Player& player, Kind kind, std::span<const uint8_t> payload, Delivery delivery, uint64_t resource = 0);
+	bool QueueWorld(Player& player, Kind kind, std::span<const uint8_t> payload, Delivery delivery, uint64_t resource = 0, std::span<const uint8_t> prepared = {});
 	bool QueueResource(Player& player, uint64_t id);
 	void ReceiveWorld(Kind kind, MP::Reader& reader);
 	void PresentWorld(MP::World::Snapshot snapshot);
@@ -367,6 +369,7 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	auto& impl = *m_Impl; impl.UI = true; impl.Smoke = smokeTest;
 	impl.SmokeWorldLoss = smokeTest && std::getenv("CCCP_MPSMOKE_WORLD_LOSS") && std::string(std::getenv("CCCP_MPSMOKE_WORLD_LOSS")) == "1";
 	impl.SmokeCombatStress = smokeTest && std::getenv("CCCP_MPSMOKE_COMBAT");
+	impl.SmokeExplosionBurst = smokeTest && std::getenv("CCCP_MPSMOKE_BURST");
 	impl.SmokeEncounter = smokeTest && std::getenv("CCCP_MPSMOKE_ENCOUNTER");
 	impl.SmokeNativeBaseline = impl.SmokeEncounter && std::getenv("CCCP_MPSMOKE_BASELINE");
 	impl.Online = std::getenv("CCCP_MP_SERVICE") != nullptr;
@@ -467,6 +470,17 @@ void MultiplayerMan::EndGuestView(int player) {
 	snapshot.Paused = snapshot.Paused || impl.WarmingGuests;
 	const uint64_t composed = impl.SmokeEncounter ? NowMicros() : 0;
 	snapshot.MouseX = peer.Inputs.LastInput().MouseX; snapshot.MouseY = peer.Inputs.LastInput().MouseY;
+	MP::Writer writer(Kind::WorldSnapshot);
+	std::vector<uint8_t> packedSnapshot;
+	const size_t poseBudget = std::max<size_t>(8192, size_t(impl.BandwidthMbps * 125000.0 * MP::World::SnapshotIntervalMS / 1000.0 * 0.65));
+	MP::World::FitSnapshot(snapshot, poseBudget, [&](const MP::World::Snapshot& state) {
+		writer = MP::Writer(Kind::WorldSnapshot); MP::World::WriteSnapshot(writer, state);
+		MP::Writer packed(Kind::WorldSnapshot); packed.U32(uint32_t(writer.Data.size())); const size_t prefix = packed.Data.size();
+		packed.Data.resize(prefix + LZ4_compressBound(int(writer.Data.size())));
+		const int size = LZ4_compress_default(reinterpret_cast<const char*>(writer.Data.data()), reinterpret_cast<char*>(packed.Data.data() + prefix), int(writer.Data.size()), int(packed.Data.size() - prefix));
+		if (size <= 0) return std::numeric_limits<size_t>::max();
+		packed.Data.resize(prefix + size); packedSnapshot = std::move(packed.Data); return packedSnapshot.size();
+	});
 	if (!peer.SceneSent) {
 		if (impl.SceneManifest.empty()) impl.SceneManifest = impl.World.PrepareScene();
 		const auto map = impl.World.PrepareSceneMap(snapshot.Width, snapshot.Height);
@@ -511,10 +525,13 @@ void MultiplayerMan::EndGuestView(int player) {
 			if (impl.QueueWorld(peer, Kind::WorldResource, writer.Data, Delivery::WorldResource, node.Asset)) peer.PendingResources[node.Asset] = Now();
 		}
 	}
-	MP::Writer writer(Kind::WorldSnapshot); MP::World::WriteSnapshot(writer, snapshot);
 	const uint64_t serialized = impl.SmokeEncounter ? NowMicros() : 0;
 	if (impl.SmokeEncounter) { impl.SmokeEncounterPeakNodes = std::max(impl.SmokeEncounterPeakNodes, snapshot.Nodes.size()); impl.SmokeEncounterPeakTrails = std::max(impl.SmokeEncounterPeakTrails, size_t(std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [](const auto& node) { return node.StartTime != 0; }))); impl.SmokeEncounterPeakBytes = std::max(impl.SmokeEncounterPeakBytes, writer.Data.size()); }
-	impl.QueueWorld(peer, Kind::WorldSnapshot, writer.Data, Delivery::State);
+	if (impl.SmokeEncounter) {
+		impl.SmokeEncounterPeakPixels = std::max(impl.SmokeEncounterPeakPixels, size_t(std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [](const auto& node) { return node.Type == MP::World::Shape::Pixel; })));
+		impl.SmokeEncounterPeakSprites = std::max(impl.SmokeEncounterPeakSprites, size_t(std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [](const auto& node) { return node.Type == MP::World::Shape::Sprite; })));
+	}
+	impl.QueueWorld(peer, Kind::WorldSnapshot, writer.Data, Delivery::State, 0, packedSnapshot);
 	if (impl.SmokeEncounter && impl.SmokeStage == 3) {
 		const uint64_t queued = NowMicros(); impl.SmokeCaptureTimes.push_back(queued - impl.SmokeCaptureStarted);
 		impl.SmokeCaptureParts[0] += captured - impl.SmokeCaptureStarted; impl.SmokeCaptureParts[1] += composed - captured;
@@ -530,12 +547,15 @@ bool MultiplayerMan::Impl::QueueResource(Player& player, uint64_t id) {
 	if (!QueueWorld(player, Kind::WorldResource, writer.Data, Delivery::WorldResource, id)) return false;
 	player.PendingResources[id] = Now(); return true;
 }
-bool MultiplayerMan::Impl::QueueWorld(Player& player, Kind kind, std::span<const uint8_t> payload, Delivery delivery, uint64_t resource) {
+bool MultiplayerMan::Impl::QueueWorld(Player& player, Kind kind, std::span<const uint8_t> payload, Delivery delivery, uint64_t resource, std::span<const uint8_t> prepared) {
 	if (payload.empty() || payload.size() > MP::World::MaxPayload) return false;
-	MP::Writer packed(kind); packed.U32(uint32_t(payload.size())); const size_t prefix = packed.Data.size();
-	packed.Data.resize(prefix + LZ4_compressBound(int(payload.size())));
-	const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(payload.data()), reinterpret_cast<char*>(packed.Data.data() + prefix), int(payload.size()), int(packed.Data.size() - prefix));
-	if (compressed <= 0) return false; packed.Data.resize(prefix + compressed);
+	MP::Writer packed(kind);
+	if (!prepared.empty()) packed.Data.assign(prepared.begin(), prepared.end());
+	else {
+		packed.U32(uint32_t(payload.size())); const size_t prefix = packed.Data.size(); packed.Data.resize(prefix + LZ4_compressBound(int(payload.size())));
+		const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(payload.data()), reinterpret_cast<char*>(packed.Data.data() + prefix), int(payload.size()), int(packed.Data.size() - prefix));
+		if (compressed <= 0) return false; packed.Data.resize(prefix + compressed);
+	}
 	if (SmokeEncounter && kind == Kind::WorldSnapshot) { SmokeEncounterPeakPacked = std::max(SmokeEncounterPeakPacked, packed.Data.size()); SmokeEncounterWireBytes += packed.Data.size(); ++SmokeEncounterWireUpdates; }
 	uint32_t id = ++player.WorldMessage; if (!id) id = ++player.WorldMessage;
 	// Unsent poses are replaceable. Retained resources remain reliable and are
@@ -1056,13 +1076,21 @@ void MultiplayerMan::Impl::EncounterTick() {
 			game->SetObservationTarget(g_SceneMan.MovePointToGround(Vector(1570, 0), 40, 1), player); game->SetViewState(Activity::Observe, player);
 		}
 		SmokeStage = 3; SmokeEncounterStart = now; SmokeCapture = true;
+		if (SmokeExplosionBurst) { BandwidthMbps = std::getenv("CCCP_MPSMOKE_BURST_UPLOAD") ? std::clamp(std::atoi(std::getenv("CCCP_MPSMOKE_BURST_UPLOAD")), 1, 24) : 4; Verify("BURST: combat upload Mbps=" + std::to_string(BandwidthMbps)); }
 		if (SmokeNativeBaseline) { World.Reset(); Verify("BASELINE: native AI battle with guest capture disabled"); }
 	}
 	if (SmokeStage == 3) {
-		if (SmokeCombatStress && now - SmokeEncounterStart > 7000 && now - SmokeEncounterStart < 18000 && now - SmokeLastExplosion > 250) {
+		if (SmokeCombatStress && now - SmokeEncounterStart > 7000 && now - SmokeEncounterStart < 18000 && now - SmokeLastExplosion > (SmokeExplosionBurst ? 3000 : 250)) {
 			SmokeLastExplosion = now;
 			const auto* preset = g_PresetMan.GetEntityPreset("TDExplosive", "Frag Grenade", "Base.rte");
-			auto* grenade = dynamic_cast<MOSRotating*>(preset->Clone()); grenade->SetPos(g_SceneMan.MovePointToGround(Vector(1570, 0), 100, 1)); grenade->GibThis(); delete grenade; ++SmokeExplosions;
+			for (int item = 0; item < (SmokeExplosionBurst ? 12 : 1); ++item) {
+				auto* grenade = dynamic_cast<MOSRotating*>(preset->Clone()); grenade->SetPos(g_SceneMan.MovePointToGround(Vector(1570 + item * 8, 0), 100, 1)); grenade->GibThis(); delete grenade; ++SmokeExplosions;
+			}
+			if (SmokeExplosionBurst) {
+				const auto* craft = g_PresetMan.GetEntityPreset("ACDropShip", "Dropship MK1", "Base.rte");
+				for (int item = 0; item < 2; ++item) { auto* wreck = dynamic_cast<MOSRotating*>(craft->Clone()); wreck->SetPos(g_SceneMan.MovePointToGround(Vector(1540 + item * 120, 0), 180, 1)); wreck->GibThis(); delete wreck; ++SmokeExplosions; }
+				Verify("BURST: destroyed twelve grenades and two dropships");
+			}
 		}
 		for (int player = 0; player <= SmokeGuests; ++player) for (auto* actor : *g_MovableMan.GetTeamRoster(game->GetTeamOfPlayer(player))) if (actor->GetPresetName() == "Soldier Light") {
 			SmokeEncounterSoldiers.insert(actor->GetUniqueID());
@@ -1074,6 +1102,7 @@ void MultiplayerMan::Impl::EncounterTick() {
 			Verify(std::string(passed ? "PASS: " : "FAIL: ") + "delivered soldiers=" + std::to_string(SmokeEncounterSoldiers.size()) + " firing=" + std::to_string(SmokeEncounterFired.size()) + " damaged=" + std::to_string(SmokeEncounterDamaged.size()));
 			Verify("ENCOUNTER: peak nodes=" + std::to_string(SmokeEncounterPeakNodes) + " trails=" + std::to_string(SmokeEncounterPeakTrails) + " wire bytes=" + std::to_string(SmokeEncounterPeakBytes) + " explosions=" + std::to_string(SmokeExplosions));
 			Verify("ENCOUNTER: peak compressed bytes=" + std::to_string(SmokeEncounterPeakPacked) + " mean compressed bytes=" + std::to_string(SmokeEncounterWireUpdates ? SmokeEncounterWireBytes / SmokeEncounterWireUpdates : 0));
+			Verify("ENCOUNTER: peak particle pixels=" + std::to_string(SmokeEncounterPeakPixels) + " sprites=" + std::to_string(SmokeEncounterPeakSprites));
 			if (!SmokeCaptureTimes.empty()) {
 				std::sort(SmokeCaptureTimes.begin(), SmokeCaptureTimes.end()); uint64_t total = 0; for (auto elapsed : SmokeCaptureTimes) total += elapsed;
 				Verify("ENCOUNTER: capture mean ms=" + std::to_string(total / (1000.0 * SmokeCaptureTimes.size())) + " p95 ms=" + std::to_string(SmokeCaptureTimes[SmokeCaptureTimes.size() * 95 / 100] / 1000.0));

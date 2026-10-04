@@ -2,6 +2,7 @@
 #include "MultiplayerTransport.h"
 #include "MultiplayerWorldProtocol.h"
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -142,6 +143,18 @@ void Worlds() {
       Check(std::any_of(copy.Nodes.begin(), copy.Nodes.end(), [](const auto& n) { return n.ID == 50000; }) && std::any_of(copy.Nodes.begin(), copy.Nodes.end(), [](const auto& n) { return n.ID == 50001; }), "combat overload removes terrain or the user cursor");
     }
     W::Timeline timeline; Check(timeline.Push(first, 1020), "initial state rejected");
+    { auto burst = first; burst.Nodes.clear();
+      for (uint64_t id = 100; id < 5100; ++id) { W::Node particle; particle.ID = id; particle.Type = W::Shape::Pixel; particle.X = float(id % 640); particle.Y = float(id % 360); particle.Color = 7; burst.Nodes.push_back(particle); }
+      auto actor = node; actor.ID = 6000; burst.Nodes.push_back(actor); burst.CriticalNodes.insert(actor.ID);
+      auto terrain = node; terrain.ID = 6001; terrain.Flags = W::Layer; burst.Nodes.push_back(terrain);
+      auto hud = node; hud.ID = 6002; hud.Flags = W::ScreenSpace; burst.Nodes.push_back(hud);
+      W::Node trail; trail.ID = 6003; trail.Type = W::Shape::PixelPath; trail.Pixels = {{0, 0}, {10, -3}}; trail.PixelColors = {4, 8}; burst.Nodes.push_back(trail);
+      auto measure = [](const W::Snapshot& snapshot) { Writer packet(Kind::WorldSnapshot); W::WriteSnapshot(packet, snapshot); return packet.Data.size(); };
+      W::FitSnapshot(burst, 30000, measure);
+      Check(measure(burst) <= 30000, "explosion particles consume more than one movement update's upload budget and freeze the guest");
+      for (uint64_t id : {6000ull, 6001ull, 6002ull, 6003ull}) Check(std::any_of(burst.Nodes.begin(), burst.Nodes.end(), [id](const auto& n) { return n.ID == id; }), "explosion bandwidth control removes an actor, terrain, HUD or bullet trail");
+      Check(std::is_sorted(burst.Nodes.begin(), burst.Nodes.end(), [](const auto& a, const auto& b) { return a.ID < b.ID; }), "explosion bandwidth control changes native painter order");
+    }
     auto second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 10; second.CameraX = 10;
     Check(timeline.Push(second, 1080), "next state rejected"); Check(!timeline.Push(first, 1081), "reordered state accepted");
     auto middle = timeline.Sample(1120); Check(std::abs(middle.Nodes[0].X - 5) < 0.001f && std::abs(middle.CameraX - 5) < 0.001f, "guest did not interpolate camera and entity between 20 Hz updates");
@@ -247,7 +260,10 @@ void Worlds() {
 }
 void TransportLoopback() {
 	Transport host, client, wrong, discovery; std::string error;
-	constexpr uint16_t port = 38997;
+	const char* requestedPort = std::getenv("CCCP_MPTEST_PORT");
+	const int testPort = requestedPort ? std::atoi(requestedPort) : 38997;
+	Check(testPort >= 1024 && testPort <= 65535, "invalid test UDP port");
+	const uint16_t port = uint16_t(testPort);
 	Check(host.Start(true, port, "room-secret", error), error.c_str());
 	Writer announcement(Kind::Announcement); announcement.Text("Test room", 63); announcement.U8(1); announcement.U8(0); host.Advertise(announcement.Data);
 	Check(wrong.Start(false, 0, "", error) && wrong.Connect("127.0.0.1", port, "wrong", error), "wrong password connection setup failed");
@@ -260,7 +276,7 @@ void TransportLoopback() {
 		for (const auto& event: host.Poll()) { if (event.Kind == TransportEvent::Type::Connected) { hostConnected = true; clientAddress = event.Address; } else if (event.Kind == TransportEvent::Type::Data) { Check(event.Data == message.Data, "transport altered data"); host.Send(event.Address, event.Data, Delivery::Control); } }
 		for (const auto& event: client.Poll()) { if (event.Kind == TransportEvent::Type::Connected) { clientConnected = true; hostAddress = event.Address; client.Send(hostAddress, message.Data, Delivery::Control); } else if (event.Kind == TransportEvent::Type::Data) echoed = event.Data == message.Data; }
 		for (const auto& event: wrong.Poll()) if (event.Kind == TransportEvent::Type::Failed) rejected = event.Error == "Incorrect room password.";
-		for (const auto& event: discovery.Poll()) if (event.Kind == TransportEvent::Type::Discovered) discovered = event.Data == announcement.Data && event.Address == "127.0.0.1:38997";
+		for (const auto& event: discovery.Poll()) if (event.Kind == TransportEvent::Type::Discovered) discovered = event.Data == announcement.Data && event.Address == "127.0.0.1:" + std::to_string(port);
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	Check(hostConnected && clientConnected && echoed && rejected && discovered, "loopback, password rejection or LAN discovery failed");

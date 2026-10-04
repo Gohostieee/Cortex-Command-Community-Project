@@ -53,7 +53,41 @@ struct Snapshot {
     uint8_t ViewMode = 0;
     float CameraTargetX = 0, CameraTargetY = 0, MouseScale = 0, ScrollSpeed = 0.1f;
     std::vector<Node> Nodes;
+    // Capture-only importance; receivers need only the selected drawing nodes.
+    std::unordered_set<uint64_t> CriticalNodes;
 };
+template <typename Measure>
+inline size_t FitSnapshot(Snapshot& snapshot, size_t packedBudget, Measure measure) {
+    size_t packedSize = measure(snapshot);
+    if (packedSize <= packedBudget) return packedSize;
+    auto essential = [&](const Node& n) { return (n.Flags & (ScreenSpace | Layer)) || snapshot.CriticalNodes.contains(n.ID); };
+    const size_t optional = std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [&](const Node& n) { return !essential(n); });
+    if (!optional) return packedSize;
+    auto original = std::move(snapshot.Nodes);
+    snapshot.Nodes.clear();
+    for (const auto& node : original) if (essential(node)) snapshot.Nodes.push_back(node);
+    const size_t criticalSize = measure(snapshot);
+    if (criticalSize >= packedBudget) return criticalSize;
+    std::array<size_t, 2> counts{};
+    auto rank = [](const Node& node) { return node.Type == Shape::PixelPath ? 0 : 1; };
+    for (const auto& node : original) if (!essential(node)) ++counts[rank(node)];
+    size_t limit = optional;
+    // Fit the actual compressed representation, retaining native painter order.
+    // Critical state remains complete even when it alone exceeds the budget.
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        const size_t next = size_t(double(limit) * double(packedBudget - criticalSize) / double(packedSize - criticalSize) * 0.85);
+        limit = attempt == 5 ? 0 : std::min(limit - 1, next);
+        snapshot.Nodes.clear(); std::array<size_t, 2> seen{};
+        const std::array<size_t, 2> keepCount{std::min(limit, counts[0]), limit > counts[0] ? limit - counts[0] : 0};
+        for (const auto& node : original) {
+            if (essential(node)) snapshot.Nodes.push_back(node);
+            else { const auto group = rank(node); const bool keep = (seen[group] + 1) * keepCount[group] / counts[group] != seen[group] * keepCount[group] / counts[group]; ++seen[group]; if (keep) snapshot.Nodes.push_back(node); }
+        }
+        packedSize = measure(snapshot);
+        if (packedSize <= packedBudget || !limit) break;
+    }
+    return packedSize;
+}
 inline size_t NodeBytes(const Node& node) { return 117 + (node.Type == Shape::PixelPath ? 2 + 5 * node.Pixels.size() : 0); }
 // Under an extreme particle load, preserve the scene and controls instead of
 // rejecting every oversized update. Selection retains native painter order.
@@ -62,9 +96,9 @@ inline void BoundSnapshot(Snapshot& snapshot) {
     for (const auto& node : snapshot.Nodes) bytes += NodeBytes(node);
     if (snapshot.Nodes.size() <= MaxNodes && bytes <= MaxPayload) return;
     std::vector<bool> keep(snapshot.Nodes.size()); size_t count = 0; bytes = 256;
-    auto priority = [](const Node& node) {
+    auto priority = [&](const Node& node) {
         if ((node.Flags & Layer) && ((node.ID >> 48) & 0x3fff) == 102) return 0;
-        if (node.Flags & (ScreenSpace | Layer)) return 1;
+        if ((node.Flags & (ScreenSpace | Layer)) || snapshot.CriticalNodes.contains(node.ID)) return 1;
         if (node.Type == Shape::Sprite && !(node.Flags & Discontinuous)) return 2;
         return node.Type == Shape::PixelPath || (node.Flags & Discontinuous) ? 4 : 3;
     };

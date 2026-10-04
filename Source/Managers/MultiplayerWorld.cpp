@@ -62,6 +62,7 @@ struct MultiplayerWorld::Impl {
     RetainedLayers SceneLayers;
     bool LocalInputEnabled = false;
     std::unordered_map<uint64_t, Vector> ObjectAnchors;
+    std::unordered_set<uint64_t> CriticalNodes;
     bool PrimitiveStyle = false;
     Node CurrentStyle;
     std::unordered_map<uint64_t, uint8_t> Ordinals;
@@ -169,6 +170,8 @@ struct MultiplayerWorld::Impl {
     void AppendObject(const MovableObject& owner, Node node) {
         const uint64_t id = uint64_t(owner.GetUniqueID());
         node.ID = (id << 8) | Ordinals[id]++;
+        const auto* root = owner.GetRootParent();
+        if (root->IsActor() || root->IsDevice()) CriticalNodes.insert(node.ID);
         if (!(node.ID & 255)) ObjectAnchors[node.ID] = Vector(node.X, node.Y);
         if (const auto* parent = owner.GetParent()) node.Parent = uint64_t(parent->GetUniqueID()) << 8;
         if (Objects.size() < MaxNodes && Valid(node)) Objects.push_back(node);
@@ -313,7 +316,7 @@ void MultiplayerWorld::ResetPresentation() {
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
 }
-void MultiplayerWorld::BeginObjects() { m_Impl->Objects.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); objectCollector = this; }
+void MultiplayerWorld::BeginObjects() { m_Impl->Objects.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); m_Impl->CriticalNodes.clear(); objectCollector = this; }
 void MultiplayerWorld::BeginTrails() {
     auto& impl = *m_Impl; const uint64_t now = WorldNow(); std::lock_guard lock(impl.TrailMutex);
     if (!++impl.TrailGeneration) { impl.CurrentTrailPixels.reset(); impl.CurrentTrailBuckets.reset(); ++impl.TrailGeneration; }
@@ -453,6 +456,7 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         n.Width = n.SourceWidth = float(effect.m_Bitmap->w); n.Height = n.SourceHeight = float(effect.m_Bitmap->h); n.PivotX = n.Width / 2; n.PivotY = n.Height / 2;
         n.Flags = Additive | Discontinuous; n.TintR = n.TintG = n.TintB = uint8_t(std::clamp(effect.m_Strength, 0, 255)); if (Valid(n)) snapshot.Nodes.push_back(n);
     }
+    snapshot.CriticalNodes = impl.CriticalNodes;
     BoundSnapshot(snapshot);
     return snapshot;
 }

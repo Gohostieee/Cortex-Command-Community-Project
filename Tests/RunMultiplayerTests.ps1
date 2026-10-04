@@ -1,5 +1,6 @@
-param([switch]$Smoke, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
+if ($ExplosionBurst) { $Smoke = $Encounter = $CombatStress = $true }
 if ($NativeBaseline -and !$Encounter) { throw 'Use -Encounter with -NativeBaseline.' }
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 if ($GuestResolutions.Count -gt 1 -and $GuestResolutions.Count -ne $Guests) { throw 'GuestResolutions must specify one size for all guests or one size per guest.' }
@@ -29,10 +30,12 @@ try {
         $previousSmokeGuests = $env:CCCP_MPSMOKE_GUESTS
         $previousDeployment = $env:CCCP_MPSMOKE_DEPLOYMENT
         $previousLoss = $env:CCCP_MPSMOKE_WORLD_LOSS
+        $previousBurst = $env:CCCP_MPSMOKE_BURST
         $previousCombat = $env:CCCP_MPSMOKE_COMBAT
         $previousEncounter = $env:CCCP_MPSMOKE_ENCOUNTER
         $previousBaseline = $env:CCCP_MPSMOKE_BASELINE
         $previousService = $env:CCCP_MP_SERVICE
+        $env:CCCP_MPSMOKE_BURST = if ($ExplosionBurst) { '1' } else { $null }
         $env:CCCP_MPSMOKE_COMBAT = if ($CombatStress) { '1' } else { $null }
         $env:CCCP_MPSMOKE_ENCOUNTER = if ($Encounter) { '1' } else { $null }
         $env:CCCP_MPSMOKE_BASELINE = if ($NativeBaseline) { '1' } else { $null }
@@ -99,6 +102,7 @@ $disabledMods
             $env:CCCP_MPSMOKE_GUESTS = $previousSmokeGuests
             $env:CCCP_MPSMOKE_DEPLOYMENT = $previousDeployment
             $env:CCCP_MPSMOKE_WORLD_LOSS = $previousLoss
+            $env:CCCP_MPSMOKE_BURST = $previousBurst
             $env:CCCP_MPSMOKE_COMBAT = $previousCombat
             $env:CCCP_MPSMOKE_ENCOUNTER = $previousEncounter
             $env:CCCP_MPSMOKE_BASELINE = $previousBaseline
