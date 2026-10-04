@@ -1098,7 +1098,10 @@ void MultiplayerMan::Impl::EncounterTick() {
 			if (actor->GetHealth() < 99) SmokeEncounterDamaged.insert(actor->GetUniqueID());
 		}
 		if (now - SmokeEncounterStart > 22000) {
-			const bool passed = SmokeEncounterSoldiers.size() >= 2 && !SmokeEncounterFired.empty() && !SmokeEncounterDamaged.empty();
+			// Burst waves may destroy the soldiers before their AI fires. This
+			// fixture proves explosion delivery/damage; ordinary battles require firing.
+			const bool combat = SmokeExplosionBurst ? SmokeExplosions == 56 && SmokeEncounterSoldiers.size() == size_t((SmokeGuests + 1) * 6) : !SmokeEncounterFired.empty();
+			const bool passed = SmokeEncounterSoldiers.size() >= 2 && combat && !SmokeEncounterDamaged.empty();
 			Verify(std::string(passed ? "PASS: " : "FAIL: ") + "delivered soldiers=" + std::to_string(SmokeEncounterSoldiers.size()) + " firing=" + std::to_string(SmokeEncounterFired.size()) + " damaged=" + std::to_string(SmokeEncounterDamaged.size()));
 			Verify("ENCOUNTER: peak nodes=" + std::to_string(SmokeEncounterPeakNodes) + " trails=" + std::to_string(SmokeEncounterPeakTrails) + " wire bytes=" + std::to_string(SmokeEncounterPeakBytes) + " explosions=" + std::to_string(SmokeExplosions));
 			Verify("ENCOUNTER: peak compressed bytes=" + std::to_string(SmokeEncounterPeakPacked) + " mean compressed bytes=" + std::to_string(SmokeEncounterWireUpdates ? SmokeEncounterWireBytes / SmokeEncounterWireUpdates : 0));
