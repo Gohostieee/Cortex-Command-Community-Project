@@ -1,4 +1,5 @@
 #include "BuyMenuGUI.h"
+#include "MultiplayerWorld.h"
 
 #include "CameraMan.h"
 #include "WindowMan.h"
@@ -1922,7 +1923,9 @@ void BuyMenuGUI::Draw(BITMAP* drawBitmap) const {
 			int mousePosX;
 			int mousePosY;
 			m_pGUIInput->GetMousePosition(&mousePosX, &mousePosY);
+			MultiplayerWorld::BeginPointer(mousePosX, mousePosY);
 			draw_sprite(drawBitmap, s_pCursor, mousePosX, mousePosY);
+			MultiplayerWorld::EndInteraction();
 		} else {
 			m_pGUIController->DrawMouse(&drawScreen);
 		}

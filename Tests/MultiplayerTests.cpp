@@ -13,12 +13,14 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 5, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 6, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
+	input.ViewValid = input.CursorValid = input.PointerValid = true; input.ViewX = 2500; input.CursorMode = 3; input.CursorX = 2820; input.PointerX = 100;
 	WriteInput(writer, input);
 	Reader reader(writer.Data); Header header; Input decoded;
 	Check(ReadHeader(reader, header) && ReadInput(reader, decoded) && decoded.Held == input.Held && decoded.Presses[33] == 8 && decoded.Presses[63] == 9 && decoded.MouseX == input.MouseX && decoded.AimY == input.AimY, "input round trip lost a control or GUI key");
+	Check(decoded.ViewValid && decoded.CursorValid && decoded.PointerValid && decoded.ViewX == 2500 && decoded.CursorMode == 3 && decoded.CursorX == 2820 && decoded.PointerX == 100, "client-owned view or cursor coordinates changed on the wire");
 	for (size_t length = 0; length < writer.Data.size(); ++length) {
 		Reader truncated(std::span(writer.Data).first(length)); Header h; Input i;
 		Check(!(ReadHeader(truncated, h) && ReadInput(truncated, i)), "truncated input accepted");
@@ -26,6 +28,8 @@ void Wire() {
 	writer.Data.push_back(0); Reader extra(writer.Data); Check(ReadHeader(extra, header) && !ReadInput(extra, decoded), "extra input bytes accepted");
 	writer.Data = fixture; writer.Data[6] = 1; Reader legacy(writer.Data); Check(!ReadHeader(legacy, header), "legacy protocol accepted");
 	Writer nan(Kind::Input); input.AimY = std::numeric_limits<float>::quiet_NaN(); WriteInput(nan, input); Reader bad(nan.Data); Check(ReadHeader(bad, header) && !ReadInput(bad, decoded), "nonfinite aim accepted");
+	input.AimY = 0; input.ViewX = std::numeric_limits<float>::infinity(); Writer unsafe(Kind::Input); WriteInput(unsafe, input); Reader badView(unsafe.Data);
+	Check(ReadHeader(badView, header) && !ReadInput(badView, decoded), "nonfinite local camera accepted");
 }
 void Inputs() {
 	InputReceiver receiver; Input input; input.Sequence = 1; input.MouseX = 5; input.Presses[10] = input.Releases[10] = 1;
@@ -88,6 +92,26 @@ void Worlds() {
     { std::vector<uint64_t> manifest{resource.ID, 1234}; Writer writer(Kind::WorldManifest); W::WriteManifest(writer, manifest); Reader reader(writer.Data); Header header; std::unordered_set<uint64_t> assets;
       Check(ReadHeader(reader, header) && W::ReadManifest(reader, assets) && assets.size() == 2 && assets.contains(resource.ID), "whole-scene warmup manifest changed resource identities");
       manifest.push_back(resource.ID); Writer duplicate(Kind::WorldManifest); W::WriteManifest(duplicate, manifest); Reader bad(duplicate.Data); Check(ReadHeader(bad, header) && !W::ReadManifest(bad, assets), "duplicate warmup resource accepted"); }
+    { W::SceneMap map; map.CameraX = 100;
+      W::Node tile; tile.ID = (uint64_t(1) << 62) | (uint64_t(100) << 48); tile.Flags = W::ScreenSpace | W::Layer; tile.Asset = resource.ID;
+      tile.X = 1900; tile.X3 = tile.Y3 = 1; tile.Width = tile.SourceWidth = 64; tile.Height = tile.SourceHeight = 64; map.Nodes = {tile};
+      Writer writer(Kind::WorldManifest); W::WriteManifest(writer, std::vector<uint64_t>{resource.ID}, map); Reader reader(writer.Data); Header header; std::unordered_set<uint64_t> assets; W::SceneMap copy;
+      Check(ReadHeader(reader, header) && W::ReadManifest(reader, assets, &copy) && copy.Nodes == map.Nodes && copy.CameraX == 100, "map baseline lost distant tile coordinates");
+      W::RetainedLayers layers; layers.Install(copy); W::Snapshot local; local.CameraX = 2000; layers.Compose(local);
+      Check(local.Nodes.size() == 1 && local.Nodes[0].X == 0, "local free flight cannot draw scenery outside the host viewport");
+      W::Snapshot update; update.CameraX = 1900; tile.X = 100; tile.Asset = 1234; update.Nodes = {tile}; layers.Update(update);
+      local.Nodes.clear(); layers.Compose(local); Check(local.Nodes[0].Asset == 1234 && local.Nodes[0].X == 0, "retained terrain updates moved tiles or retained destroyed terrain");
+      layers.Reset(); local.Nodes.clear(); layers.Compose(local); Check(local.Nodes.empty(), "new match retained an earlier scene map");
+      map.Nodes[0].Asset = 1234; Writer badMap(Kind::WorldManifest); W::WriteManifest(badMap, std::vector<uint64_t>{resource.ID}, map); Reader bad(badMap.Data);
+      Check(ReadHeader(bad, header) && !W::ReadManifest(bad, assets), "map layout refers to an asset outside its manifest");
+      const auto revised = W::ManifestResources(std::vector<uint64_t>{resource.ID}, map);
+      Writer rejoin(Kind::WorldManifest); W::WriteManifest(rejoin, revised, map); Reader current(rejoin.Data);
+      Check(ReadHeader(current, header) && W::ReadManifest(current, assets, &copy) && assets.contains(1234) && assets.size() == 2, "reconnect manifest cannot deliver terrain changed after the original baseline"); }
+    { W::SceneMap map; W::Node back; back.ID = (uint64_t(1) << 62) | (uint64_t(1) << 48); back.Flags = W::ScreenSpace | W::Layer; back.Asset = resource.ID;
+      back.Width = back.SourceWidth = 64; back.Height = back.SourceHeight = 64;
+      W::Node front; front.ID = (uint64_t(1) << 61) | (uint64_t(2) << 32) | 1; front.Flags = W::ScreenSpace | W::Layer; front.Type = W::Shape::Rectangle; front.Width = front.Height = 64;
+      map.Nodes = {back, front}; W::RetainedLayers layers; layers.Install(map); W::Snapshot local; layers.Compose(local);
+      Check(local.Nodes.size() == 2 && W::LayerOrdinal(local.Nodes[0]) == 1 && W::LayerOrdinal(local.Nodes[1]) == 2, "retained scenery changes native parallax layer order"); }
     Writer rw(Kind::WorldResource); W::WriteResource(rw, resource); Reader rr(rw.Data); Header h; W::Resource decoded;
     Check(ReadHeader(rr, h) && W::ReadResource(rr, decoded) && decoded.Pixels == resource.Pixels, "retained resource round trip failed");
     rw.Data.back() ^= 1; Reader corrupt(rw.Data); Check(ReadHeader(corrupt, h) && !W::ReadResource(corrupt, decoded), "resource corruption accepted");
@@ -137,16 +161,21 @@ void Worlds() {
       view.Nodes[0].Type = W::Shape::Sprite; local = view; W::PredictLocalView(local, view, 0, 1, false);
       Check(std::abs(local.Nodes[0].Angle + 1.57079633f) < .001f, "predicted cursor sprite rotates against its native screen-space direction");
       view.Nodes[0].Type = W::Shape::Pixel;
-      Check(std::abs(local.CameraX + 40) < 0.001f && std::abs(local.CameraY - 40) < 0.001f && std::abs(local.Nodes[1].X - 40) < 0.001f && std::abs(local.Nodes[1].Y + 40) < 0.001f, "predicted camera detached terrain from actors");
+      Check(local.CameraX == view.CameraX && local.CameraY == view.CameraY, "visual aiming still overrides the local camera");
       float previous = -999; unsigned distinct = 0;
       for (int frame = 0; frame < 10; ++frame) { auto sample = view; W::PredictLocalView(sample, view, std::cos(frame * 0.05f), std::sin(frame * 0.05f), false); if (sample.Nodes[0].Y != previous) ++distinct; previous = sample.Nodes[0].Y; }
       Check(distinct == 10, "mouse presentation cannot move between host updates");
       local = view; local.Nodes[0].Control = W::Interaction::RadialCursor; W::PredictLocalView(local, view, 0, 1, true);
       Check(std::abs(local.Nodes[0].Y - 30) < 0.001f && local.CameraX == view.CameraX && local.CameraY == view.CameraY, "radial cursor prediction moved the battlefield camera");
-      local = view; W::PredictLocalView(local, view, -1, 0, false); Check(std::hypot(local.CameraX - view.CameraX, local.CameraY - view.CameraY) <= 96.001f, "local camera prediction exceeded retained terrain margins");
       view.MouseX = 0xfffffffe; view.MouseY = 20; view.Nodes[0].Control = W::Interaction::Pointer; view.Nodes[0].X = 100; view.Nodes[0].Y = 100;
-      local = view; W::PredictLocalPointer(local, view, 3, 22);
+      view.Nodes[0].X2 = view.Nodes[0].Y2 = 101;
+      W::LocalPointer pointer; Input pointerInput; pointerInput.MouseX = 3; pointerInput.MouseY = 22;
+      local = view; pointer.Apply(local, view, pointerInput, true);
       Check(local.Nodes[0].X == 105 && local.Nodes[0].Y == 102, "GUI cursor prediction lost cumulative mouse wrap or vertical movement");
+      view.MouseX = 3; view.MouseY = 22; view.Nodes[0].X = 5; view.Nodes[0].Y = 8; view.Nodes[0].X2 = 6; view.Nodes[0].Y2 = 9;
+      local = view; pointer.Apply(local, view, pointerInput, true);
+      Check(local.Nodes[0].X == 105 && local.Nodes[0].Y == 102, "host pointer update overrides the client-owned cursor");
+      pointer.Export(pointerInput, true); Check(pointerInput.PointerValid && pointerInput.PointerX == 106, "GUI clicks do not use the cursor hotspot the guest sees");
       view.ViewMode = 3; view.MouseScale = 1; view.CameraX = view.CameraTargetX = 60; view.CameraY = view.CameraTargetY = 20;
       W::LocalCamera camera; Input mouse; mouse.MouseX = 20; mouse.MouseY = view.MouseY; view.MouseX = 0;
       local = view; camera.Apply(local, view, mouse, 1000); const float predicted = local.CameraX;
@@ -156,6 +185,34 @@ void Worlds() {
       Check(local.CameraX >= predicted, "mouse acknowledgement pulls the guest camera backwards before native easing catches up");
       auto noAimCamera = view; W::PredictLocalView(noAimCamera, view, 0, 1, false);
       Check(noAimCamera.CameraX == view.CameraX && noAimCamera.CameraY == view.CameraY, "actor aim prediction fights Q camera movement");
+      view.CameraX = view.CameraTargetX = 60; view.SceneWidth = 4096; view.MouseX = 0; mouse.MouseX = 0; camera.Reset();
+      local = view; camera.Apply(local, view, mouse, 2000);
+      mouse.MouseX = 600;
+      for (uint64_t frame = 1; frame <= 90; ++frame) { local = view; camera.Apply(local, view, mouse, 2000 + frame * 16); }
+      Check(W::Displacement(view.CameraX, local.CameraX, view.SceneWidth, true) > 150, "free camera stops at the host view margin during missing snapshots");
+      const float owned = local.CameraX;
+      view.MouseX = mouse.MouseX; view.CameraX = 2000; view.CameraTargetX = 2500;
+      local = view; camera.Apply(local, view, mouse, 3456);
+      Check(std::abs(local.CameraX - owned) < 2, "late host camera or input acknowledgement rebases local free flight");
+      camera.Export(mouse, true); Check(mouse.ViewValid && mouse.CursorValid && mouse.CursorMode == 3 && mouse.ViewX == local.CameraX, "client view and action coordinates are not exported");
+      const float paused = local.CameraX; mouse.MouseX += 100;
+      local = view; camera.Apply(local, view, mouse, 3472, false);
+      Check(local.CameraX == paused, "opening the menu resets the local camera");
+      local = view; camera.Apply(local, view, mouse, 3488, true);
+      Check(std::abs(local.CameraX - paused) < 2, "resume applies mouse motion from an inactive view");
+      camera.Reset(); camera.Export(mouse, true); Check(!mouse.ViewValid && !mouse.CursorValid, "new match retains the previous local camera");
+      view.ViewMode = 0; view.MouseScale = 0; view.ControlledActor = 11; view.CameraX = 1000; view.CameraTargetX = 1500;
+      auto body = first.Nodes[0]; body.X = 2000; body.Y = 300; view.Nodes = {body}; mouse = {}; mouse.Held = uint64_t(1) << RTE::INPUT_PREV;
+      local = view; camera.Apply(local, view, mouse, 4000); local = view; camera.Apply(local, view, mouse, 4251);
+      Check(local.ViewMode == 3, "held-Q free flight waits for the host's mode change");
+      mouse.MouseX = 300; local = view; camera.Apply(local, view, mouse, 4267); camera.Export(mouse, true);
+      Check(mouse.CursorX == 2300 && mouse.CursorMode == 3, "locally activated Q camera does not own its selection cursor");
+      view.ViewMode = 3; view.MouseScale = 1; view.CameraTargetX = 800; view.CameraX = 800;
+      local = view; camera.Apply(local, view, mouse, 4283); camera.Export(mouse, true);
+      Check(mouse.CursorX == 2300, "host confirmation of Q mode overwrites the local selection target");
+      mouse.Held = 0; local = view; camera.Apply(local, view, mouse, 4299);
+      Check(local.ViewMode == 0, "releasing Q waits for the host to leave free flight");
+      local = view; camera.Apply(local, view, mouse, 4315); Check(local.ViewMode == 0, "late selection-mode snapshots reopen the local Q camera");
     }
     auto third = second; third.ID = 3; third.Time = 1100; third.Nodes.clear();
     Check(timeline.Push(third, 1120), "despawn state rejected"); Check(timeline.Sample(1170).Nodes.size() == 1 && timeline.Sample(1195).Nodes.empty(), "lifecycle changed before its presentation time");

@@ -860,7 +860,10 @@ void FrameMan::Draw() {
 		if (remoteScreen) {
 			// Publish native scene/UI state. No guest battlefield is rendered or
 			// read back on the host; each guest composes its retained world.
-			g_CameraMan.Update(playerScreen); g_SceneMan.Update(playerScreen);
+			g_CameraMan.Update(playerScreen);
+			float guestX, guestY;
+			if (g_MultiplayerMan.GuestView(networkPlayer, guestX, guestY)) g_CameraMan.SetOffset(Vector(guestX, guestY), playerScreen);
+			g_SceneMan.Update(playerScreen);
 			Vector camera = g_CameraMan.GetOffset(playerScreen);
 			if (!g_SceneMan.SceneWrapsX() && networkGUI->w > g_SceneMan.GetSceneWidth()) camera.m_X += (networkGUI->w - g_SceneMan.GetSceneWidth()) / 2;
 			if (!g_SceneMan.SceneWrapsY() && networkGUI->h > g_SceneMan.GetSceneHeight()) camera.m_Y += (networkGUI->h - g_SceneMan.GetSceneHeight()) / 2;

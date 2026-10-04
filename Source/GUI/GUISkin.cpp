@@ -270,7 +270,7 @@ void GUISkin::DrawMouse(int Image, int X, int Y, GUIScreen* guiScreenOverride) {
 	GUIScreen* targetScreen = guiScreenOverride ? guiScreenOverride : m_Screen;
 
 	if (m_MousePointers[Image]) {
-		MultiplayerWorld::BeginPointer();
+		MultiplayerWorld::BeginPointer(X, Y);
 		targetScreen->DrawBitmapTrans(m_MousePointers[Image], X - 1, Y - 1, nullptr);
 		MultiplayerWorld::EndInteraction();
 	}

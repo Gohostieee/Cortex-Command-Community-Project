@@ -55,8 +55,11 @@ struct MultiplayerWorld::Impl {
     uint64_t HUDParent = 0;
     Vector HUDAnchor;
     Interaction HUDControl = Interaction::None;
+    Vector PointerPosition;
     MP::Input LocalInput;
     LocalCamera CameraPrediction;
+    LocalPointer Pointer;
+    RetainedLayers SceneLayers;
     bool LocalInputEnabled = false;
     std::unordered_map<uint64_t, Vector> ObjectAnchors;
     bool PrimitiveStyle = false;
@@ -88,7 +91,7 @@ struct MultiplayerWorld::Impl {
         const auto id = resource.ID; const uint64_t now = WorldNow(); LastUsed[id] = now;
         if (Resources.contains(id)) return true;
         if (ResourceBytes + resource.Pixels.size() > ResourceLimit) {
-            auto pinned = States.Resources(); pinned.insert(SceneAssets.begin(), SceneAssets.end()); for (const auto& [id, visual] : LastVisuals) if (visual.Asset) pinned.insert(visual.Asset);
+            auto pinned = States.Resources(); const auto retained = SceneLayers.Resources(); pinned.insert(retained.begin(), retained.end()); pinned.insert(SceneAssets.begin(), SceneAssets.end()); for (const auto& [id, visual] : LastVisuals) if (visual.Asset) pinned.insert(visual.Asset);
             std::vector<std::pair<uint64_t, uint64_t>> candidates;
             for (const auto& [key, used] : LastUsed) if (!pinned.contains(key)) candidates.emplace_back(used, key);
             std::sort(candidates.begin(), candidates.end());
@@ -143,6 +146,7 @@ struct MultiplayerWorld::Impl {
         const float dx = target && GUI ? float(target->x_ofs - GUI->x_ofs) : 0;
         const float dy = target && GUI ? float(target->y_ofs - GUI->y_ofs) : 0;
         node.X += dx; node.Y += dy;
+        if (node.Control == Interaction::Pointer) { node.X2 = PointerPosition.GetX() + dx; node.Y2 = PointerPosition.GetY() + dy; }
         if (node.Type == Shape::Line || node.Type == Shape::Triangle || node.Type == Shape::Spline) { node.X2 += dx; node.Y2 += dy; node.X3 += dx; node.Y3 += dy; }
         if (node.Type == Shape::Spline) { node.Width += dx; node.Height += dy; }
 		if (PrimitiveStyle) { node.BlendMode = CurrentStyle.BlendMode; node.TintR = CurrentStyle.TintR; node.TintG = CurrentStyle.TintG; node.TintB = CurrentStyle.TintB; node.Alpha = uint8_t(unsigned(node.Alpha) * CurrentStyle.Alpha / 255); }
@@ -232,7 +236,7 @@ struct MultiplayerWorld::Impl {
     static void Pivot(BITMAP* d, BITMAP* s, fixed x, fixed y, fixed cx, fixed cy, fixed angle, fixed scale, int flip) {
         if (auto* impl = CanvasFor(d)) { Node n; n.Asset = impl->Asset(s); n.X = fixtof(x); n.Y = fixtof(y); n.Width = s->w * fixtof(scale); n.Height = s->h * fixtof(scale); n.PivotX = fixtof(cx) * fixtof(scale); n.PivotY = fixtof(cy) * fixtof(scale); n.Angle = -fixtof(angle) * 6.28318530718f / 256; n.SourceWidth = float(s->w); n.SourceHeight = float(s->h); n.Flags = Masked | (flip ? FlipY : 0); impl->AppendCanvas(n); }
     }
-    template<class LayerType> void Layer(std::vector<Node>& output, LayerType* layer, uint16_t ordinal, const Vector& camera, int width, int height) {
+    template<class LayerType> void Layer(std::vector<Node>& output, LayerType* layer, uint16_t ordinal, const Vector& camera, int width, int height, bool whole = false) {
         if (!layer || !layer->GetBitmap()) return;
         BITMAP* bitmap = layer->GetBitmap(); const Vector scale = layer->GetScaleFactor(); Vector offset = layer->GetOffset();
         if (scale.GetX() <= 0 || scale.GetY() <= 0) return;
@@ -247,26 +251,29 @@ struct MultiplayerWorld::Impl {
         const float spanX = bitmap->w * scale.GetX(), spanY = bitmap->h * scale.GetY();
         const int margin = 128;
         const int columns = (bitmap->w + TileSize - 1) / TileSize, rows = (bitmap->h + TileSize - 1) / TileSize;
-        const int repeatX = layer->WrapsX() ? int(std::floor((offset.GetX() - margin) / spanX)) : 0;
-        const int endX = layer->WrapsX() ? int(std::ceil((offset.GetX() + width + margin) / spanX)) : 1;
-        const int repeatY = layer->WrapsY() ? int(std::floor((offset.GetY() - margin) / spanY)) : 0;
-        const int endY = layer->WrapsY() ? int(std::ceil((offset.GetY() + height + margin) / spanY)) : 1;
+        const int repeatX = !whole && layer->WrapsX() ? int(std::floor((offset.GetX() - margin) / spanX)) : 0;
+        const int endX = !whole && layer->WrapsX() ? int(std::ceil((offset.GetX() + width + margin) / spanX)) : 1;
+        const int repeatY = !whole && layer->WrapsY() ? int(std::floor((offset.GetY() - margin) / spanY)) : 0;
+        const int endY = !whole && layer->WrapsY() ? int(std::ceil((offset.GetY() + height + margin) / spanY)) : 1;
+        std::unordered_set<uint64_t> emitted;
         for (int rx = repeatX; rx < endX; ++rx) for (int ry = repeatY; ry < endY; ++ry) {
-          const int firstX = std::clamp(int(std::floor((offset.GetX() - margin - rx * spanX) / (TileSize * scale.GetX()))), 0, columns);
-          const int lastX = std::clamp(int(std::ceil((offset.GetX() + width + margin - rx * spanX) / (TileSize * scale.GetX()))), 0, columns);
-          const int firstY = std::clamp(int(std::floor((offset.GetY() - margin - ry * spanY) / (TileSize * scale.GetY()))), 0, rows);
-          const int lastY = std::clamp(int(std::ceil((offset.GetY() + height + margin - ry * spanY) / (TileSize * scale.GetY()))), 0, rows);
+          const int firstX = whole ? 0 : std::clamp(int(std::floor((offset.GetX() - margin - rx * spanX) / (TileSize * scale.GetX()))), 0, columns);
+          const int lastX = whole ? columns : std::clamp(int(std::ceil((offset.GetX() + width + margin - rx * spanX) / (TileSize * scale.GetX()))), 0, columns);
+          const int firstY = whole ? 0 : std::clamp(int(std::floor((offset.GetY() - margin - ry * spanY) / (TileSize * scale.GetY()))), 0, rows);
+          const int lastY = whole ? rows : std::clamp(int(std::ceil((offset.GetY() + height + margin - ry * spanY) / (TileSize * scale.GetY()))), 0, rows);
           for (int y = firstY; y < lastY; ++y) for (int x = firstX; x < lastX; ++x) {
             int sx = x * TileSize, sy = y * TileSize, w = std::min<int>(TileSize, bitmap->w - sx), h = std::min<int>(TileSize, bitmap->h - sy);
-            Node n; n.ID = (uint64_t(1) << 62) | (uint64_t(ordinal) << 48) | (uint64_t(uint16_t(ry * rows + y)) << 24) | uint16_t(rx * columns + x);
+            Node n; n.ID = (uint64_t(1) << 62) | (uint64_t(ordinal) << 48) | (uint64_t(y) << 24) | uint16_t(x);
+            if (!emitted.insert(n.ID).second) continue;
             n.Asset = Asset(bitmap, sx, sy, w, h, std::is_base_of_v<StaticSceneLayer, LayerType>);
-            if (layer->GetDrawMasked() && EmptyMaskedAssets.contains(n.Asset)) continue;
+            // Empty tiles are explicit updates so a destroyed terrain tile
+            // cannot remain in the guest's retained map.
             n.SourceWidth = float(w); n.SourceHeight = float(h); n.Width = w * scale.GetX(); n.Height = h * scale.GetY();
             n.Flags = ScreenSpace | MP::World::Layer | (layer->GetDrawMasked() ? Masked : 0);
             n.X3 = n.Y3 = 1;
-            if constexpr (std::is_same_v<LayerType, SLBackground>) { n.X3 = layer->GetScrollRatio().GetX(); n.Y3 = layer->GetScrollRatio().GetY(); }
+            if constexpr (std::is_same_v<LayerType, SLBackground>) { n.X3 = layer->IsAutoScrolling() ? 0 : layer->GetScrollRatio().GetX(); n.Y3 = layer->IsAutoScrolling() ? 0 : layer->GetScrollRatio().GetY(); }
             n.X2 = layer->WrapsX() ? spanX : 0; n.Y2 = layer->WrapsY() ? spanY : 0;
-            n.X = boxX + rx * spanX + sx * scale.GetX() - offset.GetX(); n.Y = boxY + ry * spanY + sy * scale.GetY() - offset.GetY();
+            n.X = boxX + sx * scale.GetX() - offset.GetX(); n.Y = boxY + sy * scale.GetY() - offset.GetY();
             n.ClipX = boxX; n.ClipY = boxY; n.ClipWidth = width - boxX * 2; n.ClipHeight = height - boxY * 2;
             if (Valid(n)) output.push_back(n);
           }
@@ -274,10 +281,11 @@ struct MultiplayerWorld::Impl {
         if constexpr (std::is_same_v<LayerType, SLBackground>) {
             auto fill = [&](float x, float y, float w, float h, int color, uint16_t edge) {
                 if (w <= 0 || h <= 0 || color == g_MaskColor) return;
-                Node n; n.ID = (uint64_t(1) << 61) | (uint64_t(ordinal) << 32) | edge; n.Type = Shape::Rectangle; n.Flags = ScreenSpace | MP::World::Layer; n.X = x; n.Y = y; n.Width = w; n.Height = h; n.Color = uint8_t(color); output.push_back(n);
+                Node n; n.ID = (uint64_t(1) << 61) | (uint64_t(ordinal) << 32) | edge; n.Type = Shape::Rectangle; n.Flags = ScreenSpace | MP::World::Layer; n.X = x; n.Y = y; n.Width = w; n.Height = h; n.Color = uint8_t(color);
+                n.X3 = layer->IsAutoScrolling() ? 0 : layer->GetScrollRatio().GetX(); n.Y3 = layer->IsAutoScrolling() ? 0 : layer->GetScrollRatio().GetY(); output.push_back(n);
             };
-            if (!layer->WrapsX() && spanX <= width) { fill(0, 0, -offset.GetX(), height, getpixel(bitmap, 0, bitmap->h / 2), 1); fill(spanX - offset.GetX(), 0, width - spanX + offset.GetX(), height, getpixel(bitmap, bitmap->w - 1, bitmap->h / 2), 2); }
-            if (!layer->WrapsY() && spanY <= height) { fill(0, 0, width, -offset.GetY(), getpixel(bitmap, bitmap->w / 2, 0), 3); fill(0, spanY - offset.GetY(), width, height - spanY + offset.GetY(), getpixel(bitmap, bitmap->w / 2, bitmap->h - 1), 4); }
+            if (!layer->WrapsX()) { fill(-32768 - offset.GetX(), -32768 - offset.GetY(), 32768, 65536, getpixel(bitmap, 0, bitmap->h / 2), 1); fill(spanX - offset.GetX(), -32768 - offset.GetY(), 32768, 65536, getpixel(bitmap, bitmap->w - 1, bitmap->h / 2), 2); }
+            if (!layer->WrapsY()) { fill(-32768 - offset.GetX(), -32768 - offset.GetY(), 65536, 32768, getpixel(bitmap, bitmap->w / 2, 0), 3); fill(-32768 - offset.GetX(), spanY - offset.GetY(), 65536, 32768, getpixel(bitmap, bitmap->w / 2, bitmap->h - 1), 4); }
         }
         (void)camera;
     }
@@ -301,6 +309,7 @@ void MultiplayerWorld::ResetPresentation() {
     auto& impl = *m_Impl;
     impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.SceneAssets.clear();
     impl.CameraPrediction.Reset();
+    impl.Pointer.Reset(); impl.SceneLayers.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
 }
@@ -363,10 +372,11 @@ void MultiplayerWorld::BeginAim(const Actor& actor, int screen) {
 }
 void MultiplayerWorld::BeginRadialCursor() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::RadialCursor; }
 void MultiplayerWorld::BeginRadialBackground() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::RadialBackground; }
-void MultiplayerWorld::BeginPointer() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::Pointer; }
+void MultiplayerWorld::BeginPointer(float x, float y) { if (canvasCollector) { canvasCollector->m_Impl->HUDControl = Interaction::Pointer; canvasCollector->m_Impl->PointerPosition.SetXY(x, y); } }
 void MultiplayerWorld::BeginWorldCursor() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::WorldCursor; }
 void MultiplayerWorld::EndInteraction() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::None; }
 void MultiplayerWorld::SetLocalInput(const MP::Input& input, bool enabled) { m_Impl->LocalInput = input; m_Impl->LocalInputEnabled = enabled; }
+void MultiplayerWorld::ExportLocalView(MP::Input& input, bool enabled) const { m_Impl->CameraPrediction.Export(input, enabled); m_Impl->Pointer.Export(input, enabled && input.Device == DEVICE_MOUSE_KEYB); }
 void MultiplayerWorld::EndObjects() { if (objectCollector == this) objectCollector = nullptr; }
 void MultiplayerWorld::Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& pos, const Vector& pivot, float angle, float scale, bool flip, bool white, uint8_t alpha) {
     if (!objectCollector || !bitmap) return;
@@ -426,14 +436,13 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         if (!visible.Pixels.empty()) snapshot.Nodes.push_back(std::move(visible));
       }
     }
-    for (const auto& node : impl.Objects) {
-        const float dx = Displacement(impl.Camera.GetX() + snapshot.Width / 2, node.X, snapshot.SceneWidth, snapshot.Wrap & 1), dy = Displacement(impl.Camera.GetY() + snapshot.Height / 2, node.Y, snapshot.SceneHeight, snapshot.Wrap & 2);
-        if (std::abs(dx) < snapshot.Width / 2 + node.Width + 128 && std::abs(dy) < snapshot.Height / 2 + node.Height + 128) snapshot.Nodes.push_back(node);
-    }
+    // Passive world objects are independent of the guest camera. The team's
+    // complete fog layer below obscures unexplored regions on every view.
+    snapshot.Nodes.insert(snapshot.Nodes.end(), impl.Objects.begin(), impl.Objects.end());
     impl.Layer(snapshot.Nodes, scene->GetTerrain()->GetFGSceneLayer(), 101, impl.Camera, snapshot.Width, snapshot.Height);
     const auto* activity = g_ActivityMan.GetActivity(); const int team = activity->GetTeamOfPlayer(player);
     snapshot.Phase = uint8_t(activity->GetActivityState());
-    if (activity->GetActivityState() != Activity::Editing) impl.Layer(snapshot.Nodes, scene->GetUnseenLayer(team), 102, impl.Camera, snapshot.Width, snapshot.Height);
+    if (activity->GetActivityState() != Activity::Editing) impl.Layer(snapshot.Nodes, scene->GetUnseenLayer(team), 102, impl.Camera, snapshot.Width, snapshot.Height, true);
     snapshot.Nodes.insert(snapshot.Nodes.end(), impl.Canvas.begin(), impl.Canvas.end()); impl.GUI = nullptr;
     std::list<PostEffect> effects;
     g_PostProcessMan.GetPostScreenEffectsWrapped(impl.Camera, snapshot.Width, snapshot.Height, effects, team);
@@ -464,6 +473,19 @@ std::vector<uint64_t> MultiplayerWorld::PrepareScene() {
     return {impl.SceneAssets.begin(), impl.SceneAssets.end()};
 }
 void MultiplayerWorld::PinScene(const std::unordered_set<uint64_t>& assets) { m_Impl->SceneAssets = assets; }
+SceneMap MultiplayerWorld::PrepareSceneMap(int width, int height) {
+    auto& impl = *m_Impl; SceneMap map; map.CameraX = impl.Camera.GetX(); map.CameraY = impl.Camera.GetY();
+    auto* scene = g_SceneMan.GetScene(); if (!scene) return map;
+    uint16_t ordinal = 1;
+    for (auto it = scene->GetBackLayers().rbegin(); it != scene->GetBackLayers().rend(); ++it) impl.Layer(map.Nodes, *it, ordinal++, impl.Camera, width, height, true);
+    impl.Layer(map.Nodes, scene->GetTerrain()->GetBGSceneLayer(), 100, impl.Camera, width, height, true);
+    impl.Layer(map.Nodes, scene->GetTerrain()->GetFGSceneLayer(), 101, impl.Camera, width, height, true);
+    return map;
+}
+void MultiplayerWorld::InstallSceneMap(const SceneMap& map) {
+    m_Impl->SceneLayers.Install(map);
+    for (const auto& n : map.Nodes) if (n.Type == Shape::Sprite) m_Impl->LastVisuals[n.ID] = n;
+}
 void MultiplayerWorld::PrimeSceneBackdrops(const Scene& scene) {
     // Preset backdrops already contain passive, installed bitmap resources.
     // Only matching content hashes are reused; terrain and gameplay stay on
@@ -480,7 +502,7 @@ bool MultiplayerWorld::Install(Resource resource) {
 std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const {
     std::unordered_set<uint64_t> ids; for (const auto& node : snapshot.Nodes) if (node.Asset && !m_Impl->Resources.contains(node.Asset)) ids.insert(node.Asset); return {ids.begin(), ids.end()};
 }
-bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !Missing(snapshot).empty()) || !m_Impl->States.Push(std::move(snapshot), time)) return false; ++m_Impl->UpdateCount; return true; }
+bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !Missing(snapshot).empty()) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
 bool MultiplayerWorld::Paused() const { return Ready() && m_Impl->States.Latest().Paused; }
 bool MultiplayerWorld::IsDeploying() const { return Ready() && m_Impl->LastSample.Phase == Activity::Editing; }
@@ -520,7 +542,8 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
         SceneLayer emptyLayer; BITMAP* transparent = create_bitmap_ex(8, 64, 64); clear_to_color(transparent, g_MaskColor);
         emptyLayer.Create(transparent, true, Vector(), false, false, Vector(-1, -1));
         std::vector<Node> tiles; m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
-        check(tiles.empty(), "fully transparent masked terrain tiles require no scene commands");
+        check(tiles.size() == 1 && m_Impl->EmptyMaskedAssets.contains(tiles.front().Asset), "transparent terrain explicitly clears its retained tile");
+        tiles.clear();
         putpixel(transparent, 10, 10, g_WhiteColor); m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
         check(!tiles.empty() && !m_Impl->EmptyMaskedAssets.contains(tiles.front().Asset), "changed terrain immediately restores a formerly transparent tile");
     }
@@ -545,6 +568,32 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
     colored = 0; if (pixels) for (size_t i = 0; i < 640 * 360 * 4; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) ++colored;
     check(pixels && colored == 0, "missing transient world effect does not reuse another effect ordinal as a horizontal strip");
     MemFree(pixels); Reset();
+    {
+        Resource fog; fog.Width = 8; fog.Height = 1; fog.Pixels = {uint8_t(g_MaskColor), uint8_t(g_MaskColor), uint8_t(g_MaskColor), uint8_t(g_MaskColor), uint8_t(g_BlackColor), uint8_t(g_BlackColor), uint8_t(g_BlackColor), uint8_t(g_BlackColor)};
+        fog.ID = ResourceHash(fog); Install(fog);
+        SceneMap map; Node ground; ground.ID = (uint64_t(1) << 61) | (uint64_t(100) << 32) | 1; ground.Type = Shape::Rectangle;
+        ground.Flags = ScreenSpace | MP::World::Layer; ground.Width = 4096; ground.Height = 360; ground.X3 = ground.Y3 = 1; ground.Color = g_WhiteColor;
+        map.Nodes = {ground}; InstallSceneMap(map);
+        Snapshot view; view.ID = 1; view.Time = 1000; view.Width = 640; view.Height = view.SceneHeight = 360; view.SceneWidth = 4096; view.ViewMode = Activity::Observe; view.MouseScale = 1;
+        Node veil; veil.ID = (uint64_t(1) << 62) | (uint64_t(102) << 48); veil.Flags = ScreenSpace | MP::World::Layer | Masked; veil.Asset = fog.ID;
+        veil.Width = 4096; veil.Height = 360; veil.SourceWidth = 8; veil.SourceHeight = 1; veil.X3 = veil.Y3 = 1; view.Nodes = {veil}; Install(view, 1020);
+        MP::Input input; SetLocalInput(input, true); Render(1020); input.MouseX = 1200; SetLocalInput(input, true);
+        for (uint64_t i = 1; i <= 90; ++i) Render(1020 + i * 16);
+        auto* image = static_cast<unsigned char*>(rlReadTexturePixels(Render(2476), 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+        const size_t center = (180 * 640 + 320) * 4;
+        check(image && (image[center] || image[center + 1] || image[center + 2]), "free flight draws cached scenery more than a screen beyond the host view without another snapshot");
+        MemFree(image); input.MouseX = 2500; SetLocalInput(input, true);
+        for (uint64_t i = 1; i <= 90; ++i) Render(2476 + i * 16);
+        image = static_cast<unsigned char*>(rlReadTexturePixels(Render(3932), 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+        check(image && !image[center] && !image[center + 1] && !image[center + 2], "local free flight keeps unexplored scenery obscured beyond the host viewport");
+        MemFree(image);
+        view.ID = 2; view.Time = 4000; view.Nodes[0].Asset = fog.ID + 1; Install(view, 4020);
+        input.MouseX -= 1300; SetLocalInput(input, true);
+        for (uint64_t i = 1; i <= 90; ++i) Render(4020 + i * 16);
+        image = static_cast<unsigned char*>(rlReadTexturePixels(Render(5476), 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
+        check(image && !image[center] && !image[center + 1] && !image[center + 2], "a missing fog revision covers the world instead of exposing a previously clear region");
+        MemFree(image); Reset();
+    }
     BeginTrails();
     std::vector<std::pair<int, int>> trail;
     for (int i = 0; i < 512; ++i) trail.emplace_back(i + 10, 100 + i / 8);
@@ -568,12 +617,19 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
 unsigned MultiplayerWorld::Render(uint64_t time) {
     auto& impl = *m_Impl; if (impl.States.Empty()) return 0;
     Snapshot scene = impl.States.Sample(time);
+    if (impl.LocalInput.Device == DEVICE_MOUSE_KEYB) impl.Pointer.Apply(scene, impl.States.Latest(), impl.LocalInput, impl.LocalInputEnabled);
+    impl.CameraPrediction.Apply(scene, impl.States.Latest(), impl.LocalInput, time, impl.LocalInputEnabled);
     if (impl.LocalInputEnabled) {
         const bool radial = (impl.LocalInput.Held & ((uint64_t(1) << INPUT_PIEMENU_ANALOG) | (uint64_t(1) << INPUT_PIEMENU_DIGITAL))) != 0;
         PredictLocalView(scene, impl.States.Latest(), impl.LocalInput.AimX, impl.LocalInput.AimY, radial);
-        if (impl.LocalInput.Device == DEVICE_MOUSE_KEYB) PredictLocalPointer(scene, impl.States.Latest(), impl.LocalInput.MouseX, impl.LocalInput.MouseY);
-        impl.CameraPrediction.Apply(scene, impl.States.Latest(), impl.LocalInput, time);
-    } else impl.CameraPrediction.Reset();
+        if (scene.ViewMode == Activity::ActorSelect && impl.States.Latest().ViewMode != Activity::ActorSelect) {
+            std::erase_if(scene.Nodes, [](const Node& n) { return n.Control == Interaction::Aim; });
+            MP::Input view; impl.CameraPrediction.Export(view, true);
+            Node cursor; cursor.ID = (uint64_t(1) << 63) | 0x7fffffff; cursor.Type = Shape::CircleOutline; cursor.Flags = 0; cursor.X = view.CursorX; cursor.Y = view.CursorY;
+            cursor.Width = time / 150 % 2 ? 6 : 8; cursor.Color = g_YellowGlowColor; scene.Nodes.push_back(cursor);
+        }
+    }
+    impl.SceneLayers.Compose(scene);
     if (impl.LastSample.ID == scene.ID && (impl.LastSample.CameraX != scene.CameraX || impl.LastSample.CameraY != scene.CameraY || impl.LastSample.Nodes != scene.Nodes)) ++impl.IntermediateCount;
     impl.LastSample = scene;
     // An animation frame or changed terrain tile can arrive after its pose.
@@ -581,15 +637,17 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     std::unordered_set<uint64_t> visible;
     for (auto& n : scene.Nodes) if (n.Type == Shape::Sprite) {
         visible.insert(n.ID);
-        const bool retained = !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
+        const bool fog = LayerOrdinal(n) == 102;
+        const bool retained = !fog && !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
         if (impl.Resources.contains(n.Asset)) { if (retained) impl.LastVisuals[n.ID] = n; }
         else if (auto previous = impl.LastVisuals.find(n.ID); retained && previous != impl.LastVisuals.end()) {
             const auto& old = previous->second;
             n.Asset = old.Asset; n.SourceX = old.SourceX; n.SourceY = old.SourceY; n.SourceWidth = old.SourceWidth; n.SourceHeight = old.SourceHeight;
             n.Width = old.Width; n.Height = old.Height; n.PivotX = old.PivotX; n.PivotY = old.PivotY;
-        } else n.Asset = 0;
+        } else if (fog) { n.Type = Shape::Rectangle; n.Asset = 0; n.Color = g_BlackColor; n.Flags &= ~Masked; }
+        else n.Asset = 0;
     }
-    std::erase_if(impl.LastVisuals, [&](const auto& entry) { return !visible.contains(entry.first); });
+    std::erase_if(impl.LastVisuals, [&](const auto& entry) { return !visible.contains(entry.first) && !LayerOrdinal(entry.second); });
     if (!impl.Target || impl.Target->GetSize().w != scene.Width || impl.Target->GetSize().h != scene.Height) impl.Target = std::make_unique<RenderTarget>(FloatRect(0, 0, scene.Width, scene.Height), FloatRect(0, 0, scene.Width, scene.Height));
     impl.Target->Begin(); rlDisableDepthTest(); rlEnableColorBlend(); rlSetBlendMode(RL_BLEND_ALPHA);
     if (!impl.SceneShader) impl.SceneShader = std::make_unique<Shader>("Base.rte/Shaders/Blit8.vert", "Base.rte/Shaders/Replica.frag");
@@ -599,6 +657,9 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     std::unordered_map<uint64_t, const Node*> anchors; for (const auto& n : scene.Nodes) if (!(n.Flags & ScreenSpace)) anchors[n.ID] = &n;
     for (const Node& n : scene.Nodes) {
         if (n.Type == Shape::Sprite && !n.Asset) continue;
+        if (n.Type == Shape::Sprite && !(n.Flags & ScreenSpace) &&
+            (std::abs(Displacement(scene.CameraX + scene.Width / 2, n.X, scene.SceneWidth, scene.Wrap & 1)) > scene.Width / 2 + n.Width + n.Height ||
+             std::abs(Displacement(scene.CameraY + scene.Height / 2, n.Y, scene.SceneHeight, scene.Wrap & 2)) > scene.Height / 2 + n.Width + n.Height)) continue;
         Texture2D texture{};
         const bool trueColor = n.Type == Shape::Sprite && impl.Resources.at(n.Asset).Depth == 32;
         if (n.Asset) impl.LastUsed[n.Asset] = time;
@@ -626,7 +687,11 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
         }
         if (n.Type == Shape::Sprite) {
             auto source = Rectangle{n.SourceX, n.SourceY, n.Flags & FlipX ? -n.SourceWidth : n.SourceWidth, n.Flags & FlipY ? -n.SourceHeight : n.SourceHeight};
-            DrawTexturePro(texture, source, {x, y, n.Width, n.Height}, {n.PivotX, n.PivotY}, n.Angle, {255, 255, 255, n.Alpha});
+            const float spanX = n.Flags & MP::World::Layer ? n.X2 : 0, spanY = n.Flags & MP::World::Layer ? n.Y2 : 0;
+            const int firstX = spanX > 0 ? int(std::ceil((-x - n.Width) / spanX)) : 0, lastX = spanX > 0 ? int(std::floor((scene.Width - x) / spanX)) : 0;
+            const int firstY = spanY > 0 ? int(std::ceil((-y - n.Height) / spanY)) : 0, lastY = spanY > 0 ? int(std::floor((scene.Height - y) / spanY)) : 0;
+            for (int ry = firstY; ry <= lastY; ++ry) for (int rx = firstX; rx <= lastX; ++rx)
+                DrawTexturePro(texture, source, {x + rx * spanX, y + ry * spanY, n.Width, n.Height}, {n.PivotX, n.PivotY}, n.Angle, {255, 255, 255, n.Alpha});
         } else {
             RLColor color{n.Color, 0, 0, n.Alpha};
             if (n.Type == Shape::PixelPath) {
@@ -637,7 +702,13 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
                 }
             }
             else if (n.Type == Shape::Pixel) DrawRectangle(int(x), int(y), 1, 1, color);
-            else if (n.Type == Shape::Rectangle) DrawRectangle(int(x), int(y), int(n.Width), int(n.Height), color);
+            else if (n.Type == Shape::Rectangle) {
+                const float spanX = LayerOrdinal(n) == 102 ? n.X2 : 0, spanY = LayerOrdinal(n) == 102 ? n.Y2 : 0;
+                const int firstX = spanX > 0 ? int(std::ceil((-x - n.Width) / spanX)) : 0, lastX = spanX > 0 ? int(std::floor((scene.Width - x) / spanX)) : 0;
+                const int firstY = spanY > 0 ? int(std::ceil((-y - n.Height) / spanY)) : 0, lastY = spanY > 0 ? int(std::floor((scene.Height - y) / spanY)) : 0;
+                for (int ry = firstY; ry <= lastY; ++ry) for (int rx = firstX; rx <= lastX; ++rx)
+                    DrawRectangle(int(x + rx * spanX), int(y + ry * spanY), int(n.Width), int(n.Height), color);
+            }
             else if (n.Type == Shape::Line) DrawLineEx({x, y}, {n.X2 + dx, n.Y2 + dy}, n.Width, color);
             else if (n.Type == Shape::Triangle) DrawTriangle({x, y}, {n.X2 + dx, n.Y2 + dy}, {n.X3 + dx, n.Y3 + dy}, color);
             else if (n.Type == Shape::Circle) DrawCircle(int(x), int(y), n.Width, color);

@@ -15,7 +15,7 @@ namespace RTE::MP {
 
 inline constexpr uint8_t PacketID = 220;
 inline constexpr uint32_t Magic = 0x43434D50;
-inline constexpr uint16_t Version = 5;
+inline constexpr uint16_t Version = 6;
 inline constexpr size_t MaxPlayers = 4;
 inline constexpr size_t InputCount = 64;
 inline constexpr uint16_t ChunkBytes = 1100, ParityGroup = 8;
@@ -73,6 +73,12 @@ struct Input {
 	uint8_t Device = 1;
 	std::array<uint16_t, 3> MousePresses{}, MouseReleases{};
 	float AimX = 0, AimY = 0, MoveX = 0, MoveY = 0;
+	// Client-owned presentation coordinates. The host uses these for capture
+	// and cursor actions, never to correct the client's view.
+	bool ViewValid = false, CursorValid = false, PointerValid = false;
+	uint8_t CursorMode = 0;
+	float ViewX = 0, ViewY = 0, CursorX = 0, CursorY = 0;
+	float PointerX = 0, PointerY = 0;
 };
 inline void WriteInput(Writer& writer, const Input& input) {
 	writer.U32(input.Sequence); writer.U32(input.MouseX); writer.U32(input.MouseY); writer.U32(input.Wheel); writer.U64(input.Held);
@@ -83,6 +89,9 @@ inline void WriteInput(Writer& writer, const Input& input) {
 	for (auto value: input.MousePresses) writer.U16(value);
 	for (auto value: input.MouseReleases) writer.U16(value);
 	writer.F32(input.AimX); writer.F32(input.AimY); writer.F32(input.MoveX); writer.F32(input.MoveY);
+	writer.U8(input.ViewValid); writer.U8(input.CursorValid); writer.U8(input.PointerValid); writer.U8(input.CursorMode);
+	writer.F32(input.ViewX); writer.F32(input.ViewY); writer.F32(input.CursorX); writer.F32(input.CursorY);
+	writer.F32(input.PointerX); writer.F32(input.PointerY);
 }
 inline bool ReadInput(Reader& reader, Input& input) {
 	if (!reader.U32(input.Sequence) || !reader.U32(input.MouseX) || !reader.U32(input.MouseY) || !reader.U32(input.Wheel) || !reader.U64(input.Held)) return false;
@@ -92,7 +101,12 @@ inline bool ReadInput(Reader& reader, Input& input) {
 	if (!reader.U8(input.Device) || input.Device > 5) return false;
 	for (auto& value: input.MousePresses) if (!reader.U16(value)) return false;
 	for (auto& value: input.MouseReleases) if (!reader.U16(value)) return false;
-	return reader.F32(input.AimX) && reader.F32(input.AimY) && reader.F32(input.MoveX) && reader.F32(input.MoveY) && std::abs(input.AimX) <= 1.01f && std::abs(input.AimY) <= 1.01f && std::abs(input.MoveX) <= 1.01f && std::abs(input.MoveY) <= 1.01f && reader.Done();
+	if (!reader.F32(input.AimX) || !reader.F32(input.AimY) || !reader.F32(input.MoveX) || !reader.F32(input.MoveY) || std::abs(input.AimX) > 1.01f || std::abs(input.AimY) > 1.01f || std::abs(input.MoveX) > 1.01f || std::abs(input.MoveY) > 1.01f) return false;
+	uint8_t view, cursor, pointer;
+	if (!reader.U8(view) || view > 1 || !reader.U8(cursor) || cursor > 1 || !reader.U8(pointer) || pointer > 1 || !reader.U8(input.CursorMode) || input.CursorMode > 20) return false;
+	input.ViewValid = view; input.CursorValid = cursor; input.PointerValid = pointer;
+	for (float* value : {&input.ViewX, &input.ViewY, &input.CursorX, &input.CursorY, &input.PointerX, &input.PointerY}) if (!reader.F32(*value) || std::abs(*value) > 1000000) return false;
+	return reader.Done();
 }
 
 struct InputState {
@@ -132,6 +146,7 @@ public:
 		m_State.Released |= m_State.Snapshot.Held; m_State.MouseReleased |= m_State.Snapshot.MouseHeld;
 		m_State.Snapshot.Held = 0; m_State.Snapshot.MouseHeld = 0;
 		m_State.Snapshot.AimX = m_State.Snapshot.AimY = m_State.Snapshot.MoveX = m_State.Snapshot.MoveY = 0;
+		m_State.Snapshot.ViewValid = m_State.Snapshot.CursorValid = m_State.Snapshot.PointerValid = false;
 	}
 	void Reset() { *this = InputReceiver(); }
 	uint32_t LastSequence() const { return m_State.Snapshot.Sequence; }

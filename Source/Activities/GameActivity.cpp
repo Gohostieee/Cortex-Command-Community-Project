@@ -1190,7 +1190,9 @@ void GameActivity::Update() {
 			// If we're observing game over state, freeze the view for a bit so the player's input doesn't ruin the focus
 			if (!(m_ActivityState == ActivityState::Over && !m_GameOverTimer.IsPastRealMS(1000))) {
 				// Get cursor input
-				m_PlayerController[player].RelativeCursorMovement(m_ObservationTarget[player], 1.2f);
+				float x, y;
+				if (g_MultiplayerMan.GuestCursor(player, ViewState::Observe, x, y)) m_ObservationTarget[player].SetXY(x, y);
+				else m_PlayerController[player].RelativeCursorMovement(m_ObservationTarget[player], 1.2f);
 			}
 			// Set the view to the observation position
 			g_SceneMan.ForceBounds(m_ObservationTarget[player]);
@@ -1204,7 +1206,9 @@ void GameActivity::Update() {
 			// Continuously display message
 			g_FrameMan.SetScreenText("Select a body to switch control to...", ScreenOfPlayer(player));
 			// Get cursor input
-			m_PlayerController[player].RelativeCursorMovement(m_ActorCursor[player]);
+			float x, y;
+			if (g_MultiplayerMan.GuestCursor(player, ViewState::ActorSelect, x, y)) m_ActorCursor[player].SetXY(x, y);
+			else m_PlayerController[player].RelativeCursorMovement(m_ActorCursor[player]);
 
 			// Find the actor closest to the cursor, if any within the radius
 			Vector markedDistance;
@@ -1281,7 +1285,9 @@ void GameActivity::Update() {
 			// Continuously display message
 			g_FrameMan.SetScreenText("Set waypoints for the AI to go to...", ScreenOfPlayer(player));
 			// Get cursor input
-			m_PlayerController[player].RelativeCursorMovement(m_ActorCursor[player]);
+			float x, y;
+			if (g_MultiplayerMan.GuestCursor(player, ViewState::AIGoToPoint, x, y)) m_ActorCursor[player].SetXY(x, y);
+			else m_PlayerController[player].RelativeCursorMovement(m_ActorCursor[player]);
 
 			// If we are pointing to an actor to follow, then snap cursor to that actor's position
 			Actor* pTargetActor = 0;

@@ -31,6 +31,8 @@ public:
     bool Install(MP::World::Snapshot snapshot, uint64_t time);
     std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
     std::vector<uint64_t> PrepareScene();
+    MP::World::SceneMap PrepareSceneMap(int width, int height);
+    void InstallSceneMap(const MP::World::SceneMap& map);
     void PrimeSceneBackdrops(const Scene& scene);
     void PinScene(const std::unordered_set<uint64_t>& assets);
     unsigned Render(uint64_t time);
@@ -44,10 +46,11 @@ public:
     uint64_t IntermediateFrames() const;
     bool VerifyPresentation(std::ostream& log);
     void SetLocalInput(const MP::Input& input, bool enabled);
+    void ExportLocalView(MP::Input& input, bool enabled) const;
     static void BeginAim(const Actor& actor, int screen);
     static void BeginRadialCursor();
     static void BeginRadialBackground();
-    static void BeginPointer();
+    static void BeginPointer(float x, float y);
     static void BeginWorldCursor();
     static void EndInteraction();
     static void Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& position, const Vector& pivot, float angle, float scale, bool flip, bool white = false, uint8_t alpha = 255);

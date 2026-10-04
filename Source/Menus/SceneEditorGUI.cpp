@@ -1,4 +1,5 @@
 #include "SceneEditorGUI.h"
+#include "MultiplayerMan.h"
 
 #include "CameraMan.h"
 #include "FrameMan.h"
@@ -359,6 +360,19 @@ void SceneEditorGUI::Update() {
 	Vector analogInput;
 	if (m_pController->GetAnalogMove().MagnitudeIsGreaterThan(0.1F))
 		analogInput = m_pController->GetAnalogMove();
+	float guestX, guestY;
+	const bool localCursor = g_MultiplayerMan.GuestCursor(m_pController->GetPlayer(), 10 + m_EditorGUIMode, guestX, guestY);
+	if (localCursor) {
+		const Vector position(guestX, guestY);
+		const Vector movement = g_SceneMan.ShortestDistance(m_CursorPos, position);
+		if (!(m_EditorGUIMode == PLACINGOBJECT && m_pController->IsState(PRIMARY_ACTION) && m_GridSnapping)) {
+			m_CursorPos = position;
+			if (m_EditorGUIMode == PLACINGOBJECT && movement.m_X != 0) m_FacingLeft = movement.m_X < 0;
+			else if ((m_EditorGUIMode == ADDINGOBJECT || m_EditorGUIMode == INSTALLINGBRAIN) && !movement.IsZero()) m_GridSnapping = true;
+		}
+		analogInput.Reset();
+		pressUp = pressRight = pressDown = pressLeft = false;
+	}
 	//    else if (m_pController->GetAnalogAim().MagnitudeIsGreaterThan(0.1F))
 	//        analogInput = m_pController->GetAnalogAim();
 
@@ -480,7 +494,7 @@ void SceneEditorGUI::Update() {
 			m_CursorPos += analogInput * 8;
 			// Re-enable snapping only when the cursor is moved again
 			m_GridSnapping = true;
-		} else if (!m_pController->GetMouseMovement().IsZero()) {
+		} else if (!localCursor && !m_pController->GetMouseMovement().IsZero()) {
 			m_CursorPos += m_pController->GetMouseMovement();
 			// Re-enable snapping only when the cursor is moved again
 			m_GridSnapping = true;
@@ -587,7 +601,7 @@ void SceneEditorGUI::Update() {
 			m_CursorPos += analogInput * 8;
 			// Re-enable snapping only when the cursor is moved again
 			m_GridSnapping = true;
-		} else if (!m_pController->GetMouseMovement().IsZero()) {
+		} else if (!localCursor && !m_pController->GetMouseMovement().IsZero()) {
 			m_CursorPos += m_pController->GetMouseMovement();
 			// Re-enable snapping only when the cursor is moved again
 			m_GridSnapping = true;
@@ -695,7 +709,7 @@ void SceneEditorGUI::Update() {
 				m_FacingLeft = analogInput.m_X < 0 || (m_FacingLeft && analogInput.m_X == 0);
 			}
 			// Try the mouse
-			else if (!m_pController->GetMouseMovement().IsZero()) {
+			else if (!localCursor && !m_pController->GetMouseMovement().IsZero()) {
 				m_CursorPos += m_pController->GetMouseMovement();
 				m_FacingLeft = m_pController->GetMouseMovement().m_X < 0 || (m_FacingLeft && m_pController->GetMouseMovement().m_X == 0);
 			}
@@ -1037,7 +1051,7 @@ void SceneEditorGUI::Update() {
 		// Move the cursor according to analog or mouse input
 		if (!analogInput.IsZero())
 			m_CursorPos += analogInput * 4;
-		else if (!m_pController->GetMouseMovement().IsZero())
+		else if (!localCursor && !m_pController->GetMouseMovement().IsZero())
 			m_CursorPos += m_pController->GetMouseMovement() / 2;
 		// Digital input?
 		else {

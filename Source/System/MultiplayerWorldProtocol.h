@@ -1,7 +1,9 @@
 #pragma once
 
 #include "MultiplayerProtocol.h"
+#include "Constants.h"
 #include <deque>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -61,11 +63,12 @@ inline void BoundSnapshot(Snapshot& snapshot) {
     if (snapshot.Nodes.size() <= MaxNodes && bytes <= MaxPayload) return;
     std::vector<bool> keep(snapshot.Nodes.size()); size_t count = 0; bytes = 256;
     auto priority = [](const Node& node) {
-        if (node.Flags & (ScreenSpace | Layer)) return 0;
-        if (node.Type == Shape::Sprite && !(node.Flags & Discontinuous)) return 1;
-        return node.Type == Shape::PixelPath || (node.Flags & Discontinuous) ? 3 : 2;
+        if ((node.Flags & Layer) && ((node.ID >> 48) & 0x3fff) == 102) return 0;
+        if (node.Flags & (ScreenSpace | Layer)) return 1;
+        if (node.Type == Shape::Sprite && !(node.Flags & Discontinuous)) return 2;
+        return node.Type == Shape::PixelPath || (node.Flags & Discontinuous) ? 4 : 3;
     };
-    for (int pass = 0; pass < 4; ++pass) for (size_t i = 0; i < snapshot.Nodes.size(); ++i) {
+    for (int pass = 0; pass < 5; ++pass) for (size_t i = 0; i < snapshot.Nodes.size(); ++i) {
         const auto& node = snapshot.Nodes[i]; const size_t size = NodeBytes(node);
         if (priority(node) != pass || count == MaxNodes || bytes + size > MaxPayload) continue;
         keep[i] = true; ++count; bytes += size;
@@ -156,13 +159,83 @@ inline bool ReadResource(Reader& reader, Resource& r) {
     r.Pixels.assign(reader.Rest().begin(), reader.Rest().end());
     return ResourceHash(r) == r.ID;
 }
-inline void WriteManifest(Writer& writer, std::span<const uint64_t> assets) {
-    writer.U32(uint32_t(assets.size())); for (auto id : assets) writer.U64(id);
+struct SceneMap {
+    float CameraX = 0, CameraY = 0;
+    std::vector<Node> Nodes;
+};
+inline std::vector<uint64_t> ManifestResources(std::span<const uint64_t> baseline, const SceneMap& map) {
+    std::vector<uint64_t> assets(baseline.begin(), baseline.end());
+    std::unordered_set<uint64_t> known(baseline.begin(), baseline.end());
+    for (const auto& node : map.Nodes) if (node.Asset && known.insert(node.Asset).second) assets.push_back(node.Asset);
+    return assets;
 }
-inline bool ReadManifest(Reader& reader, std::unordered_set<uint64_t>& assets) {
-    uint32_t count; if (!reader.U32(count) || count > MaxPayload / 8 || reader.Remaining() != uint64_t(count) * 8) return false;
+inline unsigned LayerOrdinal(const Node& node) {
+    if (!(node.Flags & Layer)) return 0;
+    return node.ID & (uint64_t(1) << 62) ? unsigned((node.ID >> 48) & 0x3fff) :
+        node.ID & (uint64_t(1) << 61) ? unsigned((node.ID >> 32) & 0xffff) : 0;
+}
+// The baseline supplies the entire passive map. Pose snapshots update only
+// nearby mutable tiles; travelling farther never discards already known tiles.
+class RetainedLayers {
+public:
+    void Reset() { m_Nodes.clear(); }
+    void Install(const SceneMap& map) { Reset(); for (const auto& n : map.Nodes) Store(n, map.CameraX, map.CameraY); }
+    void Update(const Snapshot& snapshot) { for (const auto& n : snapshot.Nodes) Store(n, snapshot.CameraX, snapshot.CameraY); }
+    std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> assets; for (const auto& [id, n] : m_Nodes) if (n.Asset) assets.insert(n.Asset); return assets; }
+    void Compose(Snapshot& snapshot) const {
+        if (m_Nodes.empty()) return;
+        std::vector<Node> nodes; nodes.reserve(m_Nodes.size() + snapshot.Nodes.size());
+        auto append = [&](bool foreground) {
+            for (const auto& [id, source] : m_Nodes) if ((LayerOrdinal(source) == 101) == foreground) {
+                auto n = source; n.X -= snapshot.CameraX * n.X3; n.Y -= snapshot.CameraY * n.Y3;
+                if (n.Type == Shape::Sprite) {
+                    const auto near = [](float value, float extent, float span, int viewport) {
+                        if (span > 0) { float d = std::fmod(value + extent / 2 - viewport / 2, span); if (d > span / 2) d -= span; if (d < -span / 2) d += span; value = viewport / 2 + d - extent / 2; }
+                        return value <= viewport && value + extent >= 0;
+                    };
+                    if (!near(n.X, n.Width, n.X2, snapshot.Width) || !near(n.Y, n.Height, n.Y2, snapshot.Height)) continue;
+                }
+                nodes.push_back(std::move(n));
+            }
+        };
+        append(false); bool foreground = false;
+        for (auto& n : snapshot.Nodes) {
+            const unsigned ordinal = LayerOrdinal(n);
+            if (ordinal && ordinal <= 101) continue;
+            if (!foreground && ((n.Flags & ScreenSpace) || (n.Flags & Additive))) { append(true); foreground = true; }
+            nodes.push_back(std::move(n));
+        }
+        if (!foreground) append(true);
+        snapshot.Nodes = std::move(nodes);
+    }
+private:
+    void Store(Node n, float cameraX, float cameraY) {
+        const unsigned ordinal = LayerOrdinal(n); if (!ordinal || ordinal > 101) return;
+        n.X += cameraX * n.X3; n.Y += cameraY * n.Y3;
+        m_Nodes[n.ID] = std::move(n);
+    }
+    struct Order {
+        bool operator()(uint64_t a, uint64_t b) const {
+            const auto ordinal = [](uint64_t id) { return id & (uint64_t(1) << 62) ? (id >> 48) & 0x3fff : (id >> 32) & 0xffff; };
+            return ordinal(a) != ordinal(b) ? ordinal(a) < ordinal(b) : a < b;
+        }
+    };
+    std::map<uint64_t, Node, Order> m_Nodes;
+};
+inline void WriteManifest(Writer& writer, std::span<const uint64_t> assets, const SceneMap& map = {}) {
+    writer.U32(uint32_t(assets.size())); for (auto id : assets) writer.U64(id);
+    writer.F32(map.CameraX); writer.F32(map.CameraY); writer.U32(uint32_t(map.Nodes.size()));
+    for (const auto& node : map.Nodes) WriteNode(writer, node);
+}
+inline bool ReadManifest(Reader& reader, std::unordered_set<uint64_t>& assets, SceneMap* output = nullptr) {
+    uint32_t count; if (!reader.U32(count) || count > MaxPayload / 8 || reader.Remaining() < uint64_t(count) * 8 + 12) return false;
     assets.clear();
     for (uint32_t i = 0; i < count; ++i) { uint64_t id; if (!reader.U64(id) || !id || !assets.insert(id).second) return false; }
+    SceneMap map;
+    if (!reader.F32(map.CameraX) || !reader.F32(map.CameraY) || !Coordinate(map.CameraX) || !Coordinate(map.CameraY) || !reader.U32(count) || count > MaxNodes || count > reader.Remaining() / 117) return false;
+    map.Nodes.resize(count); std::unordered_set<uint64_t> ids;
+    for (auto& node : map.Nodes) if (!ReadNode(reader, node) || !(node.Flags & Layer) || !ids.insert(node.ID).second || (node.Asset && !assets.contains(node.Asset))) return false;
+    if (output) *output = std::move(map);
     return reader.Done();
 }
 
@@ -266,7 +339,7 @@ inline float Blend(float from, float to, float alpha, float span = 0, bool wrap 
 // Predict presentation only. The host remains responsible for projectile hits,
 // terrain, actor movement, inventory, scripts and AI.
 inline void PredictLocalView(Snapshot& sampled, const Snapshot& latest, float aimX, float aimY, bool radial) {
-    if (latest.ViewMode != 0 && !radial) return;
+    if ((latest.ViewMode != 0 || sampled.ViewMode != 0) && !radial) return;
     if (!latest.ControlledActor || aimX * aimX + aimY * aimY < 0.01f) return;
     auto delta = [&](const Snapshot& state) {
         return state.AimX * state.AimX + state.AimY * state.AimY >= 0.01f ?
@@ -280,61 +353,129 @@ inline void PredictLocalView(Snapshot& sampled, const Snapshot& latest, float ai
         if (n.Type == Shape::Line || n.Type == Shape::Triangle || n.Type == Shape::Spline) { rotate(n.X2, n.Y2); rotate(n.X3, n.Y3); }
         if (n.Type == Shape::Spline) rotate(n.Width, n.Height);
     }
-    if (radial || latest.ViewMode != 0 || sampled.ViewMode != 0 || sampled.ControlledActor != latest.ControlledActor || latest.LookX * latest.LookX + latest.LookY * latest.LookY == 0) return;
-    const float angle = delta(sampled), cc = std::cos(angle), ss = std::sin(angle);
-    float dx = sampled.LookX * cc - sampled.LookY * ss - sampled.LookX;
-    float dy = sampled.LookX * ss + sampled.LookY * cc - sampled.LookY;
-    const float length = std::hypot(dx, dy); if (length > 96) { dx *= 96 / length; dy *= 96 / length; }
-    const float previousX = sampled.CameraX, previousY = sampled.CameraY;
-    sampled.CameraX += dx; sampled.CameraY += dy;
-    if (!(sampled.Wrap & 1)) sampled.CameraX = std::clamp(sampled.CameraX, 0.0f, float(std::max(0, int(sampled.SceneWidth) - int(sampled.Width))));
-    if (!(sampled.Wrap & 2)) sampled.CameraY = std::clamp(sampled.CameraY, 0.0f, float(std::max(0, int(sampled.SceneHeight) - int(sampled.Height))));
-    dx = sampled.CameraX - previousX; dy = sampled.CameraY - previousY;
-    for (auto& n : sampled.Nodes) if ((n.Flags & Layer) && (n.Flags & ScreenSpace)) { n.X -= dx * n.X3; n.Y -= dy * n.Y3; }
 }
-inline void PredictLocalPointer(Snapshot& sampled, const Snapshot& latest, uint32_t mouseX, uint32_t mouseY) {
-    const float dx = float(std::clamp(std::bit_cast<int32_t>(mouseX - latest.MouseX), -2048, 2048));
-    const float dy = float(std::clamp(std::bit_cast<int32_t>(mouseY - latest.MouseY), -2048, 2048));
-    for (auto& n : sampled.Nodes) if (n.Control == Interaction::Pointer && (n.Flags & ScreenSpace)) {
-        n.X = std::clamp(n.X + dx, -1.0f, float(sampled.Width - 2)); n.Y = std::clamp(n.Y + dy, -1.0f, float(sampled.Height - 2));
-    }
+inline void Translate(Node& n, float dx, float dy) {
+    n.X += dx; n.Y += dy;
+    if (n.Type == Shape::Line || n.Type == Shape::Triangle || n.Type == Shape::Spline) { n.X2 += dx; n.Y2 += dy; n.X3 += dx; n.Y3 += dy; }
+    if (n.Type == Shape::Spline) { n.Width += dx; n.Height += dy; }
 }
-// Persistent camera integration prevents a mouse ACK from withdrawing a visual
-// offset while the native camera is still easing towards that same target.
-class LocalCamera {
+class LocalPointer {
 public:
-    void Reset() { m_Time = 0; }
-    void Apply(Snapshot& sampled, const Snapshot& latest, const Input& input, uint64_t now) {
-        if (latest.MouseScale <= 0 || input.Device != 1) { Reset(); return; }
-        if (!m_Time || m_Mode != latest.ViewMode || now - m_Time > 250) { m_X = latest.CameraX; m_Y = latest.CameraY; m_Time = now > 16 ? now - 16 : now; m_Mode = latest.ViewMode; }
-        const float pendingX = float(std::clamp(std::bit_cast<int32_t>(input.MouseX - latest.MouseX), -2048, 2048)) * latest.MouseScale;
-        const float pendingY = float(std::clamp(std::bit_cast<int32_t>(input.MouseY - latest.MouseY), -2048, 2048)) * latest.MouseScale;
-        const float progress = std::min(1.0f, latest.ScrollSpeed * std::min<uint64_t>(now - m_Time, 50) * .05f);
-        m_Time = now;
-        m_X += Displacement(m_X, latest.CameraTargetX + pendingX, latest.SceneWidth, latest.Wrap & 1) * progress;
-        m_Y += Displacement(m_Y, latest.CameraTargetY + pendingY, latest.SceneHeight, latest.Wrap & 2) * progress;
-        const float oldX = sampled.CameraX, oldY = sampled.CameraY;
-        float dx = Displacement(oldX, m_X, sampled.SceneWidth, sampled.Wrap & 1), dy = Displacement(oldY, m_Y, sampled.SceneHeight, sampled.Wrap & 2);
-        const float distance = std::hypot(dx, dy); if (distance > 96) { dx *= 96 / distance; dy *= 96 / distance; }
-        sampled.CameraX += dx; sampled.CameraY += dy;
-        if (!(sampled.Wrap & 1)) sampled.CameraX = std::clamp(sampled.CameraX, 0.0f, float(std::max(0, int(sampled.SceneWidth) - int(sampled.Width))));
-        if (!(sampled.Wrap & 2)) sampled.CameraY = std::clamp(sampled.CameraY, 0.0f, float(std::max(0, int(sampled.SceneHeight) - int(sampled.Height))));
-        dx = Displacement(oldX, sampled.CameraX, sampled.SceneWidth, sampled.Wrap & 1); dy = Displacement(oldY, sampled.CameraY, sampled.SceneHeight, sampled.Wrap & 2);
-        for (auto& n : sampled.Nodes) {
-            if ((n.Flags & Layer) && (n.Flags & ScreenSpace)) { n.X -= dx * n.X3; n.Y -= dy * n.Y3; }
-            if (n.Control == Interaction::WorldOverlay && (n.Flags & ScreenSpace)) { n.X -= Displacement(latest.CameraX, sampled.CameraX, sampled.SceneWidth, sampled.Wrap & 1); n.Y -= Displacement(latest.CameraY, sampled.CameraY, sampled.SceneHeight, sampled.Wrap & 2); }
-            if (n.Control == Interaction::WorldCursor && (n.Flags & ScreenSpace)) {
-                const float cx = pendingX - Displacement(latest.CameraX, sampled.CameraX, sampled.SceneWidth, sampled.Wrap & 1);
-                const float cy = pendingY - Displacement(latest.CameraY, sampled.CameraY, sampled.SceneHeight, sampled.Wrap & 2);
-                n.X += cx; n.Y += cy;
-                if (n.Type == Shape::Line || n.Type == Shape::Triangle || n.Type == Shape::Spline) { n.X2 += cx; n.Y2 += cy; n.X3 += cx; n.Y3 += cy; }
-            }
+    void Reset() { *this = LocalPointer(); }
+    void Export(Input& input, bool enabled) const { input.PointerValid = m_Ready && enabled; input.PointerX = m_X; input.PointerY = m_Y; }
+    void Apply(Snapshot& sampled, const Snapshot& latest, const Input& input, bool enabled) {
+        const Node* pointer = nullptr;
+        for (const auto& n : latest.Nodes) if (n.Control == Interaction::Pointer && (n.Flags & ScreenSpace)) { pointer = &n; break; }
+        if (!pointer) { m_Ready = false; return; }
+        if (!m_Ready || m_Mode != latest.ViewMode) {
+            m_X = pointer->X2; m_Y = pointer->Y2; m_MouseX = latest.MouseX; m_MouseY = latest.MouseY; m_Mode = latest.ViewMode; m_Ready = true;
         }
+        if (enabled) {
+            m_X = std::clamp(m_X + float(std::clamp(std::bit_cast<int32_t>(input.MouseX - m_MouseX), -2048, 2048)), 0.0f, float(sampled.Width - 1));
+            m_Y = std::clamp(m_Y + float(std::clamp(std::bit_cast<int32_t>(input.MouseY - m_MouseY), -2048, 2048)), 0.0f, float(sampled.Height - 1));
+        }
+        m_MouseX = input.MouseX; m_MouseY = input.MouseY;
+        for (auto& n : sampled.Nodes) if (n.Control == Interaction::Pointer && (n.Flags & ScreenSpace)) Translate(n, m_X - pointer->X2, m_Y - pointer->Y2);
     }
 private:
-    uint64_t m_Time = 0;
+    bool m_Ready = false;
     uint8_t m_Mode = 0;
+    uint32_t m_MouseX = 0, m_MouseY = 0;
     float m_X = 0, m_Y = 0;
+};
+// The native snapshot seeds a new view mode once. Subsequent mouse motion and
+// easing belong to the guest; host camera coordinates and ACKs cannot rebase it.
+class LocalCamera {
+public:
+    void Reset() { *this = LocalCamera(); }
+    void Apply(Snapshot& sampled, const Snapshot& latest, const Input& input, uint64_t now, bool enabled = true) {
+        const bool first = !m_Time;
+        const bool pointer = std::any_of(latest.Nodes.begin(), latest.Nodes.end(), [](const Node& n) { return n.Control == Interaction::Pointer; });
+        const bool selecting = enabled && !pointer && (input.Held & ((uint64_t(1) << INPUT_NEXT) | (uint64_t(1) << INPUT_PREV)));
+        if (selecting && !m_SelectTime) m_SelectTime = now;
+        if (!selecting) m_SelectTime = 0;
+        uint8_t mode = latest.ViewMode;
+        if (latest.ViewMode == 3) m_HostSelectionSeen = true;
+        if (latest.ViewMode == 0 && m_HostSelectionSeen) { m_SelectionEnded = false; m_HostSelectionSeen = false; }
+        if (latest.ViewMode == 0 && m_SelectTime && now - m_SelectTime >= 250) mode = 3;
+        if (m_Mode == 3 && m_WasSelecting && !selecting) m_SelectionEnded = true;
+        if (m_SelectionEnded && mode == 3) mode = 0;
+        m_WasSelecting = selecting;
+        if (first) { m_X = latest.CameraX; m_Y = latest.CameraY; m_MouseX = latest.MouseX; m_MouseY = latest.MouseY; }
+        if (first || m_Mode != mode) {
+            m_Mode = mode; m_TargetX = latest.CameraTargetX; m_TargetY = latest.CameraTargetY;
+            if (mode == 3 && latest.ViewMode != 3) for (const auto& n : sampled.Nodes) if (n.ID == latest.ControlledActor) { m_TargetX = n.X - sampled.Width / 2; m_TargetY = n.Y - sampled.Height / 2; break; }
+            m_CursorX = m_TargetX + sampled.Width / 2; m_CursorY = m_TargetY + sampled.Height / 2;
+            for (const auto& n : latest.Nodes) if (n.Control == Interaction::WorldCursor) { m_CursorX = latest.CameraX + n.X; m_CursorY = latest.CameraY + n.Y; break; }
+            if (!first) { m_MouseX = input.MouseX; m_MouseY = input.MouseY; }
+        }
+        const float dxInput = enabled ? float(std::clamp(std::bit_cast<int32_t>(input.MouseX - m_MouseX), -2048, 2048)) : 0;
+        const float dyInput = enabled ? float(std::clamp(std::bit_cast<int32_t>(input.MouseY - m_MouseY), -2048, 2048)) : 0;
+        m_MouseX = input.MouseX; m_MouseY = input.MouseY;
+        const float elapsed = first ? 16.0f : float(std::min<uint64_t>(now - m_Time, 50)); m_Time = now;
+        const float mouseScale = mode == 3 ? 1.0f : latest.MouseScale;
+        if (enabled && mouseScale > 0 && mode != 0) {
+            float dx = dxInput * mouseScale, dy = dyInput * mouseScale;
+            if (!dx && !dy) {
+                const auto held = [&](unsigned bit) { return bool(input.Held & (uint64_t(1) << bit)); };
+                const float vx = input.Device == DEVICE_MOUSE_KEYB ? float(held(INPUT_L_RIGHT)) - float(held(INPUT_L_LEFT)) : input.MoveX;
+                const float vy = input.Device == DEVICE_MOUSE_KEYB ? float(held(INPUT_L_DOWN)) - float(held(INPUT_L_UP)) : input.MoveY;
+                dx = vx * elapsed * .6f * mouseScale; dy = vy * elapsed * .6f * mouseScale;
+            }
+            m_CursorX += dx; m_CursorY += dy; m_TargetX += dx; m_TargetY += dy;
+            Bound(m_CursorX, sampled.SceneWidth, sampled.Wrap & 1, 0); Bound(m_CursorY, sampled.SceneHeight, sampled.Wrap & 2, 0);
+            // Preserve the native cursor-to-camera offset at world edges.
+            m_TargetX = m_CursorX - sampled.Width / 2; m_TargetY = m_CursorY - sampled.Height / 2;
+        } else if (mode == 0 && latest.ControlledActor) {
+            for (const auto& n : sampled.Nodes) if (n.ID == latest.ControlledActor) {
+                float lx = latest.LookX, ly = latest.LookY;
+                if (input.AimX * input.AimX + input.AimY * input.AimY >= .01f && latest.AimX * latest.AimX + latest.AimY * latest.AimY >= .01f) {
+                    const float angle = std::atan2(input.AimY, input.AimX) - std::atan2(latest.AimY, latest.AimX);
+                    lx = latest.LookX * std::cos(angle) - latest.LookY * std::sin(angle); ly = latest.LookX * std::sin(angle) + latest.LookY * std::cos(angle);
+                }
+                m_TargetX = n.X + lx - sampled.Width / 2; m_TargetY = n.Y + ly - sampled.Height / 2; break;
+            }
+        } else if (mouseScale <= 0 && mode != 0) {
+            // Death watches and scripted transitions still choose their target.
+            m_TargetX = latest.CameraTargetX; m_TargetY = latest.CameraTargetY;
+        }
+        if (enabled) {
+            const float progress = std::min(1.0f, latest.ScrollSpeed * elapsed * .05f);
+            m_X += Displacement(m_X, m_TargetX, latest.SceneWidth, latest.Wrap & 1) * progress;
+            m_Y += Displacement(m_Y, m_TargetY, latest.SceneHeight, latest.Wrap & 2) * progress;
+            Bound(m_X, sampled.SceneWidth, sampled.Wrap & 1, sampled.Width); Bound(m_Y, sampled.SceneHeight, sampled.Wrap & 2, sampled.Height);
+        }
+        const float oldX = sampled.CameraX, oldY = sampled.CameraY;
+        sampled.CameraX = m_X; sampled.CameraY = m_Y;
+        sampled.ViewMode = mode;
+        const float dx = Displacement(oldX, m_X, sampled.SceneWidth, sampled.Wrap & 1), dy = Displacement(oldY, m_Y, sampled.SceneHeight, sampled.Wrap & 2);
+        const Node* cursor = nullptr; for (const auto& n : latest.Nodes) if (n.Control == Interaction::WorldCursor) { cursor = &n; break; }
+        for (auto& n : sampled.Nodes) {
+            if ((n.Flags & Layer) && (n.Flags & ScreenSpace)) { n.X -= dx * n.X3; n.Y -= dy * n.Y3; }
+            if (n.Control == Interaction::WorldOverlay && (n.Flags & ScreenSpace)) Translate(n,
+                Displacement(latest.CameraTargetX + sampled.Width / 2, m_CursorX, sampled.SceneWidth, sampled.Wrap & 1) - Displacement(latest.CameraX, m_X, sampled.SceneWidth, sampled.Wrap & 1),
+                Displacement(latest.CameraTargetY + sampled.Height / 2, m_CursorY, sampled.SceneHeight, sampled.Wrap & 2) - Displacement(latest.CameraY, m_Y, sampled.SceneHeight, sampled.Wrap & 2));
+            if (cursor && n.Control == Interaction::WorldCursor && (n.Flags & ScreenSpace)) Translate(n,
+                sampled.Width / 2 + Displacement(m_X + sampled.Width / 2, m_CursorX, sampled.SceneWidth, sampled.Wrap & 1) - cursor->X,
+                sampled.Height / 2 + Displacement(m_Y + sampled.Height / 2, m_CursorY, sampled.SceneHeight, sampled.Wrap & 2) - cursor->Y);
+        }
+    }
+    void Export(Input& input, bool enabled) const {
+        input.ViewValid = m_Time && enabled; input.ViewX = m_X; input.ViewY = m_Y;
+        input.CursorValid = input.ViewValid && (m_Mode == 1 || m_Mode == 3 || m_Mode == 7 || (m_Mode >= 12 && m_Mode <= 18));
+        input.CursorMode = m_Mode; input.CursorX = m_CursorX; input.CursorY = m_CursorY;
+    }
+private:
+    static void Bound(float& value, float span, bool wrap, int viewport) {
+        if (wrap) { value = std::fmod(value, span); if (value < 0) value += span; }
+        else value = std::clamp(value, 0.0f, std::max(0.0f, span - viewport));
+    }
+    uint64_t m_Time = 0;
+    uint64_t m_SelectTime = 0;
+    bool m_WasSelecting = false, m_SelectionEnded = false, m_HostSelectionSeen = false;
+    uint8_t m_Mode = 0;
+    uint32_t m_MouseX = 0, m_MouseY = 0;
+    float m_X = 0, m_Y = 0, m_TargetX = 0, m_TargetY = 0, m_CursorX = 0, m_CursorY = 0;
 };
 class Timeline {
 public:

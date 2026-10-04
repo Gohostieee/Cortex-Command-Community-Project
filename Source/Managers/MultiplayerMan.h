@@ -34,6 +34,9 @@ public:
 	int ViewWidth(int screen) const;
 	int ViewHeight(int screen) const;
 	bool WantsState(int player) const;
+	bool GuestView(int player, float& x, float& y) const;
+	bool GuestCursor(int player, int mode, float& x, float& y) const;
+	bool GuestPointer(int player, float& x, float& y) const;
 	void BeginWorldCapture();
 	void BeginWorldTrails();
 	void EndWorldCapture();

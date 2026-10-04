@@ -14,6 +14,7 @@
 #include "PresetMan.h"
 #include "Scene.h"
 #include "SceneMan.h"
+#include "SLTerrain.h"
 #include "SettingsMan.h"
 #include "SoundContainer.h"
 #include "SoundSet.h"
@@ -440,6 +441,21 @@ bool MultiplayerMan::WantsState(int player) const {
 	return peer.Connected && Now() - peer.LastWorld >= MP::World::SnapshotIntervalMS;
 }
 void MultiplayerMan::BeginWorldCapture() { if (IsHostingMatch() && !(m_Impl->SmokeNativeBaseline && m_Impl->SmokeStage == 3)) m_Impl->World.BeginObjects(); }
+bool MultiplayerMan::GuestView(int player, float& x, float& y) const {
+	if (!IsRemotePlayer(player)) return false;
+	const auto& input = m_Impl->Players[player].Inputs.LastInput(); if (!input.ViewValid) return false;
+	x = input.ViewX; y = input.ViewY; return true;
+}
+bool MultiplayerMan::GuestCursor(int player, int mode, float& x, float& y) const {
+	if (!IsRemotePlayer(player)) return false;
+	const auto& input = m_Impl->Players[player].Inputs.LastInput(); if (!input.CursorValid || input.CursorMode != mode) return false;
+	x = input.CursorX; y = input.CursorY; return true;
+}
+bool MultiplayerMan::GuestPointer(int player, float& x, float& y) const {
+	if (!IsRemotePlayer(player)) return false;
+	const auto& input = m_Impl->Players[player].Inputs.LastInput(); if (!input.PointerValid) return false;
+	x = input.PointerX; y = input.PointerY; return true;
+}
 void MultiplayerMan::BeginWorldTrails() { if (IsHostingMatch() && !(m_Impl->SmokeNativeBaseline && m_Impl->SmokeStage == 3)) m_Impl->World.BeginTrails(); }
 void MultiplayerMan::EndWorldCapture() { m_Impl->World.EndObjects(); }
 void MultiplayerMan::BeginGuestView(BITMAP* gui, float cameraX, float cameraY) { if (m_Impl->SmokeEncounter) m_Impl->SmokeCaptureStarted = NowMicros(); m_Impl->World.BeginView(gui, Vector(cameraX, cameraY)); }
@@ -453,8 +469,10 @@ void MultiplayerMan::EndGuestView(int player) {
 	snapshot.MouseX = peer.Inputs.LastInput().MouseX; snapshot.MouseY = peer.Inputs.LastInput().MouseY;
 	if (!peer.SceneSent) {
 		if (impl.SceneManifest.empty()) impl.SceneManifest = impl.World.PrepareScene();
-		MP::Writer manifest(Kind::WorldManifest); MP::World::WriteManifest(manifest, impl.SceneManifest);
-		if (impl.QueueWorld(peer, Kind::WorldManifest, manifest.Data, Delivery::WorldResource)) { peer.SceneSent = true; peer.SceneQueue = {impl.SceneManifest.begin(), impl.SceneManifest.end()}; }
+		const auto map = impl.World.PrepareSceneMap(snapshot.Width, snapshot.Height);
+		const auto assets = MP::World::ManifestResources(impl.SceneManifest, map);
+		MP::Writer manifest(Kind::WorldManifest); MP::World::WriteManifest(manifest, assets, map);
+		if (impl.QueueWorld(peer, Kind::WorldManifest, manifest.Data, Delivery::WorldResource)) { peer.SceneSent = true; peer.SceneQueue = {assets.begin(), assets.end()}; }
 	}
 	if (impl.SmokeCombatStress && impl.SmokeStage == 3 && std::any_of(snapshot.Nodes.begin(), snapshot.Nodes.end(), [&](const auto& node) { return node.Type == MP::World::Shape::Sprite && node.Parent == snapshot.ControlledActor && node.Control == MP::World::Interaction::RadialBackground; })) {
 		const auto held = peer.Inputs.LastInput().Held;
@@ -559,7 +577,8 @@ void MultiplayerMan::Impl::ReceiveWorld(Kind kind, MP::Reader& reader) {
 	if (LZ4_decompress_safe(reinterpret_cast<const char*>(packed.Rest().data()), reinterpret_cast<char*>(payload.data()), int(packed.Remaining()), int(size)) != int(size)) return;
 	MP::Reader data(payload); if (!ReadHeader(data, header) || header.Type != kind) return;
 	if (kind == Kind::WorldManifest) {
-		std::unordered_set<uint64_t> assets; if (!MP::World::ReadManifest(data, assets)) return;
+		std::unordered_set<uint64_t> assets; MP::World::SceneMap map; if (!MP::World::ReadManifest(data, assets, &map)) return;
+		World.InstallSceneMap(map);
 		World.PinScene(assets); SceneReceived = true; SceneReceivedAt = Now(); SceneMissing.clear();
 		if (const auto* scene = dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName))) World.PrimeSceneBackdrops(*scene);
 		SceneManifest.assign(assets.begin(), assets.end());
@@ -647,8 +666,11 @@ bool MultiplayerMan::Impl::VerifyWorldFlow(std::ostream& log) {
 	passed &= receive(snapshot);
 	const bool waiting = !World.Ready(); passed &= waiting;
 	auto scenery = resource; scenery.Pixels[0] ^= 1; scenery.ID = MP::World::ResourceHash(scenery);
-	std::vector<uint64_t> sceneAssets{resource.ID, scenery.ID};
-	MP::Writer manifest(Kind::WorldManifest); MP::World::WriteManifest(manifest, sceneAssets);
+	MP::World::SceneMap map;
+	auto tile = node; tile.ID = (uint64_t(1) << 62) | (uint64_t(100) << 48); tile.Flags = MP::World::Layer | MP::World::ScreenSpace; tile.Asset = scenery.ID;
+	map.Nodes = {tile};
+	const auto sceneAssets = MP::World::ManifestResources(std::vector<uint64_t>{resource.ID}, map);
+	MP::Writer manifest(Kind::WorldManifest); MP::World::WriteManifest(manifest, sceneAssets, map);
 	passed &= QueueWorld(sender, Kind::WorldManifest, manifest.Data, Delivery::WorldResource);
 	while (!sender.WorldPackets.empty()) { auto packet = std::move(sender.WorldPackets.front().first); sender.WorldPackets.pop_front(); MP::Reader reader(packet); Header header; passed &= ReadHeader(reader, header); ReceiveWorld(header.Type, reader); }
 	const bool waitingForMap = !World.Ready() && SceneMissing.contains(scenery.ID); passed &= waitingForMap;
@@ -657,6 +679,7 @@ bool MultiplayerMan::Impl::VerifyWorldFlow(std::ostream& log) {
 	while (!sender.WorldPackets.empty()) { auto packet = std::move(sender.WorldPackets.front().first); sender.WorldPackets.pop_front(); MP::Reader reader(packet); Header header; passed &= ReadHeader(reader, header); ReceiveWorld(header.Type, reader); }
 	const bool warmed = World.Ready() && SceneMissing.empty(); passed &= warmed;
 	log << (waiting && waitingForMap && warmed ? "OK: " : "FAIL: ") << "guest waits for the full terrain manifest and scenery before accepting controls\n";
+	log << (waitingForMap && warmed ? "OK: " : "FAIL: ") << "reconnect map includes changed terrain resources absent from the original manifest\n";
 	World.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear();
 	ResetSceneTransfer();
 	return passed;
@@ -793,6 +816,7 @@ void MultiplayerMan::Impl::SampleInput() {
 	}
 	if (Smoke && TextActive && !SmokeTextSent) { SmokeTextSent = true; MP::Writer writer(Kind::TextInput, Session, Epoch); writer.U8(0); writer.Text("Shop text test", 64); Net.Send(ServerAddress, writer.Data, Delivery::Control); }
 	if (Smoke && SmokeStage == 1 && TextActive) LocalInput.Held |= uint64_t(1) << (GUIKeyFirst + 1);
+	World.ExportLocalView(LocalInput, enabled);
 	if (Now() - LastInputSent >= 8) { ++LocalInput.Sequence; LastInputSent = Now(); MP::Writer writer(Kind::Input, Session, Epoch); WriteInput(writer, LocalInput); Net.Send(ServerAddress, writer.Data, Delivery::Input); }
 }
 
@@ -905,7 +929,20 @@ void MultiplayerMan::Impl::SmokeTick() {
 		if (SmokeStage == 1 && !SmokeLoop && !SmokeLoopStopped && now - SmokeStageTime > 1500) { for (int player = 1; player <= SmokeGuests; ++player) g_MultiplayerMan.SetTextInputActive(player, true); SmokeLoop = std::make_unique<SoundContainer>(); SmokeLoop->GetTopLevelSoundSet().AddSound("Base.rte/Sounds/Craft/ThrusterLoop.flac", false); SmokeLoop->SetLoopSetting(-1); SmokeLoop->SetImmobile(true); SmokeLoop->SetVolume(0.013f); if (!SmokeLoop->Play()) Verify("FAIL: looping sound setup"); }
 		if (SmokeStage == 1) for (int player = 1; player <= SmokeGuests; ++player) SmokeGUIKeySeen[player] = SmokeGUIKeySeen[player] || g_UInputMan.KeyHeld(SDL_SCANCODE_BACKSPACE, player);
 		if (SmokeStage == 1 && SmokeLoop && now - SmokeStageTime > 11500) { SmokeLoop->Stop(); SmokeLoop.reset(); SmokeLoopStopped = true; }
-		if (SmokeStage == 1 && !SmokeReconnected && now - SmokeStageTime > 5000 && std::all_of(Players.begin() + 1, Players.begin() + 1 + SmokeGuests, [](const auto& player) { return player.Connected && player.AckID > 0; })) { SmokeReconnected = true; for (int i = 1; i <= SmokeGuests; ++i) { Net.Close(Players[i].Address); Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); } Lobby(); Verify("RECONNECT: interrupted guest connections"); }
+		if (SmokeStage == 1 && !SmokeReconnected && now - SmokeStageTime > 5000 && std::all_of(Players.begin() + 1, Players.begin() + 1 + SmokeGuests, [](const auto& player) { return player.Connected && player.AckID > 0; })) {
+			if (SmokeCombatStress) {
+				auto* terrain = g_SceneMan.GetScene()->GetTerrain();
+				const int y = g_SceneMan.GetSceneHeight() - 16;
+				terrain->SetFGColorPixel(32, y, terrain->GetFGColorPixel(32, y) == g_MaskColor ? g_WhiteColor : g_MaskColor);
+				const auto map = World.PrepareSceneMap(Players[1].ViewWidth, Players[1].ViewHeight);
+				const std::unordered_set<uint64_t> original(SceneManifest.begin(), SceneManifest.end());
+				const bool changed = std::any_of(map.Nodes.begin(), map.Nodes.end(), [&](const auto& tile) { return tile.Asset && !original.contains(tile.Asset); });
+				Verify(changed ? "OK: terrain revision before reconnect is absent from the original manifest" : "FAIL: changed terrain reconnect fixture did not create a new resource");
+			}
+			SmokeReconnected = true;
+			for (int i = 1; i <= SmokeGuests; ++i) { Net.Close(Players[i].Address); Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); }
+			Lobby(); Verify("RECONNECT: interrupted guest connections");
+		}
 		if (SmokeStage == 1 && !SmokeCapturedHost && now - SmokeStageTime > 9000) { SmokeCapturedHost = true; UI = true; g_UInputMan.TrapMousePos(false); SmokeCapture = true; }
 		if (SmokeStage == 1 && SmokeCapturedHost && !SmokeSessionChecked && now - SmokeStageTime > 9700) {
 			Menu->QueueVerificationClick("Resume"); UpdateMenu(); SmokeSessionChecked = true;

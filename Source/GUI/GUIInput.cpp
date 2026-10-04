@@ -1,4 +1,5 @@
 #include "GUI.h"
+#include "MultiplayerMan.h"
 
 using namespace RTE;
 
@@ -108,6 +109,12 @@ void GUIInput::SetNetworkMouseButton(int whichPlayer, int state1, int state2, in
 
 void GUIInput::GetMousePosition(int* X, int* Y) const {
 	if (m_OverrideInput) {
+		float x, y;
+		if (g_MultiplayerMan.GuestPointer(m_Player, x, y)) {
+			if (X) *X = int(x) + m_MouseOffsetX;
+			if (Y) *Y = int(y) + m_MouseOffsetY;
+			return;
+		}
 		if (m_Player >= 0 && m_Player < 4) {
 			if (X) {
 				*X = (m_NetworkMouseX[m_Player] + m_MouseOffsetX);
