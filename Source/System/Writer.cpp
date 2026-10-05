@@ -32,8 +32,9 @@ int Writer::Create(const std::string& fileName, bool append, bool createDir) {
 	m_FileName = m_FilePath.substr(slashPos + 1);
 	m_FolderPath = m_FilePath.substr(0, slashPos + 1);
 
-	if (createDir && !std::filesystem::exists(System::GetWorkingDirectory() + m_FolderPath)) {
-		System::MakeDirectory(System::GetWorkingDirectory() + m_FolderPath);
+	const std::filesystem::path folderPath = std::filesystem::path(System::GetWorkingDirectory()) / m_FolderPath;
+	if (createDir && !std::filesystem::exists(folderPath)) {
+		System::MakeDirectory(folderPath.generic_string());
 	}
 
 	auto ofStream = std::make_unique<std::ofstream>(fileName, append ? (std::ios::out | std::ios::app | std::ios::ate) : (std::ios::out | std::ios::trunc));

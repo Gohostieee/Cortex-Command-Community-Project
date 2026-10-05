@@ -14,6 +14,7 @@
 #include "SoundContainer.h"
 #include "PostProcessMan.h"
 #include "FrameMan.h"
+#include "WindowMan.h"
 #include "Draw.h"
 
 #include "RTEError.h"
@@ -1644,6 +1645,8 @@ void MOSRotating::Draw(BITMAP* pTargetBitmap, const Vector& targetPos, DrawMode 
 		spritePos += m_RecoilOffset;
 	}
 	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_aSprite[m_Frame], spritePos + targetPos, m_HFlipped ? Vector(m_aSprite[m_Frame]->w + m_SpriteOffset.GetX(), -m_SpriteOffset.GetY()) : -m_SpriteOffset, m_Rotation.GetRadAngle(), m_Scale, m_HFlipped, mode == g_DrawWhite, mode == g_DrawTrans ? g_FrameMan.GetCurrentAlpha() : 255);
+	const bool captureOnly = g_WindowMan.IsHeadless() && pTargetBitmap == g_FrameMan.GetBackBuffer8() && (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans);
+	if (!captureOnly) {
 
 	// If we're drawing a material silhouette, then create an intermediate material bitmap as well
 	bool intermediateBitmapUsed = mode != g_DrawColor && mode != g_DrawTrans && mode != g_DrawMOID;
@@ -1764,6 +1767,8 @@ void MOSRotating::Draw(BITMAP* pTargetBitmap, const Vector& targetPos, DrawMode 
 			}
 		}
 	}
+
+	} // Headless presentation records the sprite without rasterizing it. Terrain and MOID draws retain their native path.
 
 	// Draw all the attached wound emitters, and only if the mode is g_DrawColor and not onlyphysical
 	// Only draw attachables and emitters which are not drawn after parent, so we draw them before

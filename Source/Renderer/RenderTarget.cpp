@@ -14,6 +14,12 @@ using namespace RTE;
 RenderTarget::RenderTarget(const FloatRect& size, const FloatRect& defaultViewport, int bitDepth, Texture2D colorTexture, bool defaultFB0) {
 	m_Size = size;
 	m_Viewport = defaultViewport;
+	if (g_WindowMan.IsHeadless()) {
+		m_ColorTextureOwned = false;
+		m_Texture.width = static_cast<int>(size.w);
+		m_Texture.height = static_cast<int>(size.h);
+		return;
+	}
 	if (!defaultFB0) {
 		if (colorTexture.id != 0) {
 			m_Texture = std::move(colorTexture);
@@ -47,6 +53,7 @@ RenderTarget::RenderTarget(const FloatRect& size, const FloatRect& defaultViewpo
 }
 
 RenderTarget::~RenderTarget() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	if (m_FBO) {
 		rlUnloadFramebuffer(m_FBO);
 	}
@@ -57,6 +64,7 @@ RenderTarget::~RenderTarget() {
 }
 
 void RenderTarget::Begin(bool clear, float zoom) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	rlDrawRenderBatchActive();
 	rlResetDrawDepth();
 	rlEnableFramebuffer(m_FBO);
@@ -81,6 +89,7 @@ void RenderTarget::Begin(bool clear, float zoom) {
 }
 
 void RenderTarget::End() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	rlDrawRenderBatchActive();
 
 	rlDisableFramebuffer();

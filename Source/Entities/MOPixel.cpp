@@ -4,6 +4,7 @@
 #include "Atom.h"
 #include "PostProcessMan.h"
 #include "FrameMan.h"
+#include "WindowMan.h"
 
 using namespace RTE;
 
@@ -239,6 +240,7 @@ void MOPixel::Draw(BITMAP* targetBitmap, const Vector& targetPos, DrawMode mode,
 
 	Vector pixelPos = m_Pos - targetPos;
 	if (mode == g_DrawColor) MultiplayerWorld::Pixel(*this, m_Pos, uint8_t(drawColor));
+	if (g_WindowMan.IsHeadless() && targetBitmap == g_FrameMan.GetBackBuffer8() && mode == g_DrawColor) { return; }
 	if (mode != DrawMode::g_DrawMOID) {
 		putpixel(targetBitmap, pixelPos.GetFloorIntX(), pixelPos.GetFloorIntY(), drawColor);
 	}

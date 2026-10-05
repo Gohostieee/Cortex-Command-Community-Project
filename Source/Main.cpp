@@ -22,6 +22,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
 #include <cstdlib>
+#include <csignal>
 
 #include "GUI.h"
 #include "GUIInputWrapper.h"
@@ -70,10 +71,15 @@ FILE __iob_func[3] = {*stdin, *stdout, *stderr};
 
 using namespace RTE;
 
+namespace {
+	volatile std::sig_atomic_t dedicatedTerminationRequested = 0;
+	void RequestDedicatedTermination(int) { dedicatedTerminationRequested = 1; }
+}
+
 /// <summary>
 /// Initializes all the essential managers.
 /// </summary>
-void InitializeManagers() {
+void InitializeManagers(bool headless = false) {
 	ThreadMan::Construct();
 	TimerMan::Construct();
 	PresetMan::Construct();
@@ -98,6 +104,7 @@ void InitializeManagers() {
 	CameraMan::Construct();
 	ActivityMan::Construct();
 	LoadingScreen::Construct();
+	g_WindowMan.SetHeadless(headless);
 
 	g_ThreadMan.Initialize();
 	g_SettingsMan.Initialize();
@@ -179,7 +186,7 @@ void HandleMainArgs(int argCount, char** argValue) {
 		bool lastArg = i + 1 == argCount;
 
 		if (currentArg == "-cout") {
-			System::EnableLoggingToCLI();
+			System::EnableLoggingToCLI(!g_WindowMan.IsHeadless());
 		}
 
 		if (currentArg == "-ext-validate") {
@@ -211,6 +218,7 @@ void HandleMainArgs(int argCount, char** argValue) {
 /// Polls the SDL event queue and passes events to be handled by the relevant managers.
 /// </summary>
 void PollSDLEvents() {
+	if (dedicatedTerminationRequested) { System::SetQuit(true); return; }
 	SDL_Event sdlEvent;
 	while (SDL_PollEvent(&sdlEvent)) {
 		switch (sdlEvent.type) {
@@ -240,7 +248,7 @@ void PollSDLEvents() {
 			default:
 				break;
 		}
-		ImGui_ImplSDL3_ProcessEvent(&sdlEvent);
+		if (!g_WindowMan.IsHeadless()) { ImGui_ImplSDL3_ProcessEvent(&sdlEvent); }
 		if (sdlEvent.type >= SDL_EVENT_WINDOW_FIRST && sdlEvent.type <= SDL_EVENT_WINDOW_LAST) {
 			g_WindowMan.QueueWindowEvent(sdlEvent);
 		}
@@ -256,6 +264,14 @@ void RunMenuLoop() {
 	g_UInputMan.TrapMousePos(false);
 
 	while (!System::IsSetToQuit()) {
+		if (g_WindowMan.IsHeadless()) {
+			PollSDLEvents();
+			g_TimerMan.Update();
+			g_MultiplayerMan.Update();
+			if (g_MultiplayerMan.TakeLaunchRequest()) { break; }
+			SDL_Delay(5);
+			continue;
+		}
 		g_WindowMan.ClearBackbuffer();
 		PollSDLEvents();
 
@@ -323,7 +339,7 @@ void RunGameLoop() {
 	long long drawTotalTime = 0;
 
 	while (!System::IsSetToQuit()) {
-		bool serverUpdated = false;
+		bool simulationUpdated = false;
 		updateStartTime = g_TimerMan.GetAbsoluteTime();
 
 		PollSDLEvents();
@@ -337,7 +353,7 @@ void RunGameLoop() {
 		while (g_TimerMan.TimeForSimUpdate()) {
 			ZoneScopedN("Simulation Update");
 
-			serverUpdated = false;
+			simulationUpdated = true;
 
 			g_PerformanceMan.NewPerformanceSample();
 			g_PerformanceMan.UpdateMSPSU();
@@ -405,10 +421,17 @@ void RunGameLoop() {
 		updateTotalTime = updateEndAndDrawStartTime - updateStartTime;
 		drawStartTime = updateEndAndDrawStartTime;
 
-		g_FrameMan.Draw();
-		g_WindowMan.DrawPostProcessBuffer();
-		g_MultiplayerMan.DrawUI();
-		g_WindowMan.UploadFrame();
+		if (g_WindowMan.IsHeadless()) {
+			if (simulationUpdated) { g_FrameMan.Draw(); }
+			// SDL's window/vsync pacing does not exist in the dedicated runtime.
+			// A short idle wait allows input/network processing between fixed ticks.
+			SDL_Delay(1);
+		} else {
+			g_FrameMan.Draw();
+			g_WindowMan.DrawPostProcessBuffer();
+			g_MultiplayerMan.DrawUI();
+			g_WindowMan.UploadFrame();
+		}
 
 		drawTotalTime = g_TimerMan.GetAbsoluteTime() - drawStartTime;
 		g_PerformanceMan.UpdateMSPF(updateTotalTime, drawTotalTime);
@@ -427,16 +450,29 @@ static const bool RTESetExceptionHandlers = []() {
 /// Implementation of the main function.
 /// </summary>
 int main(int argc, char** argv) {
+	std::string dedicatedConfig;
+	for (int i = 1; i < argc; ++i) {
+		const std::string argument = argv[i];
+		if (argument == "-mp-dedicated" || argument == "--mp-dedicated") {
+			if (i + 1 >= argc) { std::fputs("Dedicated server requires a configuration file.\n", stderr); return EXIT_FAILURE; }
+			dedicatedConfig = argv[++i];
+			if (dedicatedConfig.empty()) { std::fputs("Dedicated server requires a configuration file.\n", stderr); return EXIT_FAILURE; }
+		}
+	}
+	const bool headless = !dedicatedConfig.empty();
 	install_allegro(SYSTEM_NONE, &errno, std::atexit);
 	loadpng_init();
 
-	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD );
+	if (!SDL_Init(headless ? SDL_INIT_EVENTS : SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
+		std::fprintf(stderr, "SDL initialization failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
 
 	SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
 	SDL_SetHint("SDL_ALLOW_TOPMOST", "0");
-	SDL_HideCursor();
+	if (!headless) { SDL_HideCursor(); }
 
-	if (std::filesystem::exists("Base.rte/gamecontrollerdb.txt")) {
+	if (!headless && std::filesystem::exists("Base.rte/gamecontrollerdb.txt")) {
 		SDL_AddGamepadMappingsFromFile("Base.rte/gamecontrollerdb.txt");
 	}
 
@@ -453,7 +489,12 @@ int main(int argc, char** argv) {
 	System::Initialize(argv[0]);
 	SeedRNG();
 
-	InitializeManagers();
+	if (headless) {
+		System::EnableLoggingToCLI(false);
+		std::signal(SIGINT, RequestDedicatedTermination);
+		std::signal(SIGTERM, RequestDedicatedTermination);
+	}
+	InitializeManagers(headless);
 
 	HandleMainArgs(argc, argv);
 	std::string testActivity;
@@ -467,10 +508,16 @@ int main(int argc, char** argv) {
 	}
 
 	g_PresetMan.LoadAllDataModules();
+	if (headless && !g_MultiplayerMan.StartDedicated(dedicatedConfig)) {
+		DestroyManagers();
+		allegro_exit();
+		SDL_Quit();
+		return EXIT_FAILURE;
+	}
 	for (int i = 1; i + 1 < argc; ++i) {
 		const std::string argument = argv[i];
-		if (argument == "-mp-host" || argument == "-mp-join" || argument == "-mp-smoke-host" || argument == "-mp-smoke-client") {
-			g_MultiplayerMan.StartRoom(argument == "-mp-host" || argument == "-mp-smoke-host", argv[++i], argument.starts_with("-mp-smoke-"));
+		if (!headless && (argument == "-mp-host" || argument == "-mp-join" || argument == "-mp-smoke-host" || argument == "-mp-smoke-client" || argument == "-mp-hosted" || argument == "-mp-smoke-hosted")) {
+			g_MultiplayerMan.StartRoom(argument != "-mp-join" && argument != "-mp-smoke-client", argv[++i], argument.starts_with("-mp-smoke-"), argument == "-mp-hosted" || argument == "-mp-smoke-hosted");
 		}
 	}
 
@@ -480,18 +527,20 @@ int main(int argc, char** argv) {
 
 		if (g_ConsoleMan.LoadWarningsExist()) {
 			g_ConsoleMan.PrintString("WARNING: Encountered non-fatal errors during module loading!\nSee \"LogLoadingWarning.txt\" for information.");
-			g_ConsoleMan.SaveLoadWarningLog("LogLoadingWarning.txt");
+			g_ConsoleMan.SaveLoadWarningLog(headless ? System::GetUserdataDirectory() + "LogLoadingWarning.txt" : "LogLoadingWarning.txt");
 			// Open the console so the user is aware there are loading warnings.
-			g_ConsoleMan.SetEnabled(true);
+			if (!headless) { g_ConsoleMan.SetEnabled(true); }
 		} else {
 			// Delete an existing log if there are no warnings so there's less junk in the root folder.
-			if (std::filesystem::exists(System::GetWorkingDirectory() + "LogLoadingWarning.txt")) {
+			if (!headless && std::filesystem::exists(System::GetWorkingDirectory() + "LogLoadingWarning.txt")) {
 				std::remove("LogLoadingWarning.txt");
 			}
 		}
 
 		// Native regression activities run unattended without navigating the menu.
-		if (!testActivity.empty()) {
+		if (headless) {
+			RunMenuLoop();
+		} else if (!testActivity.empty()) {
 			g_ConsoleMan.PrintString("Starting native test: " + testActivity);
 			g_ConsoleMan.SaveAllText("build-mp/native-test-startup.log");
 			if (g_ActivityMan.StartActivity("GAScripted", testActivity) < 0) {

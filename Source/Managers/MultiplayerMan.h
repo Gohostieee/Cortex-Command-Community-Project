@@ -23,7 +23,9 @@ public:
 	void ApplyInputs();
 	void Stop();
 	void HandleActivityExit();
-	bool StartRoom(bool host, const std::string& address, bool smokeTest = false);
+	bool StartRoom(bool host, const std::string& address, bool smokeTest = false, bool hosted = false);
+	bool StartDedicated(const std::string& configPath);
+	bool IsDedicated() const;
 	void CaptureVerificationFrame();
 	bool IsUIOpen() const;
 	bool IsHostingMatch() const;

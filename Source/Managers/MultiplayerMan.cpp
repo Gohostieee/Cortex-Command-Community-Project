@@ -33,6 +33,7 @@
 #include <random>
 #include <unordered_map>
 #include <fstream>
+#include <filesystem>
 #include <SDL3_image/SDL_image.h>
 #include "System.h"
 #include "DataModule.h"
@@ -120,7 +121,23 @@ struct MultiplayerMan::Impl {
 	uint64_t LastChatSent = 0;
 	char Name[32] = "Player", Room[64] = "Cortex room", HostAddress[256] = "127.0.0.1:8000", Password[64] = "";
 	char ServiceAddress[256] = "", JoinCode[32] = "";
-	bool Online = true;
+	bool Online = true, Hosted = true, Dedicated = false;
+	int OwnerSlot = 0;
+	bool OwnerRegistered = false, HostedEndpoint = false;
+	uint64_t CloseStarted = 0, CloseRetry = 0;
+	struct ResumeSlot { uint64_t Token, Expires, Session; uint32_t Epoch; Input Inputs; };
+	bool ResumingSlot = false;
+	std::map<std::string, ResumeSlot> ResumeSlots;
+	std::string ResumeKey() const { return std::string(ServiceAddress) + "/" + Relay::NormalizeCode(JoinCode); }
+	std::string OwnerCredential, DedicatedStatus;
+	uint64_t DedicatedLastOccupied = 0, DedicatedLastStatus = 0, OwnerClaimDeadline = 0;
+	unsigned DedicatedIdleSeconds = 600;
+	int FirstRemote() const { return Dedicated ? 0 : 1; }
+	bool Admin() const { return State == Mode::Host || (Hosted && State == Mode::Client && LocalSlot == OwnerSlot); }
+	void ElectOwner() { if (Dedicated && OwnerRegistered && !Players[OwnerSlot].Connected) for (int i = 0; i < 4; ++i) if (Players[i].Connected) { OwnerSlot = i; if (!Playing) Players[i].Ready = true; break; } }
+	void SendControl(const std::string& control, int value = 0, const std::string& text = "");
+	void ControlRoom(int slot, const std::string& control, int value, const std::string& text);
+	void HostedSmokeTick();
 	std::string DefaultService;
 	Impl() {
 		std::string endpoint;
@@ -195,27 +212,41 @@ struct MultiplayerMan::Impl {
 	size_t CursorStage = 0;
 	int CursorFrames = 0;
 	int CursorPreparedStage = -1;
-	struct CursorCase { const char* Name; Mode State; bool UI, Playing, Visible; int Page = 0; };
-	static constexpr std::array<CursorCase, 24> CursorCases{{
-		{"menu", Mode::Idle, true, false, true}, {"main-menu", Mode::Idle, false, false, false},
-		{"host-lobby", Mode::Host, true, false, true}, {"host-gameplay", Mode::Host, false, true, false},
-		{"host-session", Mode::Host, true, true, true}, {"host-resume", Mode::Host, false, true, false},
-		{"guest-lobby", Mode::Client, true, false, true}, {"guest-gameplay", Mode::Client, false, true, false},
-		{"guest-session", Mode::Client, true, true, true}, {"connecting", Mode::Connecting, false, false, true},
-		{"reconnecting", Mode::Reconnecting, false, false, true}, {"closed-menu", Mode::Idle, false, false, false},
-		{"create-menu", Mode::Idle, true, false, true, 1}, {"connection-settings", Mode::Idle, true, false, true, 2},
-		{"host-rules", Mode::Host, true, false, true, 3}, {"host-factions", Mode::Host, true, false, true, 4},
-		{"guest-rules", Mode::Client, true, false, true, 3}, {"room-chat", Mode::Host, true, false, true, 5},
-		{"post-match-lobby", Mode::Host, true, false, true}, {"stream-settings", Mode::Idle, true, false, true, 3},
-		{"host-session-chat", Mode::Host, true, true, true, 5}, {"guest-session-chat", Mode::Client, true, true, true, 5},
-		{"close-room-confirmation", Mode::Host, true, false, true, 6}, {"leave-room-confirmation", Mode::Client, true, true, true, 6}
+	struct CursorCase { const char* Name; Mode State; bool UI, Playing, Visible; int Page; bool Hosted, Owner; };
+	static constexpr std::array<CursorCase, 29> CursorCases{{
+		{"menu", Mode::Idle, true, false, true, 0, false, false}, {"main-menu", Mode::Idle, false, false, false, 0, false, false},
+		{"host-lobby", Mode::Host, true, false, true, 0, false, false}, {"host-gameplay", Mode::Host, false, true, false, 0, false, false},
+		{"host-session", Mode::Host, true, true, true, 0, false, false}, {"host-resume", Mode::Host, false, true, false, 0, false, false},
+		{"guest-lobby", Mode::Client, true, false, true, 0, false, false}, {"guest-gameplay", Mode::Client, false, true, false, 0, false, false},
+		{"guest-session", Mode::Client, true, true, true, 0, false, false}, {"connecting", Mode::Connecting, false, false, true, 0, false, false},
+		{"reconnecting", Mode::Reconnecting, false, false, true, 0, false, false}, {"closed-menu", Mode::Idle, false, false, false, 0, false, false},
+		{"create-menu", Mode::Idle, true, false, true, 1, false, false}, {"connection-settings", Mode::Idle, true, false, true, 2, false, false},
+		{"host-rules", Mode::Host, true, false, true, 3, false, false}, {"host-factions", Mode::Host, true, false, true, 4, false, false},
+		{"guest-rules", Mode::Client, true, false, true, 3, false, false}, {"room-chat", Mode::Host, true, false, true, 5, false, false},
+		{"post-match-lobby", Mode::Host, true, false, true, 0, false, false}, {"stream-settings", Mode::Idle, true, false, true, 3, false, false},
+		{"host-session-chat", Mode::Host, true, true, true, 5, false, false}, {"guest-session-chat", Mode::Client, true, true, true, 5, false, false},
+		{"close-room-confirmation", Mode::Host, true, false, true, 6, false, false}, {"leave-room-confirmation", Mode::Client, true, true, true, 6, false, false},
+		{"hosted-owner-lobby", Mode::Client, true, false, true, 0, true, true},
+		{"hosted-owner-session", Mode::Client, true, true, true, 0, true, true},
+		{"hosted-owner-leave-confirmation", Mode::Client, true, false, true, 6, true, true},
+		{"hosted-owner-close-confirmation", Mode::Client, true, false, true, 7, true, true},
+		{"hosted-player-lobby", Mode::Client, true, false, true, 0, true, false}
 	}};
 	bool SmokeReconnected = false, SmokeCapturedHost = false;
+	bool SmokeHostedContinued = false;
+	bool SmokeHostedLeft = false, SmokeHostedReturned = false;
+	bool SmokeHostedIndependent = false;
+	bool SmokeHostedCombatCaptured = false;
+	uint64_t SmokeHostedLeaveAt = 0;
+	uint32_t SmokeHostedLeaveSequence = 0;
+	uint32_t SmokeHostedOtherFrame = 0;
+	uint64_t SmokeHostedSession = 0;
 	bool SmokeSessionChecked = false;
 	int SmokeStage = 0;
 	int SmokeRejoins = 0;
 	int SmokeGuests = 1;
 	std::string SmokeRole;
+	std::string SmokeLogDirectory = "build-mp";
 	int SmokeCaptureDelay = 0;
 	uint64_t SmokeStarted = 0, SmokeStageTime = 0, Presented = 0, AudioReceived = 0;
 	uint64_t SmokeSecondStart = 0;
@@ -231,7 +262,7 @@ struct MultiplayerMan::Impl {
 	int SmokeLoopPlays = 0;
 	int SmokeLoopChannel = -1;
 	bool SmokeLoopStopped = false;
-	void Verify(const std::string& message) { if (Smoke) { std::ofstream log("build-mp/" + SmokeRole + "-smoke.log", std::ios::app); log << message << '\n'; } }
+	void Verify(const std::string& message) { if (Smoke) { std::ofstream log(SmokeLogDirectory + "/" + SmokeRole + "-smoke.log", std::ios::app); log << message << '\n'; } }
 	void SmokeTick();
 	void DeploymentTick();
 	void GuestInputChecks(GameActivity* game);
@@ -246,19 +277,20 @@ struct MultiplayerMan::Impl {
 	}
 	void Stop() {
 		Menu.reset();
-		if (TextActive && State != Mode::Host) SDL_StopTextInput(g_WindowMan.GetWindow()); TextActive = false;
+		if (TextActive && State != Mode::Host && !Dedicated) SDL_StopTextInput(g_WindowMan.GetWindow()); TextActive = false;
 		if (SmokeLoop) { SmokeLoop->Stop(); SmokeLoop.reset(); }
-		if (State == Mode::Host) { MP::Writer leave(Kind::Leave, Session, Epoch); for (size_t i = 1; i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, leave.Data, Delivery::Control); }
+		if (State == Mode::Host) { MP::Writer leave(Kind::Leave, Session, Epoch); for (size_t i = FirstRemote(); i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, leave.Data, Delivery::Control); }
 		if (State == Mode::Client || State == Mode::Connecting || State == Mode::Reconnecting) { MP::Writer leave(Kind::Leave, Session, Epoch); Net.Send(ServerAddress, leave.Data, Delivery::Control); }
 		Net.Stop();
+		ServerAddress.clear(); HostedEndpoint = ResumingSlot = false; NextRetry = CloseStarted = CloseRetry = 0; OwnerRegistered = false;
 		for (auto& player: Players) { player = Player(); }
-		Pending.clear(); Chat.clear(); ClearSounds(); World.Reset(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); LocalInput = {}; Session = ReconnectToken = 0; Epoch = 0; MouseRemainderX = MouseRemainderY = 0;
+		Pending.clear(); Chat.clear(); ClearSounds(); World.Reset(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); LocalInput = {}; Session = ReconnectToken = 0; OwnerCredential.clear(); OwnerSlot = 0; Epoch = 0; MouseRemainderX = MouseRemainderY = 0;
 		Texture = 0; TextureWidth = TextureHeight = 0;
 		RecentWorldUpdates.clear(); LastFrameReceived = LastNetworkLog = 0; NetworkLogSamples = 0;
 		State = Mode::Idle; Playing = Launch = Played = false; MatchEndedAt = 0; Notice.clear(); g_AudioMan.SetMultiplayerMode(false); g_UInputMan.TrapMousePos(false);
 		WarmingGuests = false;
 		g_AudioMan.SetStreamListener(Vector(), false);
-		for (int player = 1; player < 4; ++player) g_UInputMan.ClearRemoteInput(player);
+		for (int player = 0; player < 4; ++player) g_UInputMan.ClearRemoteInput(player);
 	}
 	void Advertise() {
 		if (State != Mode::Host) return;
@@ -266,22 +298,28 @@ struct MultiplayerMan::Impl {
 		writer.U8(count); writer.U8(Playing); Net.Advertise(writer.Data);
 	}
 	void Lobby() {
-		MP::Writer writer(Kind::Lobby, Session, Epoch); writer.U8(Playing); writer.Text(RoomName, 63); writer.Text(ActivityName); writer.Text(SceneName);
+		ElectOwner();
+		MP::Writer writer(Kind::Lobby, Session, Epoch); writer.U8(Playing); writer.U8(Dedicated); writer.U8(uint8_t(OwnerSlot)); writer.Text(RoomName, 63); writer.Text(ActivityName); writer.Text(SceneName);
 		writer.U8(static_cast<uint8_t>(Difficulty)); writer.U32(static_cast<uint32_t>(Gold)); writer.U8(Fog); writer.U8(Deploy); writer.U8(ClearOrbit); writer.U8(AvailableTeams); writer.U8(CPUTeam);
 		for (const auto& tech: Tech) writer.Text(tech);
 		for (const auto& player: Players) { writer.U8(player.Token != 0); writer.U8(player.Connected); writer.U8(player.Ready); writer.U8(player.Team); writer.Text(player.Name, 31); }
-		for (size_t i = 1; i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control);
+		for (size_t i = FirstRemote(); i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control);
 		Advertise();
 	}
 	void Reject(const std::string& address, const std::string& message) { MP::Writer writer(Kind::Reject); writer.Text(message); Net.Send(address, writer.Data, Delivery::Control); Pending[address] = Now() - 4500; }
 	void Welcome(int slot) {
-		MP::Writer writer(Kind::Welcome, Session, Epoch); writer.U8(static_cast<uint8_t>(slot)); writer.U64(Players[slot].Token); writer.Text(c_GameVersion.str());
+		MP::Writer writer(Kind::Welcome, Session, Epoch); writer.U8(static_cast<uint8_t>(slot)); writer.U64(Players[slot].Token); writer.Text(c_GameVersion.str()); writer.U8(Dedicated);
 		Net.Send(Players[slot].Address, writer.Data, Delivery::Control); Lobby();
 	}
 	bool Host() {
 		std::string service; uint16_t servicePort = 8001;
 		if (Online && !Address(ServiceAddress, service, servicePort, 8001)) { Error = "Set the room service address under Connection settings."; return false; }
 		if (!Online && (Port < 1 || Port > 65535)) { Error = "Choose a UDP port from 1 to 65535."; return false; }
+		if (Online && Hosted) {
+			Stop(); ConnectStarted = Now(); RoomName = Room[0] ? Room : "Cortex room";
+			if (!Net.Start(false, 0, "", Error) || !Net.ConnectRelay(true, service, servicePort, "", Password, Error, true, RoomName)) return false;
+			State = Mode::Connecting; UI = true; Error.clear(); SaveService(); return true;
+		}
 		Stop(); if (!Net.Start(!Online, static_cast<uint16_t>(Port), Online ? "" : Password, Error)) return false;
 		if (Online && !Net.ConnectRelay(true, service, servicePort, "", Password, Error)) { Net.Stop(); return false; }
 		if (Online) SaveService();
@@ -291,9 +329,13 @@ struct MultiplayerMan::Impl {
 	}
 	bool Join(bool retry = false) {
 		std::string host; uint16_t port;
+		if (retry && HostedEndpoint && !ServerAddress.empty()) {
+			if (!Address(ServerAddress, host, port)) return false;
+			Net.Close(ServerAddress); Net.Connect(host, port, Password, Error); NextRetry = Now() + 4000; return true;
+		}
 		if (Online) { if (!Address(ServiceAddress, host, port, 8001)) { Error = "Set the room service address under Connection settings."; return false; } if (Relay::NormalizeCode(JoinCode).empty()) { Error = "Enter the ten-character room code from your host."; return false; } }
 		else if (!Address(HostAddress, host, port)) { Error = "Enter a hostname or IPv4 address, optionally followed by :port."; return false; }
-		if (!retry) { Stop(); ConnectStarted = Now(); }
+		if (!retry) { Stop(); ConnectStarted = Now(); if (Online) { const auto resume = ResumeSlots.find(ResumeKey()); if (resume != ResumeSlots.end() && resume->second.Expires > Now()) { ReconnectToken = resume->second.Token; Session = resume->second.Session; Epoch = resume->second.Epoch; LocalInput = resume->second.Inputs; ResumingSlot = true; } } }
 		else if (!Online) Net.Stop();
 		if (Online && retry) { if (!Net.ReconnectRelay(Error)) return false; }
 		else { if (!Net.Start(false, 0, "", Error) || !(Online ? Net.ConnectRelay(false, host, port, JoinCode, Password, Error) : Net.Connect(host, port, Password, Error))) return false; }
@@ -301,7 +343,7 @@ struct MultiplayerMan::Impl {
 		State = retry ? Mode::Reconnecting : Mode::Connecting; NextRetry = Now() + 3000; UI = true; return true;
 	}
 	void Hello(const std::string& address) {
-		ServerAddress = address; MP::Writer writer(Kind::Hello); writer.Text(Name[0] ? Name : "Player", 31); writer.U64(ReconnectToken); writer.Text(c_GameVersion.str()); writer.U16(uint16_t(std::clamp(g_WindowMan.GetResX(), 320, 3840))); writer.U16(uint16_t(std::clamp(g_WindowMan.GetResY(), 180, 2160))); Net.Send(address, writer.Data, Delivery::Control);
+		ServerAddress = address; MP::Writer writer(Kind::Hello); writer.Text(Name[0] ? Name : "Player", 31); writer.U64(ReconnectToken); writer.Text(c_GameVersion.str()); writer.U16(uint16_t(std::clamp(g_WindowMan.GetResX(), 320, 3840))); writer.U16(uint16_t(std::clamp(g_WindowMan.GetResY(), 180, 2160))); writer.Text(Hosted ? OwnerCredential : "", Relay::TokenLength); Net.Send(address, writer.Data, Delivery::Control);
 	}
 	void LoadActivities() {
 		Factions = {"-All-"}; for (int i = 0; i < g_PresetMan.GetTotalModuleCount(); ++i) if (g_PresetMan.GetDataModule(i)->IsFaction()) Factions.push_back(g_PresetMan.GetDataModuleName(i));
@@ -320,12 +362,12 @@ struct MultiplayerMan::Impl {
 		for (int team = 0; team < 4; ++team) { Tech[team] = activity->GetTeamTech(team).empty() ? "-All-" : activity->GetTeamTech(team); if (activity->TeamActive(team) && team + 1 != CPUTeam) { AvailableTeams |= uint8_t(1 << team); humanTeams.push_back(static_cast<uint8_t>(team)); } }
 		for (size_t i = 0; i < Players.size(); ++i) if (!humanTeams.empty()) Players[i].Team = humanTeams[CPUTeam ? 0 : i % humanTeams.size()];
 	}
-	void SettingsChanged() { for (size_t i = 1; i < Players.size(); ++i) Players[i].Ready = false; Lobby(); }
+	void SettingsChanged() { for (size_t i = FirstRemote(); i < Players.size(); ++i) Players[i].Ready = Dedicated && int(i) == OwnerSlot; Lobby(); }
 	void SendReady(bool ready, uint8_t team) { MP::Writer writer(Kind::Ready, Session, Epoch); writer.U8(ready); writer.U8(team); Net.Send(ServerAddress, writer.Data, Delivery::Control); }
 	void AddChat(int player, const std::string& message) {
 		Chat.push_back(Players[player].Name + ": " + message); if (Chat.size() > 64) Chat.erase(Chat.begin());
 		Verify("CHAT: " + message);
-		if (State == Mode::Host) { MP::Writer writer(Kind::Chat, Session, Epoch); writer.U8(static_cast<uint8_t>(player)); writer.Text(message, 192); for (int i = 1; i < 4; ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control); }
+		if (State == Mode::Host) { MP::Writer writer(Kind::Chat, Session, Epoch); writer.U8(static_cast<uint8_t>(player)); writer.Text(message, 192); for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control); }
 	}
 	bool StartGame() {
 		if (const auto blocked = StartBlock(); !blocked.empty()) { Error = blocked; return false; }
@@ -349,8 +391,8 @@ struct MultiplayerMan::Impl {
 		g_UInputMan.TrapMousePos(false);
 		for (size_t i = 0; i < Players.size(); ++i) {
 			auto& player = Players[i];
-			player.Ready = i == 0; player.Inputs.Reset(); ClearWorldPackets(player); player.WorldResources.clear(); player.PendingResources.clear(); player.Text.clear(); player.TextActive = player.AudioReady = false; player.Loops.clear(); player.ReplayLoops = true;
-			if (i > 0) g_UInputMan.ClearRemoteInput(static_cast<int>(i));
+			player.Ready = int(i) == OwnerSlot; player.Inputs.Reset(); ClearWorldPackets(player); player.WorldResources.clear(); player.PendingResources.clear(); player.Text.clear(); player.TextActive = player.AudioReady = false; player.Loops.clear(); player.ReplayLoops = true;
+			if (Dedicated || i > 0) g_UInputMan.ClearRemoteInput(static_cast<int>(i));
 		}
 		g_MenuMan.SetMultiplayerMenuBackground(true);
 		Lobby();
@@ -375,6 +417,72 @@ struct MultiplayerMan::Impl {
 
 MultiplayerMan::MultiplayerMan(): m_Impl(std::make_unique<Impl>()) {}
 MultiplayerMan::~MultiplayerMan() = default;
+bool MultiplayerMan::IsDedicated() const { return m_Impl->Dedicated; }
+bool MultiplayerMan::StartDedicated(const std::string& configPath) {
+	if (!g_WindowMan.IsHeadless()) return false;
+	std::ifstream file(configPath);
+	std::map<std::string, std::string> config;
+	std::string line;
+	while (std::getline(file, line)) { if (!line.empty() && line.back() == '\r') line.pop_back(); const auto separator = line.find('='); if (separator != std::string::npos) config[line.substr(0, separator)] = line.substr(separator + 1); }
+	auto integer = [&](const std::string& key, unsigned minimum, unsigned maximum, unsigned fallback) {
+		const auto found = config.find(key); if (found == config.end()) return fallback;
+		unsigned value = 0; const auto parsed = std::from_chars(found->second.data(), found->second.data() + found->second.size(), value);
+		return parsed.ec == std::errc() && parsed.ptr == found->second.data() + found->second.size() && value >= minimum && value <= maximum ? value : 0;
+	};
+	const auto port = integer("port", 1024, 65535, 0), idle = integer("idle_seconds", 1, 86400, 600);
+	const auto owner = config["owner_token"];
+	if (!port || !idle || owner.size() != Relay::TokenLength || owner.find_first_not_of("0123456789abcdef") != std::string::npos || config["password"].size() > 63 || config["room_name"].size() > 63 || config["status_file"].empty()) return false;
+	auto& impl = *m_Impl; impl.Stop(); impl.Dedicated = impl.Hosted = true; impl.Online = false; impl.UI = false;
+	impl.OwnerSlot = 0; impl.OwnerRegistered = false; impl.OwnerCredential = owner; impl.DedicatedStatus = config["status_file"]; impl.DedicatedIdleSeconds = idle;
+	impl.DedicatedLastOccupied = Now(); impl.OwnerClaimDeadline = impl.DedicatedLastOccupied + 120000; impl.Port = int(port); impl.RoomName = config["room_name"].empty() ? "Cortex room" : config["room_name"];
+	if (!impl.Net.Start(true, uint16_t(port), config["password"], impl.Error)) return false;
+	impl.State = Impl::Mode::Host; impl.Session = Token(); impl.LoadActivities();
+	impl.Smoke = std::getenv("CCCP_MPSMOKE_HOSTED") != nullptr;
+	if (impl.Smoke) {
+		impl.SmokeRole = "dedicated"; impl.SmokeStarted = impl.SmokeStageTime = Now();
+		impl.SmokeGuests = 3; if (const char* count = std::getenv("CCCP_MPSMOKE_GUESTS"); count && count[0] >= '1' && count[0] <= '3' && !count[1]) impl.SmokeGuests = count[0] - '0';
+		impl.SmokeCombatStress = std::getenv("CCCP_MPSMOKE_COMBAT") != nullptr;
+		impl.SmokeLogDirectory = (std::filesystem::path(System::GetUserdataDirectory()) / "verification").string();
+		std::filesystem::create_directories(impl.SmokeLogDirectory); std::ofstream(impl.SmokeLogDirectory + "/dedicated-smoke.log") << "START: dedicated authority, four remote human slots, no display\n";
+		for (size_t i = 0; i < impl.Activities.size(); ++i) if (impl.Activities[i]->GetPresetName() == "Test Activity") { impl.ActivityIndex = int(i); impl.LoadScenes(); break; }
+		impl.BandwidthMbps = 12;
+	}
+	std::ofstream status(impl.DedicatedStatus, std::ios::trunc); status << "ready=1\nconnected=0\nplaying=0\nheadless=1\n";
+	return bool(status);
+}
+
+void MultiplayerMan::Impl::SendControl(const std::string& control, int value, const std::string& text) {
+	MP::Writer writer(Kind::RoomControl, Session, Epoch); writer.Text(control, 32); writer.U32(uint32_t(value)); writer.Text(text, 192); Net.Send(ServerAddress, writer.Data, Delivery::Control);
+}
+
+void MultiplayerMan::Impl::ControlRoom(int slot, const std::string& control, int value, const std::string& text) {
+	if (!Dedicated || slot != OwnerSlot || !Players[slot].Connected) return;
+	auto report = [&]() { if (Error.empty()) return; MP::Writer writer(Kind::RoomControl, Session, Epoch); writer.Text("Error", 32); writer.U32(0); writer.Text(Error, 192); Net.Send(Players[slot].Address, writer.Data, Delivery::Control); Error.clear(); };
+	if (control == "Close") { if (!CloseStarted) { CloseStarted = Now(); MP::Writer leave(Kind::Leave, Session, Epoch); for (const auto& player: Players) if (player.Connected) Net.Send(player.Address, leave.Data, Delivery::Control); } return; }
+	if (control == "Return") { ReturnToLobby(); return; }
+	if (Playing) return;
+	if (control == "Start") { StartGame(); report(); return; }
+	if (!text.empty() && (control == "Gold" || control == "Difficulty" || control == "Bandwidth")) {
+		const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value); if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size()) return;
+	}
+	bool changed = false;
+	if (control == "Activity") {
+		if (!text.empty()) { value = -1; for (int i = 0; i < Activities.size(); ++i) if (Activities[i]->GetPresetName() == text) value = i; }
+		if (value >= 0 && value < Activities.size()) { ActivityIndex = value; LoadScenes(); changed = true; }
+	} else if (control == "Scene") {
+		if (!text.empty()) { value = -1; for (int i = 0; i < Scenes.size(); ++i) if (Scenes[i]->GetPresetName() == text) value = i; }
+		if (value >= 0 && value < Scenes.size()) { SceneIndex = value; SceneName = Scenes[value]->GetPresetName(); changed = true; }
+	} else if (control == "Gold" && value >= 0 && value <= 1000000) { Gold = value; changed = true; }
+	else if (control == "Difficulty" && value >= 0 && value <= 100) { Difficulty = value; changed = true; }
+	else if (control == "Bandwidth" && value >= 1 && value <= 48) { BandwidthMbps = value; changed = true; }
+	else if (control == "Fog" && value >= 0 && value <= 1) { Fog = value != 0; changed = true; }
+	else if (control == "Deploy" && value >= 0 && value <= 1) { Deploy = value != 0; changed = true; }
+	else if (control == "Orbit" && value >= 0 && value <= 1) { ClearOrbit = value != 0; changed = true; }
+	else if (control.starts_with("Faction") && control.size() == 8 && value >= 0 && value < Factions.size()) { const int team = control.back() - '0'; if (team >= 0 && team < 4) { Tech[team] = Factions[value]; changed = true; } }
+	else if (control.starts_with("Team") && control.size() == 5 && value >= 0 && value < 4 && (AvailableTeams & (1 << value))) { const int player = control.back() - '0'; if (player >= 0 && player < 4 && Players[player].Connected) { Players[player].Team = uint8_t(value); changed = true; } }
+	else if (control.starts_with("Release") && control.size() == 8) { const int player = control.back() - '0'; if (player >= 0 && player < 4 && !Players[player].Connected) { Net.Close(Players[player].Address); Players[player] = Player(); changed = true; } }
+	if (changed) SettingsChanged();
+}
 void MultiplayerMan::Open() {
 	m_Impl->UI = true; g_UInputMan.TrapMousePos(false);
 	if (!m_Impl->Playing) g_MenuMan.SetMultiplayerMenuBackground(true);
@@ -384,14 +492,14 @@ void MultiplayerMan::UpdateMenu() { if (!m_Impl->CursorVerification) m_Impl->Upd
 void MultiplayerMan::DrawUI() { m_Impl->Draw(); }
 void MultiplayerMan::Stop() { m_Impl->Stop(); }
 void MultiplayerMan::HandleActivityExit() { m_Impl->HandleActivityExit(); }
-bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smokeTest) {
+bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smokeTest, bool hosted) {
 	auto& impl = *m_Impl; impl.UI = true; impl.Smoke = smokeTest;
 	impl.SmokeWorldLoss = smokeTest && std::getenv("CCCP_MPSMOKE_WORLD_LOSS") && std::string(std::getenv("CCCP_MPSMOKE_WORLD_LOSS")) == "1";
 	impl.SmokeCombatStress = smokeTest && std::getenv("CCCP_MPSMOKE_COMBAT");
 	impl.SmokeExplosionBurst = smokeTest && std::getenv("CCCP_MPSMOKE_BURST");
 	impl.SmokeEncounter = smokeTest && std::getenv("CCCP_MPSMOKE_ENCOUNTER");
 	impl.SmokeNativeBaseline = impl.SmokeEncounter && std::getenv("CCCP_MPSMOKE_BASELINE");
-	impl.Online = std::getenv("CCCP_MP_SERVICE") != nullptr;
+	impl.Hosted = hosted || (smokeTest && std::getenv("CCCP_MPSMOKE_HOSTED")); impl.Online = impl.Hosted || std::getenv("CCCP_MP_SERVICE") != nullptr;
 	if (!host && impl.Online) std::snprintf(impl.JoinCode, sizeof(impl.JoinCode), "%s", address.c_str());
 	if (smokeTest) {
 		impl.SmokeDeployment = std::getenv("CCCP_MPSMOKE_DEPLOYMENT") != nullptr;
@@ -407,7 +515,7 @@ bool MultiplayerMan::StartRoom(bool host, const std::string& address, bool smoke
 	if (smokeTest) {
 		impl.Smoke = true; impl.SmokeStarted = impl.SmokeStageTime = Now();
 		std::ofstream("build-mp/" + impl.SmokeRole + "-smoke.log") << (started ? "START" : "FAIL: " + impl.Error) << '\n';
-		if (host && started) { for (int i = 0; i < impl.Activities.size(); ++i) if (impl.Activities[i]->GetPresetName() == (impl.SmokeEncounter ? "Brain vs Brain" : "Test Activity")) { impl.ActivityIndex = i; impl.LoadScenes(); break; } if (impl.SmokeDeployment || impl.SmokeEncounter) { for (int i = 0; i < impl.Scenes.size(); ++i) if (impl.Scenes[i]->GetPresetName() == (impl.SmokeEncounter ? "Cave Bunkers" : "Grasslands")) impl.SceneIndex = i; impl.SceneName = impl.Scenes[impl.SceneIndex]->GetPresetName(); } impl.Lobby(); }
+		if (host && started && !impl.Hosted) { for (int i = 0; i < impl.Activities.size(); ++i) if (impl.Activities[i]->GetPresetName() == (impl.SmokeEncounter ? "Brain vs Brain" : "Test Activity")) { impl.ActivityIndex = i; impl.LoadScenes(); break; } if (impl.SmokeDeployment || impl.SmokeEncounter) { for (int i = 0; i < impl.Scenes.size(); ++i) if (impl.Scenes[i]->GetPresetName() == (impl.SmokeEncounter ? "Cave Bunkers" : "Grasslands")) impl.SceneIndex = i; impl.SceneName = impl.Scenes[impl.SceneIndex]->GetPresetName(); } impl.Lobby(); }
 	}
 	return started;
 }
@@ -447,7 +555,7 @@ void MultiplayerMan::CaptureVerificationFrame() {
 }
 bool MultiplayerMan::IsUIOpen() const { return m_Impl->UI || m_Impl->State == Impl::Mode::Client || m_Impl->State == Impl::Mode::Connecting || m_Impl->State == Impl::Mode::Reconnecting; }
 bool MultiplayerMan::IsHostingMatch() const { return m_Impl->State == Impl::Mode::Host && m_Impl->Playing; }
-bool MultiplayerMan::IsRemotePlayer(int player) const { return IsHostingMatch() && player > 0 && player < 4 && m_Impl->Players[player].Token != 0; }
+bool MultiplayerMan::IsRemotePlayer(int player) const { return IsHostingMatch() && player >= m_Impl->FirstRemote() && player < 4 && m_Impl->Players[player].Token != 0; }
 void MultiplayerMan::SetTextInputActive(int player, bool active) {
 	if (!IsRemotePlayer(player)) return; auto& peer = m_Impl->Players[player]; peer.TextActive = active; peer.Text.clear();
 	MP::Writer writer(Kind::TextInput, m_Impl->Session, m_Impl->Epoch); writer.U8(1); writer.U8(active); if (peer.Connected) m_Impl->Net.Send(peer.Address, writer.Data, Delivery::Control);
@@ -456,8 +564,8 @@ bool MultiplayerMan::TakeTextInput(int player, std::string& text) {
 	if (!IsRemotePlayer(player)) { text.clear(); return false; } text = std::move(m_Impl->Players[player].Text); m_Impl->Players[player].Text.clear(); return !text.empty();
 }
 bool MultiplayerMan::TakeLaunchRequest() { const bool launch = m_Impl->Launch; m_Impl->Launch = false; return launch; }
-int MultiplayerMan::ViewWidth(int screen) const { const auto* activity = g_ActivityMan.GetActivity(); const int player = activity && screen > 0 ? activity->PlayerOfScreen(screen) : 0; return IsHostingMatch() && player > 0 ? m_Impl->Players[player].ViewWidth : g_WindowMan.GetResX(); }
-int MultiplayerMan::ViewHeight(int screen) const { const auto* activity = g_ActivityMan.GetActivity(); const int player = activity && screen > 0 ? activity->PlayerOfScreen(screen) : 0; return IsHostingMatch() && player > 0 ? m_Impl->Players[player].ViewHeight : g_WindowMan.GetResY(); }
+int MultiplayerMan::ViewWidth(int screen) const { const auto* activity = g_ActivityMan.GetActivity(); const int player = activity && screen >= 0 ? activity->PlayerOfScreen(screen) : 0; return IsHostingMatch() && player >= m_Impl->FirstRemote() ? m_Impl->Players[player].ViewWidth : g_WindowMan.GetResX(); }
+int MultiplayerMan::ViewHeight(int screen) const { const auto* activity = g_ActivityMan.GetActivity(); const int player = activity && screen >= 0 ? activity->PlayerOfScreen(screen) : 0; return IsHostingMatch() && player >= m_Impl->FirstRemote() ? m_Impl->Players[player].ViewHeight : g_WindowMan.GetResY(); }
 bool MultiplayerMan::WantsState(int player) const {
 	if (m_Impl->SmokeNativeBaseline && m_Impl->SmokeStage == 3) return false;
 	if (!IsRemotePlayer(player)) return false; const auto& peer = m_Impl->Players[player];
@@ -733,19 +841,23 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 	if (!ReadHeader(reader, header)) { if (State == Mode::Host && Pending.contains(event.Address)) Reject(event.Address, "Incompatible multiplayer protocol. Install the same game build as the host."); return; }
 	if (State == Mode::Host) {
 		if (header.Type == Kind::Hello && Pending.contains(event.Address)) {
-			std::string name, version; uint64_t token; uint16_t width, height;
-			if (!reader.Text(name, 31) || name.empty() || !reader.U64(token) || !reader.Text(version) || !reader.U16(width) || width < 320 || width > 3840 || !reader.U16(height) || height < 180 || height > 2160 || !reader.Done()) { Reject(event.Address, "Invalid player registration."); return; }
+			if (Dedicated && CloseStarted) { Reject(event.Address, "The room was closed."); return; }
+			std::string name, version, owner; uint64_t token; uint16_t width, height;
+			if (!reader.Text(name, 31) || name.empty() || !reader.U64(token) || !reader.Text(version) || !reader.U16(width) || width < 320 || width > 3840 || !reader.U16(height) || height < 180 || height > 2160 || !reader.Text(owner, Relay::TokenLength) || !reader.Done()) { Reject(event.Address, "Invalid player registration."); return; }
 			if (version != c_GameVersion.str()) { Reject(event.Address, "Game version differs from the host. Install the same build."); return; }
 			int slot = -1;
-			if (token) for (int i = 1; i < 4; ++i) if (Players[i].Token == token && !Players[i].Connected && Players[i].ReservedUntil > Now()) slot = i;
-			if (slot < 0 && !Playing) for (int i = 1; i < 4; ++i) if (!Players[i].Token) { slot = i; break; }
+			if (token) for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Token == token && !Players[i].Connected && Players[i].ReservedUntil > Now()) slot = i;
+			if (slot < 0 && !Playing) {
+				if (Dedicated && !OwnerRegistered && !owner.empty() && owner == OwnerCredential && !Players[0].Token) { slot = 0; OwnerRegistered = true; }
+				else for (int i = Dedicated && OwnerRegistered ? 0 : 1; i < 4; ++i) if (!Players[i].Token) { slot = i; break; }
+			}
 			if (slot < 0) { Reject(event.Address, Playing ? "Match already started. Rejoin with your original player slot or wait for the lobby." : "All player slots are occupied or reserved for reconnecting players."); return; }
 			if (Smoke && token && Players[slot].Token == token) { ++SmokeRejoins; Verify("REJOIN: player " + std::to_string(slot + 1)); }
-			auto& player = Players[slot]; player.Address = event.Address; player.Name = name; player.Connected = true; player.Ready = false; player.ReservedUntil = 0;
+			auto& player = Players[slot]; player.Address = event.Address; player.Name = name; player.Connected = true; player.Ready = Dedicated && slot == OwnerSlot; player.ReservedUntil = 0;
 			if (!player.Token) player.Token = Token();
 			player.ViewWidth = width; player.ViewHeight = height; if (Playing && token == player.Token) player.Inputs.ReleaseControls(); else player.Inputs.Reset(); ClearWorldPackets(player); player.WorldResources.clear(); player.PendingResources.clear(); player.LastWorld = 0; player.LastAck = Now(); player.AudioReady = false; player.ReplayLoops = true; Pending.erase(event.Address); Welcome(slot); return;
 		}
-		int slot = -1; for (int i = 1; i < 4; ++i) if (Players[i].Connected && Players[i].Address == event.Address) slot = i;
+		int slot = -1; for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Connected && Players[i].Address == event.Address) slot = i;
 		if (slot < 0 || header.Session != Session || (header.Epoch != Epoch && header.Type != Kind::Chat)) return;
 		auto& player = Players[slot];
 		if (header.Type == Kind::Input && Playing) { Input input; if (ReadInput(reader, input)) player.Inputs.Push(input, Now()); }
@@ -759,28 +871,31 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			else if (type == 0) { uint32_t id; if (reader.U32(id) && reader.Done() && !Newer(id, player.FrameID) && Newer(id, player.AckID)) { player.AckID = id; player.LastAck = Now(); if (!player.AudioReady) g_MultiplayerMan.SetTextInputActive(slot, player.TextActive); player.AudioReady = true; } }
 		}
 		else if (header.Type == Kind::TextInput && Playing) { uint8_t direction; std::string text; if (reader.U8(direction) && direction == 0 && reader.Text(text, 64) && reader.Done() && player.TextActive && player.Text.size() + text.size() <= 256) { player.Text += text; if (Smoke && text == "Shop text test") { player.SmokeTextSeen = true; Verify("GUI TEXT: player " + std::to_string(slot + 1)); } } }
-		else if (header.Type == Kind::Leave && reader.Done()) { Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Playing ? Now() + 60000 : 0; player.Inputs.ReleaseControls(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
+		else if (header.Type == Kind::RoomControl && Dedicated && slot == OwnerSlot) { std::string control, text; uint32_t value; if (reader.Text(control, 32) && reader.U32(value) && reader.Text(text, 192) && reader.Done()) ControlRoom(slot, control, std::bit_cast<int32_t>(value), text); }
+		else if (header.Type == Kind::Leave && reader.Done()) { if (Smoke && Dedicated && slot == 0 && SmokeStage == 3) SmokeHostedLeaveSequence = player.Inputs.LastSequence(); Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Dedicated || Playing ? Now() + 60000 : 0; player.Inputs.ReleaseControls(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
 		return;
 	}
 	if (event.Address != ServerAddress) return;
 	if (header.Type == Kind::Reject && (State == Mode::Connecting || State == Mode::Reconnecting)) { std::string message; if (reader.Text(message) && reader.Done()) { Error = message; Stop(); UI = true; } return; }
 	if (header.Type == Kind::Welcome && (State == Mode::Connecting || State == Mode::Reconnecting)) {
-		uint8_t slot; uint64_t token; std::string version;
-		if (!header.Session || !reader.U8(slot) || slot < 1 || slot > 3 || !reader.U64(token) || !token || !reader.Text(version) || version != c_GameVersion.str() || !reader.Done()) return;
-		const bool sameMatch = State == Mode::Reconnecting && Session == header.Session && Epoch == header.Epoch && ReconnectToken == token;
+		uint8_t slot, dedicated; uint64_t token; std::string version;
+		if (!header.Session || !reader.U8(slot) || slot > 3 || !reader.U64(token) || !token || !reader.Text(version) || version != c_GameVersion.str() || !reader.U8(dedicated) || dedicated > 1 || (!dedicated && slot == 0) || !reader.Done()) return;
+		const bool sameMatch = (State == Mode::Reconnecting || ResumingSlot) && Session == header.Session && Epoch == header.Epoch && ReconnectToken == token;
+		ResumingSlot = false;
 		if (sameMatch) {
 			for (size_t i = 0; i < InputCount; ++i) if (LocalInput.Held & (uint64_t(1) << i)) ++LocalInput.Releases[i];
 			for (size_t i = 0; i < 3; ++i) if (LocalInput.MouseHeld & (1 << i)) ++LocalInput.MouseReleases[i];
 			LocalInput.Held = 0; LocalInput.MouseHeld = 0; LocalInput.AimX = LocalInput.AimY = LocalInput.MoveX = LocalInput.MoveY = 0;
 		} else LocalInput = {};
-		Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
+		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
 	}
 	if (State != Mode::Client || header.Session != Session) return;
 	if (header.Type == Kind::Chat) { uint8_t player; std::string message; if (reader.U8(player) && player < 4 && reader.Text(message, 192) && reader.Done()) AddChat(player, message); return; }
-	if (header.Type == Kind::Leave && reader.Done()) { Stop(); Error = "The host closed the room."; UI = true; return; }
+	if (header.Type == Kind::RoomControl) { std::string control, text; uint32_t value; if (reader.Text(control, 32) && reader.U32(value) && reader.Text(text, 192) && reader.Done() && control == "Error") Error = text; return; }
+	if (header.Type == Kind::Leave && reader.Done()) { ResumeSlots.erase(ResumeKey()); const bool requested = CloseStarted != 0; Stop(); Error = requested ? "" : "The room was closed."; Notice = requested ? "Room closed." : ""; UI = true; return; }
 	if (header.Type == Kind::Lobby && (header.Epoch == Epoch || Newer(header.Epoch, Epoch))) {
-		uint8_t playing; std::string room, activity, scene;
-		if (!reader.U8(playing) || playing > 1 || !reader.Text(room, 63) || !reader.Text(activity) || !reader.Text(scene)) return;
+		uint8_t playing, dedicated, ownerSlot; std::string room, activity, scene;
+		if (!reader.U8(playing) || playing > 1 || !reader.U8(dedicated) || dedicated > 1 || !reader.U8(ownerSlot) || ownerSlot > 3 || !reader.Text(room, 63) || !reader.Text(activity) || !reader.Text(scene)) return;
 		uint8_t difficulty, fog, deploy, clearOrbit, teams, cpu; uint32_t gold; std::array<std::string, 4> tech;
 		if (!reader.U8(difficulty) || difficulty > 100 || !reader.U32(gold) || gold > 1000000 || !reader.U8(fog) || fog > 1 || !reader.U8(deploy) || deploy > 1 || !reader.U8(clearOrbit) || clearOrbit > 1 || !reader.U8(teams) || teams > 15 || !reader.U8(cpu) || cpu > 4) return;
 		for (auto& faction: tech) if (!reader.Text(faction)) return;
@@ -791,7 +906,13 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		if (Epoch != header.Epoch) { Epoch = header.Epoch; LocalInput = {}; ClearSounds(); TextActive = false; LastFrameReceived = Now(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; TextureWidth = TextureHeight = 0; }
 		if (changedMatch && !playing && Playing) { Played = true; Notice = "Round complete. Ready up for the next match."; }
 		if (changedMatch && playing) Notice.clear();
-		Playing = playing != 0; RoomName = room; ActivityName = activity; SceneName = scene; if (!Playing || changedMatch) UI = !Playing;
+		Hosted = dedicated != 0; OwnerSlot = ownerSlot; Playing = playing != 0; RoomName = room; ActivityName = activity; SceneName = scene; if (!Playing || changedMatch) UI = !Playing;
+		if (Hosted) {
+			if (Activities.empty()) LoadActivities();
+			for (int i = 0; i < Activities.size(); ++i) if (Activities[i]->GetPresetName() == activity) { ActivityIndex = i; LoadScenes(); break; }
+			for (int i = 0; i < Scenes.size(); ++i) if (Scenes[i]->GetPresetName() == scene) SceneIndex = i;
+			ActivityName = activity; SceneName = scene;
+		}
 		Difficulty = difficulty; Gold = static_cast<int>(gold); Fog = fog; Deploy = deploy; ClearOrbit = clearOrbit; AvailableTeams = teams; CPUTeam = cpu; Tech = std::move(tech);
 		if (!Playing) g_AudioMan.SetStreamListener(Vector(), false);
 		if (changedMatch && !Playing) { ClearSounds(); TextActive = false; SDL_StopTextInput(g_WindowMan.GetWindow()); }
@@ -871,7 +992,7 @@ void MultiplayerMan::Impl::SampleInput() {
 
 void MultiplayerMan::ApplyInputs() {
 	if (!IsHostingMatch()) return;
-	for (int i = 1; i < 4; ++i) if (IsRemotePlayer(i)) g_UInputMan.SetRemoteInput(i, m_Impl->Players[i].Inputs.Consume(Now()));
+	for (int i = m_Impl->FirstRemote(); i < 4; ++i) if (IsRemotePlayer(i)) g_UInputMan.SetRemoteInput(i, m_Impl->Players[i].Inputs.Consume(Now()));
 }
 
 void MultiplayerMan::Impl::Tick() {
@@ -888,28 +1009,40 @@ void MultiplayerMan::Impl::Tick() {
 	std::erase_if(Sounds, [](const auto& entry) { return !entry.second->IsBeingPlayed(); });
 	for (const auto& event: Net.Poll()) {
 		if (event.Kind == TransportEvent::Type::Data) Receive(event);
+		else if (event.Kind == TransportEvent::Type::HostedRoom) {
+			Hosted = HostedEndpoint = true; OwnerCredential.assign(event.Data.begin(), event.Data.end()); ServerAddress = event.Address;
+			std::snprintf(JoinCode, sizeof(JoinCode), "%s", Net.RoomCode().c_str());
+			std::string host; uint16_t port;
+			if (!Address(ServerAddress, host, port) || !Net.Connect(host, port, Password, Error)) { Stop(); UI = true; }
+			else { State = Mode::Connecting; ConnectStarted = now; NextRetry = now + 4000; Error.clear(); if (Smoke && SmokeRole == "host") { std::ofstream file("build-mp/room-code.txt"); file << JoinCode; } }
+		}
 		else if (event.Kind == TransportEvent::Type::RoomCode) { Error.clear(); Verify("ROOM CODE: " + Relay::DisplayCode(event.Address)); if (Smoke && State == Mode::Host) { std::ofstream file("build-mp/room-code.txt"); file << event.Address; } }
 		else if (event.Kind == TransportEvent::Type::ServiceStatus) Error = event.Error;
 		else if (event.Kind == TransportEvent::Type::Connected) { if (State == Mode::Host) Pending[event.Address] = now; else if (State == Mode::Connecting || State == Mode::Reconnecting) Hello(event.Address); }
 		else if (event.Kind == TransportEvent::Type::Discovered) { MP::Reader reader(event.Data); Header header; std::string room; uint8_t count, playing; if (ReadHeader(reader, header) && header.Type == Kind::Announcement && reader.Text(room, 63) && reader.U8(count) && count <= 4 && reader.U8(playing) && playing <= 1 && reader.Done()) Discovered[event.Address] = room + " (" + std::to_string(count) + "/4" + (playing ? ", in game)" : ", lobby)"); }
+		else if (event.Kind == TransportEvent::Type::Failed && HostedEndpoint && State == Mode::Connecting && event.Error.starts_with("Host did not respond.") && now - ConnectStarted < 120000) { Error = "Connecting to your AWS match server..."; NextRetry = now + 500; }
 		else if (event.Kind == TransportEvent::Type::Failed) { Error = event.Error; if (State != Mode::Reconnecting) { Stop(); UI = true; } }
 		else if (event.Kind == TransportEvent::Type::Disconnected) {
 			if (State == Mode::Host) {
 				Pending.erase(event.Address);
-				for (int i = 1; i < 4; ++i) if (Players[i].Address == event.Address && Players[i].Connected) { Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); g_UInputMan.ClearRemoteInput(i); Lobby(); }
+				for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Address == event.Address && Players[i].Connected) { Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); g_UInputMan.ClearRemoteInput(i); Lobby(); }
 			} else if (State == Mode::Client && event.Address == ServerAddress) { State = Mode::Reconnecting; ConnectStarted = now; NextRetry = now + 1000; UI = true; Error = "Connection interrupted. Reconnecting to your player slot..."; g_UInputMan.TrapMousePos(false); ClearSounds(); }
 		}
 	}
-	if (State == Mode::Connecting && now - ConnectStarted > 10000) { Error = "Connection timed out. Check the host address and UDP port."; Stop(); UI = true; }
+	if (State == Mode::Connecting && HostedEndpoint && now >= NextRetry) Join(true);
+	if (CloseStarted && State == Mode::Client) { if (now - CloseStarted > 10000) { CloseStarted = 0; Error = "The server has not confirmed closing the room. Try again."; } else if (now >= CloseRetry) { SendControl("Close"); CloseRetry = now + 1000; } }
+	if (CloseStarted && Dedicated && now - CloseStarted > 3000) { Stop(); System::SetQuit(); return; }
+	std::erase_if(ResumeSlots, [now](const auto& entry) { return entry.second.Expires <= now; });
+	if (State == Mode::Connecting && now - ConnectStarted > (Hosted ? 120000 : 10000)) { Error = "Connection timed out. Check the host address and UDP port."; Stop(); UI = true; }
 	if (State == Mode::Reconnecting) { if (now - ConnectStarted > 20000) { Error = "Unable to reconnect. Your host keeps the slot for 60 seconds."; Stop(); UI = true; } else if (now >= NextRetry) Join(true); }
 	if (State == Mode::Host) {
 		if (Playing && WarmingGuests && !g_ActivityMan.ActivitySetToRestart()) if (auto* activity = g_ActivityMan.GetActivity(); activity && g_SceneMan.GetScene()) {
-			const bool ready = std::all_of(Players.begin() + 1, Players.end(), [](const auto& player) { return !player.Token || (player.Connected && player.AckID != 0); });
+			const bool ready = std::all_of(Players.begin() + FirstRemote(), Players.end(), [this](const auto& player) { return !player.Token || (Dedicated && !player.Connected) || (player.Connected && player.AckID != 0); });
 			activity->SetPaused(!ready);
 			if (ready) { WarmingGuests = false; Verify("SCENE: every guest has the complete battlefield"); }
 		}
 		for (auto it = Pending.begin(); it != Pending.end();) { if (now - it->second > 5000) { Net.Close(it->first); it = Pending.erase(it); } else ++it; }
-		for (int i = 1; i < 4; ++i) {
+		for (int i = FirstRemote(); i < 4; ++i) {
 			auto& player = Players[i];
 			if (!Playing && player.Token && !player.Connected && now >= player.ReservedUntil) { Net.Close(player.Address); player = Player(); Lobby(); }
 			for (unsigned preload = 0; Playing && player.Connected && !player.SceneQueue.empty() && player.WorldPackets.size() < 512 && preload < 32; ++preload) {
@@ -939,7 +1072,7 @@ void MultiplayerMan::Impl::Tick() {
 			if (player.SnapshotStarted && std::none_of(player.WorldPackets.begin(), player.WorldPackets.end(), [](const auto& packet) { return packet.second == Delivery::State; })) player.SnapshotStarted = false;
 			if (Playing && player.Token) SendAudio(i); else g_AudioMan.ClearSoundEvents(i);
 		}
-		g_AudioMan.ClearSoundEvents(0);
+		if (!Dedicated) g_AudioMan.ClearSoundEvents(0);
 	}
 	SampleInput();
 	while (!RecentWorldUpdates.empty() && now >= RecentWorldUpdates.front() && now - RecentWorldUpdates.front() >= 1000) RecentWorldUpdates.pop_front();
@@ -951,7 +1084,7 @@ void MultiplayerMan::Impl::Tick() {
 		std::ofstream log(System::GetUserdataDirectory() + (host ? "LogMultiplayer-host.txt" : "LogMultiplayer-guest.txt"), NetworkLogSamples++ % 1800 ? std::ios::app : std::ios::trunc);
 		log << "time_ms=" << now << " playing=" << Playing;
 		if (host) {
-			for (int i = 1; i < 4; ++i) if (Players[i].Connected) log << " guest=" << i << " ack_age_ms=" << (now >= Players[i].LastAck ? now - Players[i].LastAck : 0) << " resource_flight=" << Players[i].ResourceFlight.Bytes() << ' ' << Net.Diagnostics(Players[i].Address);
+			for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Connected) log << " guest=" << i << " ack_age_ms=" << (now >= Players[i].LastAck ? now - Players[i].LastAck : 0) << " resource_flight=" << Players[i].ResourceFlight.Bytes() << ' ' << Net.Diagnostics(Players[i].Address);
 		} else log << " render_fps=" << FPS << " world_hz=" << RecentWorldUpdates.size() << " update_age_ms=" << (LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0) << " transport_ping_ms=" << Net.Ping(ServerAddress) << " snapshot_chunks=" << SnapshotChunksReceived << " assembled=" << SnapshotsAssembled << ' ' << Net.Diagnostics(ServerAddress);
 		log << '\n';
 	}
@@ -962,12 +1095,18 @@ void MultiplayerMan::Impl::Tick() {
 		if (SceneReceived && now - SceneReceivedAt > 5000) missing.insert(SceneMissing.begin(), SceneMissing.end());
 		for (auto id : ResourceRequests.Select(missing, now)) { MP::Writer request(Kind::WorldAck, Session, Epoch); request.U8(2); request.U64(id); Net.Send(ServerAddress, request.Data, Delivery::Control); }
 	}
+	if (Dedicated) {
+		if (!OwnerRegistered && now >= OwnerClaimDeadline && std::any_of(Players.begin(), Players.end(), [](const auto& player) { return player.Connected; })) { OwnerRegistered = true; OwnerCredential.clear(); Lobby(); }
+		if (std::any_of(Players.begin(), Players.end(), [](const auto& player) { return player.Connected; })) DedicatedLastOccupied = now;
+		if (now - DedicatedLastOccupied >= uint64_t(DedicatedIdleSeconds) * 1000) { Stop(); System::SetQuit(); return; }
+		if (now - DedicatedLastStatus >= 1000 && !DedicatedStatus.empty()) { DedicatedLastStatus = now; std::ofstream status(DedicatedStatus, std::ios::trunc); status << "ready=1\nconnected=" << std::count_if(Players.begin(), Players.end(), [](const auto& player) { return player.Connected; }) << "\nplaying=" << Playing << "\nheadless=" << g_WindowMan.IsHeadless() << '\n'; }
+	}
 	SmokeTick();
 	if (!CursorVerification && g_MenuMan.GetIsInMenuScreen()) UpdateMenu();
 }
 
 void MultiplayerMan::Impl::SmokeTick() {
-	if (!Smoke) return; const auto now = Now();
+	if (!Smoke) return; if (Dedicated || Hosted) { HostedSmokeTick(); return; } const auto now = Now();
 	if (SmokeDeployment) { DeploymentTick(); return; }
 	if (SmokeEncounter) { EncounterTick(); return; }
 	if (State == Mode::Host && Playing && WarmingGuests) SmokeStageTime = now;
@@ -1068,6 +1207,88 @@ void MultiplayerMan::Impl::SmokeTick() {
 		if (SmokeStage == 3 && now - SmokeStageTime > (SmokeCombatStress ? 10000 : 6000) && Presented >= SmokeSecondStart + 20 && Texture) { SmokeStage = 4; SmokeCapture = true; const bool chat = std::any_of(Chat.begin(), Chat.end(), [](const auto& line) { return line.find("Guest room chat test") != std::string::npos; }); Verify(std::string(SmokeLoopPlays >= 2 && SmokeLoopStopped && chat ? "SECOND MATCH: " : "FAIL: audio replay, stop or chat missing. ") + "state updates=" + std::to_string(Presented - SmokeSecondStart) + " FPS=" + std::to_string(FPS) + " sounds=" + std::to_string(AudioReceived)); Verify(World.IntermediateFrames() > 20 && World.Rendered() > World.Updates() * 2 ? "PASS: guest draws changing intermediate frames independently of host state updates" : "FAIL: guest local rendering did not produce independent intermediate movement"); }
 		if (SmokeStage == 4 && !Playing) { const bool passed = Played && UI && !Texture && !TextActive && Sounds.empty() && !Players[LocalSlot].Ready; Verify(passed ? "PASS: automatic game-over returned guest to the same lobby with readiness and gameplay cleared" : "FAIL: guest game-over lobby cleanup"); SmokeCapture = true; SmokeStage = 5; }
 	} else if (SmokeStage == 5 && State == Mode::Idle) System::SetQuit(true);
+}
+
+void MultiplayerMan::Impl::HostedSmokeTick() {
+	const auto now = Now();
+	if (now - SmokeStarted > 240000) { Verify("FAIL: hosted multiplayer timed out: " + Error); System::SetQuit(true); return; }
+	if (Dedicated) {
+		if (Playing && WarmingGuests) { SmokeStageTime = now; return; }
+		if (SmokeStage == 0 && Playing) { SmokeStage = 1; SmokeStageTime = now; Verify("HOSTED: dedicated server started first match with every human remote"); }
+		if (SmokeStage == 1 || SmokeStage == 3) {
+			if (SmokeStage == 1) for (int player = 0; player <= SmokeGuests; ++player) SmokeGUIKeySeen[player] |= g_UInputMan.KeyHeld(SDL_SCANCODE_BACKSPACE, player);
+			for (int player = 0; player <= SmokeGuests; ++player) if (auto* actor = g_ActivityMan.GetActivity()->GetControlledActor(player)) {
+				if (!SmokeActorSeen[player]) { SmokeActorSeen[player] = true; SmokeActorStartX[player] = actor->GetPos().GetX(); }
+				SmokeActorMoved[player] |= std::abs(actor->GetPos().GetX() - SmokeActorStartX[player]) > 5;
+				SmokeFireSeen[player] |= actor->GetController()->IsState(ControlState::WEAPON_FIRE);
+			}
+			if (!SmokeLoop && !SmokeLoopStopped && now - SmokeStageTime > 1500) {
+				for (int player = 0; player <= SmokeGuests; ++player) g_MultiplayerMan.SetTextInputActive(player, true);
+				SmokeLoop = std::make_unique<SoundContainer>(); SmokeLoop->GetTopLevelSoundSet().AddSound("Base.rte/Sounds/Craft/ThrusterLoop.flac", false); SmokeLoop->SetLoopSetting(-1); SmokeLoop->SetImmobile(true); SmokeLoop->SetVolume(.013f); SmokeLoop->Play();
+			}
+			if (SmokeLoop && now - SmokeStageTime > 10000) { SmokeLoop->Stop(); SmokeLoop.reset(); SmokeLoopStopped = true; }
+			if (SmokeCombatStress && SmokeStage == 3 && now - SmokeStageTime > 3000 && now - SmokeStageTime < 9500 && now - SmokeLastExplosion >= 250) {
+				SmokeLastExplosion = now;
+				if (const auto* preset = g_PresetMan.GetEntityPreset("TDExplosive", "Frag Grenade", "Base.rte")) for (int player = 0; player <= SmokeGuests; ++player) if (auto* actor = g_ActivityMan.GetActivity()->GetControlledActor(player)) { auto* grenade = dynamic_cast<MOSRotating*>(preset->Clone()); grenade->SetPos(actor->GetPos() + Vector(180, -60)); grenade->GibThis(Vector(), actor); delete grenade; ++SmokeExplosions; }
+			}
+		}
+		if (SmokeStage == 1 && !SmokeReconnected && now - SmokeStageTime > 5000 && Players[0].Connected && Players[0].AckID) {
+			SmokeReconnected = true; SmokeHostedSession = Session; SmokeHostedOtherFrame = Players[1].FrameID;
+			Net.Close(Players[0].Address); Players[0].Connected = Players[0].Ready = false; Players[0].ReservedUntil = now + 60000; Players[0].Inputs.ReleaseControls(); ClearWorldPackets(Players[0]); g_UInputMan.ClearRemoteInput(0); Lobby();
+			Verify("HOSTED: interrupted creator connection while server and other players stay in combat");
+		}
+		if (SmokeStage == 1 && SmokeReconnected && !Players[0].Connected && Players[1].FrameID > SmokeHostedOtherFrame + 5 && Session == SmokeHostedSession && Playing) SmokeHostedContinued = true;
+		if (SmokeStage == 1 && now - SmokeStageTime > 16000) {
+			if (!SmokeHostedContinued || SmokeRejoins < 1 || !Players[0].Connected || Session != SmokeHostedSession) { Verify("FAIL: owner disconnect interrupted authority or creator failed to reconnect"); System::SetQuit(true); return; }
+			Verify("PASS: owner disconnect preserves the match; server keeps sending states and creator rejoins original slot");
+			ReturnToLobby(); SmokeStage = 2; SmokeStageTime = now;
+			for (int i = 0; i < Activities.size(); ++i) if (Activities[i]->GetPresetName() == "One-Man Army") { ActivityIndex = i; LoadScenes(); break; }
+			SmokeActorSeen.fill(false); SmokeActorMoved.fill(false); SmokeFireSeen.fill(false); SmokeLoopStopped = false; SettingsChanged();
+		}
+		if (SmokeStage == 2 && Playing) { SmokeStage = 3; SmokeStageTime = now; Verify("HOSTED: room owner started rematch on independent server"); }
+		if (SmokeStage == 3 && now - SmokeStageTime > 35000) {
+			bool passed = g_WindowMan.IsHeadless() && g_WindowMan.GetWindow() == nullptr && OwnerSlot != 0 && Players[OwnerSlot].Connected && SmokeRejoins >= 2 && SmokeHostedLeaveSequence && Players[0].Inputs.LastSequence() > SmokeHostedLeaveSequence + 20;
+			for (int player = 0; player <= SmokeGuests; ++player) {
+				const auto& peer = Players[player];
+				passed &= peer.Connected && peer.AckID && peer.Inputs.LastSequence() && SmokeActorMoved[player] && SmokeFireSeen[player] && SmokeGUIKeySeen[player] && peer.SmokeTextSeen && (!SmokeCombatStress || (peer.SmokeRadialKeyboardSeen && peer.SmokeRadialMouseSeen && peer.SmokeQCameraSeen && peer.SmokeQCameraMoved));
+				Verify("REMOTE PLAYER: " + std::to_string(player) + " input=" + std::to_string(Players[player].Inputs.LastSequence()) + " moved=" + std::to_string(SmokeActorMoved[player]) + " fired=" + std::to_string(SmokeFireSeen[player]));
+				Verify("REMOTE CONTROLS: " + std::to_string(player) + " GUI key=" + std::to_string(SmokeGUIKeySeen[player]) + " text=" + std::to_string(peer.SmokeTextSeen) + " digital radial=" + std::to_string(peer.SmokeRadialKeyboardSeen) + " mouse radial=" + std::to_string(peer.SmokeRadialMouseSeen) + " Q selection=" + std::to_string(peer.SmokeQCameraSeen) + " Q camera moved=" + std::to_string(peer.SmokeQCameraMoved));
+			}
+			if (!passed) { Verify("FAIL: dedicated runtime, remote controls or combat simulation"); System::SetQuit(true); return; }
+			g_ActivityMan.EndActivity(); SmokeStage = 4; SmokeStageTime = now;
+		}
+		if (SmokeStage == 4 && !Playing) { Verify("PASS: headless dedicated authority, all remote inputs, combat, owner transfer, reconnect and two-match lobby lifecycle"); SmokeStage = 5; }
+		return;
+	}
+	if (State == Mode::Client) {
+		if (!SmokeChatSent) { SmokeChatSent = true; MP::Writer chat(Kind::Chat, Session, Epoch); chat.Text("Hosted room chat test", 192); Net.Send(ServerAddress, chat.Data, Delivery::Control); }
+		if (!Playing && (SmokeStage == 0 || SmokeStage == 2) && now - SmokeReadySent > 1000) {
+			if (!Menu) UpdateMenu();
+			if (Admin()) { if (std::count_if(Players.begin(), Players.end(), [](const auto& peer) { return peer.Connected && peer.Ready; }) == SmokeGuests + 1) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted owner start button"); } }
+			else if (!Players[LocalSlot].Ready) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted player ready button"); }
+			SmokeReadySent = now;
+		}
+		if (Playing && World.Ready() && !World.Paused() && SmokeStage == 0) { SmokeStage = 1; SmokeStageTime = now; SmokeCapture = true; Verify("HOSTED: client renders server-authoritative match"); }
+		if (SmokeStage == 1 && !Playing) { SmokeStage = 2; SmokeCapture = true; Verify("HOSTED: returned to same lobby after creator reconnect"); }
+		if (SmokeStage == 2 && Playing && World.Ready() && !World.Paused()) { SmokeStage = 3; SmokeStageTime = now; SmokeSecondStart = Presented; SmokeCapture = true; }
+		if (SmokeStage == 3 && Playing) SmokeHostedIndependent |= World.Rendered() > World.Updates() && World.IntermediateFrames() > 20;
+		if (SmokeStage == 3 && Playing && World.Ready() && !SmokeHostedCombatCaptured && now - SmokeStageTime > 3500) { SmokeHostedCombatCaptured = SmokeCapture = true; }
+		if (SmokeStage == 3 && SmokeRole == "host" && !SmokeHostedLeft && now - SmokeStageTime > 4000) {
+			UI = true; UpdateMenu(); Menu->QueueVerificationClick("Leave"); UpdateMenu(); Menu->QueueVerificationClick("ConfirmLeave"); UpdateMenu();
+			SmokeHostedLeft = true; SmokeHostedLeaveAt = now; Verify("LEAVE: creator used native leave confirmation during combat"); return;
+		}
+		if (SmokeHostedLeft && !SmokeHostedReturned && Playing && World.Ready() && !World.Paused()) { SmokeHostedReturned = true; SmokeCapture = true; SmokeStageTime = now; SmokeHostedCombatCaptured = false; SmokeRadialKeyboardCaptured = SmokeRadialMouseCaptured = SmokeQCameraCaptured = false; SmokeAutoHeld = 0; Verify(LocalSlot == 0 ? "PASS: native leave and room-code join restores creator's original slot during combat" : "FAIL: native leave and join lost player slot"); }
+		if (SmokeStage == 3 && !Playing) {
+			const bool passed = Played && Presented > SmokeSecondStart + 20 && SmokeHostedIndependent && (SmokeRole != "host" || SmokeHostedReturned);
+			Verify(passed ? "PASS: hosted client received two matches, combat updates and persistent lobby" : "FAIL: hosted client world updates or rematch");
+			SmokeStage = 4; SmokeStageTime = now; SmokeCapture = true;
+		}
+		if (SmokeStage == 4 && !Playing && now - SmokeStageTime > 2000) {
+			SmokeStage = 5;
+			if (Admin()) { Menu->QueueVerificationClick("CloseRoom"); UpdateMenu(); Menu->QueueVerificationClick("ConfirmCloseRoom"); UpdateMenu(); Verify("CLOSE: owner requested explicit hosted shutdown"); }
+		}
+	} else if (State == Mode::Idle && SmokeStage == 3 && SmokeHostedLeft && now - SmokeHostedLeaveAt > 1000) { Join(); Verify("JOIN: creator used room-code join after native leave"); }
+	else if (State == Mode::Idle && SmokeStage >= 4) { if (Notice == "Room closed.") Verify("PASS: owner explicitly closes hosted room"); System::SetQuit(); }
 }
 
 void MultiplayerMan::Impl::EncounterTick() {
@@ -1401,8 +1622,8 @@ void MultiplayerMan::Impl::HandleAudio(MP::Reader& reader) {
 }
 
 std::string MultiplayerMan::Impl::StartBlock() const {
-	if (State != Mode::Host || Playing) return "";
-	if (Online && !Net.IsRelayReady()) return "Connecting to the room server...";
+	if (!Admin() || Playing) return "";
+	if (Online && !Dedicated && !Hosted && !Net.IsRelayReady()) return "Connecting to the room server...";
 	if (Activities.empty() || Scenes.empty()) return "Choose an activity with a compatible battlefield.";
 	int count = 0;
 	std::array<bool, 4> teams{};
@@ -1415,6 +1636,7 @@ std::string MultiplayerMan::Impl::StartBlock() const {
 		}
 	}
 	const auto* activity = Activities[ActivityIndex];
+	if (!count) return "Invite a player before starting the match.";
 	if (count > activity->GetMaxPlayerSupport()) return "This activity supports up to " + std::to_string(activity->GetMaxPlayerSupport()) + " players.";
 	if (const int cpu = activity->GetCPUTeam(); cpu >= 0 && cpu < 4) teams[cpu] = true;
 	if (std::count(teams.begin(), teams.end(), true) < activity->GetMinTeamsRequired()) return "Choose at least " + std::to_string(activity->GetMinTeamsRequired()) + " different teams for this activity.";
@@ -1423,8 +1645,8 @@ std::string MultiplayerMan::Impl::StartBlock() const {
 
 MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 	MultiplayerMenuGUI::View view;
-	view.Host = State == Mode::Host; view.Online = Online; view.LocalSlot = LocalSlot; view.Played = Played;
-	view.Page = State == Mode::Idle ? MultiplayerMenuGUI::Screen::Entry : State == Mode::Connecting || State == Mode::Reconnecting ? MultiplayerMenuGUI::Screen::Connecting : Playing ? UI ? MultiplayerMenuGUI::Screen::Session : MultiplayerMenuGUI::Screen::Loading : MultiplayerMenuGUI::Screen::Lobby;
+	view.Host = Admin(); view.Hosted = (Online && Hosted) || Dedicated; view.OwnerSlot = OwnerSlot; view.Online = Online; view.LocalSlot = LocalSlot; view.Played = Played;
+	view.Page = State == Mode::Idle ? MultiplayerMenuGUI::Screen::Entry : CloseStarted || State == Mode::Connecting || State == Mode::Reconnecting ? MultiplayerMenuGUI::Screen::Connecting : Playing ? UI ? MultiplayerMenuGUI::Screen::Session : MultiplayerMenuGUI::Screen::Loading : MultiplayerMenuGUI::Screen::Lobby;
 	view.Name = Name; view.Room = Room; view.Password = Password; view.Service = ServiceAddress; view.DefaultService = DefaultService;
 	view.Code = State == Mode::Idle || State == Mode::Connecting || State == Mode::Reconnecting ? JoinCode : Relay::DisplayCode(Net.RoomCode());
 	view.Address = State == Mode::Idle ? HostAddress : ServerAddress;
@@ -1439,8 +1661,9 @@ MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 		view.LoadingMessage = SceneReceived ? "Preparing the terrain and scenery: " + std::to_string(SceneManifest.size() - std::min(SceneManifest.size(), SceneMissing.size())) + " / " + std::to_string(SceneManifest.size()) : "Waiting for the battlefield from your host...";
 	}
 	view.Title = State == Mode::Idle ? "M U L T I P L A Y E R" : Playing ? "M A T C H   S E S S I O N" : "M U L T I P L A Y E R   L O B B Y";
-	view.Subtitle = State == Mode::Idle ? "Gather your group. Choose a battlefield. Stay together between rounds." : State == Mode::Reconnecting ? "Connection interrupted - restoring your original player slot." : State == Mode::Connecting ? "Joining your host..." : RoomName + (view.Host ? "  /  You are the host" : std::string(Online ? "  /  Relay " : "  /  Host ") + std::to_string(Net.Ping(ServerAddress)) + " ms");
+	view.Subtitle = State == Mode::Idle ? "Gather your group. Choose a battlefield. Stay together between rounds." : State == Mode::Reconnecting ? "Connection interrupted - restoring your original player slot." : State == Mode::Connecting ? (Hosted ? "Connecting to your AWS match server..." : "Joining your host...") : RoomName + (view.Host ? (Hosted ? "  /  Room owner - AWS server" : "  /  You are the host") : std::string(Hosted ? "  /  Server " : Online ? "  /  Relay " : "  /  Host ") + std::to_string(Net.Ping(ServerAddress)) + " ms");
 	if (State == Mode::Client && Playing) view.Subtitle += "  /  " + std::to_string(static_cast<int>(FPS)) + " fps";
+	if (CloseStarted) { view.Subtitle = "Closing your room..."; view.Notice = "Waiting for the match server to confirm."; }
 	if (State == Mode::Client && Playing) view.NetworkStatus = "World updates: " + std::to_string(RecentWorldUpdates.size()) + "/s   Last update: " + (LastFrameReceived ? std::to_string(Now() - LastFrameReceived) + " ms ago" : "waiting");
 	for (const auto* activity: Activities) view.Activities.push_back(activity->GetPresetName());
 	for (const auto* scene: Scenes) view.Scenes.push_back(scene->GetPresetName());
@@ -1453,7 +1676,7 @@ MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 		if (view.TeamNames[team].empty()) view.TeamNames[team] = "Team " + std::to_string(team + 1);
 		if (AvailableTeams & (1 << team)) view.HumanTeams.push_back(team);
 	}
-	if (State == Mode::Client) {
+	if (State == Mode::Client && !Admin()) {
 		view.Activities = {ActivityName}; view.Scenes = {SceneName}; view.ActivityIndex = view.SceneIndex = 0;
 	}
 	view.SelectedScene = State == Mode::Host && !Scenes.empty() ? Scenes[SceneIndex] : dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName));
@@ -1475,6 +1698,7 @@ MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 }
 
 void MultiplayerMan::Impl::UpdateMenu() {
+	if (Dedicated) return;
     const bool visible = UI || State == Mode::Connecting || State == Mode::Reconnecting || (State == Mode::Client && Playing && (!Texture || World.Paused()));
 	if (!visible) { if (Menu) Menu->Hide(); return; }
 	if (!Menu) Menu = std::make_unique<MultiplayerMenuGUI>();
@@ -1492,10 +1716,10 @@ void MultiplayerMan::Impl::UpdateMenu() {
 		else if (control == "Code") copy(JoinCode);
 		else if (control == "Address") copy(HostAddress);
 		else if (control == "Service") copy(ServiceAddress);
-		else if (control == "Bandwidth") number(BandwidthMbps, 1, 48);
+		else if (control == "Bandwidth") { number(BandwidthMbps, 1, 48); if (Admin() && State == Mode::Client) SendControl(control, BandwidthMbps); }
 		else if (control == "Port") number(Port, 1, 65535);
 		else if (control == "Quality") Quality = std::clamp(event.Value, 0, 1);
-		else if (control == "Online") { Online = event.Value == 0; Error.clear(); }
+		else if (control == "Online") { Online = event.Value != 2; Hosted = event.Value == 0; Error.clear(); }
 		else if (control == "SaveService" || control == "DefaultService") {
 			if (control == "DefaultService") std::snprintf(ServiceAddress, sizeof(ServiceAddress), "%s", DefaultService.c_str());
 			std::string host; uint16_t port;
@@ -1508,11 +1732,13 @@ void MultiplayerMan::Impl::UpdateMenu() {
 		else if (control == "EntryBack") { Stop(); UI = false; g_MenuMan.SetMultiplayerMenuBackground(false); }
 		else if (control == "Cancel") { Stop(); UI = true; }
 		else if (control == "Copy") { SDL_SetClipboardText((Online ? Relay::DisplayCode(Net.RoomCode()) : view.Address).c_str()); Notice = "Invitation copied."; }
-		else if (control == "Primary") { if (State == Mode::Host) StartGame(); else if (State == Mode::Client && !Playing) SendReady(!Players[LocalSlot].Ready, Players[LocalSlot].Team); }
+		else if (control == "Primary") { if (State == Mode::Host) StartGame(); else if (Admin()) SendControl("Start"); else if (State == Mode::Client && !Playing) SendReady(!Players[LocalSlot].Ready, Players[LocalSlot].Team); }
 		else if (control == "Resume") { UI = false; Menu->Hide(); g_UInputMan.TrapMousePos(true); }
 		else if (control == "Session") { UI = true; g_UInputMan.TrapMousePos(false); }
-		else if (control == "Return") ReturnToLobby();
+		else if (control == "Return") { if (State == Mode::Host) ReturnToLobby(); else if (Admin()) SendControl("Return"); }
+		else if (control == "ConfirmCloseRoom" && Admin()) { SendControl("Close"); CloseStarted = Now(); CloseRetry = CloseStarted + 1000; UI = true; }
 		else if (control == "ConfirmLeave") {
+			if (Hosted && Online && State == Mode::Client && ReconnectToken) ResumeSlots[ResumeKey()] = {ReconnectToken, Now() + 60000, Session, Epoch, LocalInput};
 			if (State == Mode::Host && g_ActivityMan.GetActivity()) { g_ActivityMan.EndActivity(); g_ActivityMan.PauseActivity(); }
 			Stop(); UI = true;
 		} else if (control == "Send" && !event.Text.empty() && Now() - LastChatSent >= 250) {
@@ -1523,8 +1749,13 @@ void MultiplayerMan::Impl::UpdateMenu() {
 			const int slot = control.back() - '0'; if (slot < 0 || slot >= 4 || !Players[slot].Connected) continue;
 			const uint8_t team = static_cast<uint8_t>(view.HumanTeams[event.Value]);
 			if (State == Mode::Host) { Players[slot].Team = team; Players[slot].Ready = slot == 0; Error.clear(); Lobby(); }
+			else if (Admin()) SendControl(control, team);
 			else if (slot == LocalSlot) SendReady(false, team);
-		} else if (State == Mode::Host && !Playing) {
+		} else if (Admin() && !Playing) {
+			if (State != Mode::Host) { std::string selection = event.Text;
+				if (control == "Activity" && event.Value >= 0 && event.Value < view.Activities.size()) selection = view.Activities[event.Value];
+				if (control == "Scene" && event.Value >= 0 && event.Value < view.Scenes.size()) selection = view.Scenes[event.Value];
+				SendControl(control, event.Value, selection); continue; }
 			bool changed = false;
 			if (control == "Activity" && event.Value >= 0 && event.Value < Activities.size()) { ActivityIndex = event.Value; LoadScenes(); changed = true; }
 			else if (control == "Scene" && event.Value >= 0 && event.Value < Scenes.size()) { SceneIndex = event.Value; SceneName = Scenes[SceneIndex]->GetPresetName(); changed = true; }
@@ -1541,6 +1772,7 @@ void MultiplayerMan::Impl::UpdateMenu() {
 }
 
 void MultiplayerMan::Impl::Draw() {
+	if (Dedicated) return;
     if (std::getenv("CCCP_MPSMOKE_PRESENTATION")) {
         std::ofstream log("build-mp/presentation-smoke.log");
         const bool presentation = World.VerifyPresentation(log);
@@ -1551,7 +1783,7 @@ void MultiplayerMan::Impl::Draw() {
     }
 	if (CursorVerification) {
 		const auto& test = CursorCases[CursorStage]; State = test.State; UI = test.UI; Playing = test.Playing;
-		LocalSlot = State == Mode::Client ? 1 : 0;
+		LocalSlot = State == Mode::Client ? 1 : 0; Hosted = test.Hosted || State == Mode::Idle; OwnerSlot = test.Owner ? LocalSlot : 0; Dedicated = false;
 		if (CursorPreparedStage != CursorStage) { CursorFrames = 0; if (CursorStage == 0) g_MenuMan.SetMultiplayerMenuBackground(true); }
 		if (Activities.empty()) LoadActivities();
 		RoomName = "Multiplayer lobby"; Players[0].Name = "Host"; Players[0].Token = 1; Players[0].Connected = Players[0].Ready = true;

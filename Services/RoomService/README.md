@@ -1,6 +1,6 @@
 # Cortex Command room service
 
-Runnable invitation-code broker and UDP relay. A host creates a ten-character code, displayed as `ABCDE-F2345`; guests enter it. Every game socket connects **outward** to this service, so hosts do not forward router ports. The host runs authoritative physics and Lua; every player renders their own view locally. The service needs no game assets, display, FMOD, or GPU.
+Runnable invitation-code broker and UDP relay. A host creates a ten-character code, displayed as `ABCDE-F2345`; guests enter it. Every game socket connects **outward** to this service, so hosts do not forward router ports. For player-hosted rooms, the host runs authoritative physics and Lua; every player renders their own view locally. With hosted workers configured, the broker launches one independent dedicated game process per room and all four human slots connect as clients. The dedicated runtime and AWS stack are documented in [the dedicated-server guide](../DedicatedServer/README.md). The relay service itself needs no game assets, display, FMOD, or GPU. Hosted worker processes use matching game assets and FMOD with no audio output, and require no display or GPU.
 
 ## Run locally
 

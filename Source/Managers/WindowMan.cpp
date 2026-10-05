@@ -88,6 +88,7 @@ WindowMan::WindowMan() {
 WindowMan::~WindowMan() = default;
 
 void WindowMan::Destroy() {
+	if (m_Headless) { return; }
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplSDL3_Shutdown();
 	ImGui::DestroyContext();
@@ -97,6 +98,17 @@ void WindowMan::Destroy() {
 }
 
 void WindowMan::Initialize() {
+	if (m_Headless) {
+		// Server views use the dimensions reported by each client. These CPU
+		// buffers provide a sensible default before clients have joined.
+		m_ResX = c_DefaultResX;
+		m_ResY = c_DefaultResY;
+		m_ResMultiplier = 1;
+		m_EnableVSync = false;
+		m_Fullscreen = false;
+		m_ScreenBuffer = std::make_shared<RenderTarget>(FloatRect(0, 0, m_ResX, m_ResY), FloatRect(0, 0, m_ResX, m_ResY));
+		return;
+	}
 	SDL_free(SDL_GetDisplays(&m_NumDisplays));
 
 	m_PrimaryWindowDisplayIndex = SDL_GetPrimaryDisplay();
@@ -261,12 +273,14 @@ void WindowMan::CreateBackBufferTexture() {
 }
 
 int WindowMan::GetWindowResX() {
+	if (m_Headless) { return m_ResX; }
 	int w, h;
 	SDL_GetWindowSizeInPixels(m_PrimaryWindow.get(), &w, &h);
 	return w;
 }
 
 int WindowMan::GetWindowResY() {
+	if (m_Headless) { return m_ResY; }
 	int w, h;
 	SDL_GetWindowSizeInPixels(m_PrimaryWindow.get(), &w, &h);
 	return h;
@@ -274,6 +288,7 @@ int WindowMan::GetWindowResY() {
 
 void WindowMan::SetVSyncEnabled(bool enable) {
 	m_EnableVSync = enable;
+	if (m_Headless) { return; }
 
 	// Workaround for DWM frame stutter
 	// See https://github.com/libsdl-org/SDL/issues/5797
@@ -287,6 +302,7 @@ void WindowMan::SetVSyncEnabled(bool enable) {
 }
 
 void WindowMan::RefocusWindow() const {
+	if (m_Headless) { return; }
 	SDL_RaiseWindow(m_PrimaryWindow.get());
 }
 
@@ -691,6 +707,7 @@ void WindowMan::QueueWindowEvent(const SDL_Event& windowEvent) {
 }
 
 void WindowMan::Update() {
+	if (m_Headless) { m_EventQueue.clear(); return; }
 	// Some bullshit we have to deal with to correctly focus windows in multi-display fullscreen so mouse binding/unbinding works correctly. Not relevant for single window.
 	// This is SDL's fault for not having handling to raise a window so it's top-most without taking focus of it.
 	// Don't process any focus events this update if either of these has been set in the previous one.
@@ -743,6 +760,10 @@ void WindowMan::Update() {
 }
 
 void WindowMan::ClearBackbuffer(bool clearFrameMan) {
+	if (m_Headless) {
+		if (clearFrameMan) { g_FrameMan.ClearBackBuffer32(); }
+		return;
+	}
 	GL_CHECK(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 	GL_CHECK(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 	if (clearFrameMan) {
@@ -756,6 +777,7 @@ void WindowMan::ClearBackbuffer(bool clearFrameMan) {
 }
 
 void WindowMan::UploadFrame() {
+	if (m_Headless) { return; }
 
 	m_ScreenBuffer->Begin(g_ActivityMan.IsInActivity());
 

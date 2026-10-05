@@ -24,6 +24,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -46,7 +47,14 @@ bool System::s_CaseSensitive = true;
 const std::string System::s_DataDirectory = "Data/";
 const std::string System::s_ScreenshotDirectory = "ScreenShots/";
 const std::string System::s_ModDirectory = "Mods/";
-const std::string System::s_UserdataDirectory = "Userdata/";
+const std::string System::s_UserdataDirectory = []() {
+	if (const char* directory = std::getenv("CCCP_USERDATA_PATH"); directory && *directory) {
+		std::string path = std::filesystem::path(directory).lexically_normal().generic_string();
+		if (path.back() != '/') { path.push_back('/'); }
+		return path;
+	}
+	return std::string("Userdata/");
+}();
 const std::string System::s_ModulePackageExtension = ".rte";
 const std::string System::s_ZippedModulePackageExtension = ".zip";
 const std::unordered_set<std::string> System::s_SupportedExtensions = {".ini", ".txt", ".lua", ".cfg", ".bmp", ".png", ".jpg", ".jpeg", ".wav", ".ogg", ".mp3", ".flac"};
@@ -100,13 +108,14 @@ void System::Initialize(const char* thisExePathAndName) {
 	if (!PathExistsCaseSensitive(s_WorkingDirectory + s_ModDirectory)) {
 		MakeDirectory(s_WorkingDirectory + s_ModDirectory);
 	}
-	if (!PathExistsCaseSensitive(s_WorkingDirectory + s_UserdataDirectory)) {
-		MakeDirectory(s_WorkingDirectory + s_UserdataDirectory);
+	const std::filesystem::path userdataPath = std::filesystem::path(s_WorkingDirectory) / s_UserdataDirectory;
+	if (!PathExistsCaseSensitive(userdataPath.generic_string())) {
+		MakeDirectory(userdataPath.generic_string());
 	}
 
 #ifdef _WIN32
 	// Consider Settings.ini not existing as first time boot, then create quick launch files if they are missing.
-	if (!std::filesystem::exists(s_WorkingDirectory + s_UserdataDirectory + "Settings.ini")) {
+	if (!std::getenv("CCCP_USERDATA_PATH") && !std::filesystem::exists(userdataPath / "Settings.ini")) {
 		std::array<std::pair<const std::string, const std::string>, 6> quickLaunchFiles = {{
 		    {"Launch Actor Editor.bat", R"(start "" "Cortex Command.exe" -editor "ActorEditor")"},
 		    {"Launch Area Editor.bat", R"(start "" "Cortex Command.exe" -editor "AreaEditor")"},
@@ -139,6 +148,11 @@ bool System::MakeDirectory(const std::string& pathToMake) {
 }
 
 bool System::PathExistsCaseSensitive(const std::string& pathToCheck) {
+	// Dedicated workers can keep their private module data outside the game
+	// install tree. The filesystem provides case checking there on Unix.
+	if (std::filesystem::path(s_UserdataDirectory).is_absolute() && pathToCheck.starts_with(s_UserdataDirectory)) {
+		return std::filesystem::exists(pathToCheck);
+	}
 	// Use Hash for compiler independent hashing.
 	if (s_CaseSensitive) {
 		if (s_WorkingTree.empty()) {
@@ -157,10 +171,10 @@ bool System::PathExistsCaseSensitive(const std::string& pathToCheck) {
 	return std::filesystem::exists(pathToCheck);
 }
 
-void System::EnableLoggingToCLI() {
+void System::EnableLoggingToCLI(bool allocateConsole) {
 #ifdef _WIN32
 	// Create a console instance for the current process
-	if (AllocConsole()) {
+	if (allocateConsole && AllocConsole()) {
 		CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
 		GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &consoleInfo);
 		consoleInfo.dwSize.X = 192;
@@ -169,7 +183,7 @@ void System::EnableLoggingToCLI() {
 		static std::ofstream consoleOutStream("CONOUT$", std::ios::out);
 		// Set std::cout stream buffer to consoleOut's buffer to redirect the output
 		std::cout.rdbuf(consoleOutStream.rdbuf());
-	} else {
+	} else if (allocateConsole) {
 		MessageBox(nullptr, "Failed to allocate a console instance for this process, game console output will not be printed to CLI!", "RTE Warning! (>_<)", MB_OK);
 		return;
 	}

@@ -26,9 +26,10 @@ public:
 	};
 	struct View {
 		Screen Page = Screen::Entry;
-		bool Host = false, Online = true, Ready = false, Played = false;
+		// Host grants room administration; a hosted room's administrator is still a client.
+		bool Host = false, Online = true, Hosted = true, Ready = false, Played = false;
 		bool Fog = false, Deploy = false, ClearOrbit = false;
-		int LocalSlot = 0, Difficulty = 50, Gold = 5000, Bandwidth = 3, Port = 8000;
+		int LocalSlot = 0, OwnerSlot = 0, Difficulty = 50, Gold = 5000, Bandwidth = 3, Port = 8000;
 		int ActivityIndex = 0, SceneIndex = 0;
 		std::string Name, Room, Code, Address, Password, Service, DefaultService;
 		std::string Title, Subtitle, Error, Notice, StartBlock, Activity, SceneName, Description;
@@ -61,7 +62,7 @@ private:
 	GUICollectionBox* m_Root = nullptr;
 	Screen m_Page = Screen::Entry;
 	Tab m_Tab = Tab::Join;
-	bool m_Host = false, m_Rebuild = true, m_Visible = false, m_CursorDrawn = false, m_ConfirmLeave = false;
+	bool m_Host = false, m_Online = true, m_Hosted = true, m_Rebuild = true, m_Visible = false, m_CursorDrawn = false, m_ConfirmLeave = false, m_ConfirmCloseRoom = false;
 	int m_Width = 0, m_Height = 0, m_BoxWidth = 0, m_BoxHeight = 0;
 	int m_VerificationPage = -1;
 	bool m_Verification = false;

@@ -5,6 +5,7 @@
 #include "PresetMan.h"
 #include "SceneMan.h"
 #include "FrameMan.h"
+#include "WindowMan.h"
 #include "Draw.h"
 
 using namespace RTE;
@@ -513,6 +514,7 @@ void MOSprite::Draw(BITMAP* pTargetBitmap,
 	Vector spritePos(m_Pos + spriteOffset - targetPos);
 
 	if (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans) MultiplayerWorld::Sprite(*this, m_aSprite[m_Frame], spritePos + targetPos, Vector(), 0, 1, m_HFlipped, mode == g_DrawWhite, mode == g_DrawTrans ? g_FrameMan.GetCurrentAlpha() : 255);
+	if (g_WindowMan.IsHeadless() && pTargetBitmap == g_FrameMan.GetBackBuffer8() && (mode == g_DrawColor || mode == g_DrawWhite || mode == g_DrawTrans)) { return; }
 	// Take care of wrapping situations
 	Vector aDrawPos[4];
 	aDrawPos[0] = spritePos;

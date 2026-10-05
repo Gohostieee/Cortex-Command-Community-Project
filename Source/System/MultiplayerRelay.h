@@ -31,7 +31,7 @@ inline std::span<const uint8_t> UnwrapPayload(std::span<const uint8_t> bytes) {
  if (version == CarrierVersion && kind == uint8_t(MP::Kind::Hello) && session == CarrierCookie && epoch == 0) return ValidPayload(reader.Rest()) ? reader.Rest() : std::span<const uint8_t>{};
  return bytes;
 }
-enum class Kind : uint8_t { Create, Join, Accepted, PeerUp, PeerDown, Route, Drop, Leave, Error };
+enum class Kind : uint8_t { Create, Join, Accepted, PeerUp, PeerDown, Route, Drop, Leave, Error, HostedCreate, HostedAccepted };
 class Writer : public MP::Writer {
 public:
  explicit Writer(Kind kind): MP::Writer(MP::Kind::Hello) {
@@ -40,7 +40,7 @@ public:
 };
 inline bool Header(MP::Reader& reader, Kind& kind) {
  uint8_t id, value; uint32_t magic; uint16_t version;
- if (!reader.U8(id) || !reader.U32(magic) || !reader.U16(version) || !reader.U8(value) || id != PacketID || magic != Magic || version != Version || value > static_cast<uint8_t>(Kind::Error)) return false;
+ if (!reader.U8(id) || !reader.U32(magic) || !reader.U16(version) || !reader.U8(value) || id != PacketID || magic != Magic || version != Version || value > static_cast<uint8_t>(Kind::HostedAccepted)) return false;
  kind = static_cast<Kind>(value); return true;
 }
 inline std::string NormalizeCode(const std::string& text) {

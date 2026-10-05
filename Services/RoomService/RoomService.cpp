@@ -1,5 +1,6 @@
 // Standalone invitation-code broker and bounded room relay. No game assets or GPU.
 #include "MultiplayerRelay.h"
+#include "HostedWorkers.h"
 #include "RakPeerInterface.h"
 #include "RakNetStatistics.h"
 #include "MessageIdentifiers.h"
@@ -27,11 +28,12 @@ struct Bucket {
  }
 };
 struct Member { std::string Address, Token; uint64_t Until = 0; };
-struct Room { std::array<Member, 4> Members; std::string Password, OwnerIP; };
-struct Connection { std::string IP, Code; uint8_t Slot = 255; uint64_t Since = Now(); Bucket Control, Bytes; };
+struct Room { std::array<Member, 4> Members; std::string Password, OwnerIP; bool Hosted = false; uint16_t Port = 0; };
+struct Connection { std::string IP, Code, HostedCode; bool HostedOwner = false; uint8_t Slot = 255; uint64_t Since = Now(); Bucket Control, Bytes; };
 class Service {
  RakNet::RakPeerInterface* Peer = RakNet::RakPeerInterface::GetInstance();
  std::map<std::string, Room> Rooms;
+ HostedWorkers Workers;
  std::unordered_map<std::string, Connection> Connections;
  struct IPLimit { Bucket Attempts; uint64_t Last = 0; };
  std::unordered_map<std::string, IPLimit> IPs;
@@ -103,9 +105,24 @@ class Service {
    return;
   }
   if (!connection.Control.Take(1, 10, now)) { ++Dropped; return; }
+  if (kind == R::Kind::HostedCreate) {
+   std::string code, password, token, name;
+   if (!reader.Text(code, R::CodeLength) || !code.empty() || !reader.Text(password, 63) || !reader.Text(token, R::TokenLength) || !token.empty() || !reader.Text(name, 63) || !reader.Done() || !connection.Code.empty() || !connection.HostedCode.empty() || !HostedWorkers::SafeText(name) || !HostedWorkers::SafeText(password)) { Error(address, "Invalid hosted room request."); return; }
+   auto& limit = IPs[connection.IP]; limit.Last = now;
+   if (!limit.Attempts.Take(1, 8, now)) { Error(address, "Too many requests. Try again shortly."); return; }
+   if (!Workers.Enabled()) { Error(address, "AWS hosting is unavailable on this room service. Choose player hosting or another server."); return; }
+   size_t owned = 0; for (const auto& [key, room] : Rooms) if (room.OwnerIP == connection.IP) ++owned;
+   if (Rooms.size() >= MaxRooms || owned >= 5) { Error(address, "The service is at room capacity. Try again later."); return; }
+   do code = RandomText(R::CodeLength, R::Alphabet); while (Rooms.contains(code));
+   token = RandomText(R::TokenLength, "0123456789abcdef");
+   const auto port = Workers.Launch(code, token, name.empty() ? "Cortex room" : name, password);
+   if (!port) { Error(address, "All AWS match servers are busy. Try again shortly."); return; }
+   auto& room = Rooms[code]; room.Hosted = true; room.Port = *port; room.Password = password; room.OwnerIP = connection.IP; room.Members[0].Token = token;
+   connection.HostedCode = code; connection.HostedOwner = true; connection.Since = now; return;
+  }
   if (kind == R::Kind::Create || kind == R::Kind::Join) {
    std::string code, password, token;
-   if (!reader.Text(code, R::CodeLength) || !reader.Text(password, 63) || !reader.Text(token, R::TokenLength) || !reader.Done() || !connection.Code.empty()) { Error(address, "Invalid room request."); return; }
+   if (!reader.Text(code, R::CodeLength) || !reader.Text(password, 63) || !reader.Text(token, R::TokenLength) || !reader.Done() || !connection.Code.empty() || !connection.HostedCode.empty()) { Error(address, "Invalid room request."); return; }
    auto& limit = IPs[connection.IP]; limit.Last = now;
    if (!limit.Attempts.Take(1, 8, now)) { Error(address, "Too many requests. Try again shortly."); return; }
    if (kind == R::Kind::Create) {
@@ -126,6 +143,7 @@ class Service {
     auto roomIt = Rooms.find(code);
     if (roomIt == Rooms.end() || roomIt->second.Password != password) { Error(address, "Room code or password is incorrect, or the room has expired."); return; }
     auto& room = roomIt->second;
+    if (room.Hosted) { connection.HostedCode = code; connection.HostedOwner = false; connection.Since = now; return; }
     if (room.Members[0].Address.empty()) { Error(address, "The host is reconnecting. Try again shortly."); return; }
     uint8_t slot = 255;
     if (!token.empty()) for (uint8_t i = 1; i < 4; ++i) if (room.Members[i].Token == token) { slot = i; if (!room.Members[i].Address.empty()) { const auto old = room.Members[i].Address; Detach(old, true); Peer->CloseConnection(Address(old), true); } break; }
@@ -144,7 +162,8 @@ class Service {
  }
 public:
  ~Service() { Peer->Shutdown(200); RakNet::RakPeerInterface::DestroyInstance(Peer); }
- bool Start(uint16_t port, const std::string& bind, size_t maxRooms, double mbps, const std::string& metrics) {
+ bool Start(uint16_t port, const std::string& bind, size_t maxRooms, double mbps, const std::string& metrics, const HostedWorkers::Settings& hosted) {
+  Workers.Config = hosted;
   MaxRooms = maxRooms; BytesPerSecond = mbps * 125000; MetricsPath = metrics;
   RakNet::SocketDescriptor socket(port, bind.c_str()); socket.socketFamily = AF_INET;
   const auto maxConnections = static_cast<unsigned>(std::min<size_t>(4096, MaxRooms * 4 + 32));
@@ -173,9 +192,18 @@ public:
   const auto now = Now();
   // A connected but unregistered socket gets ten seconds, preventing idle peers
   // from occupying all slots indefinitely. Rooms survive host outages for a minute.
-  for (auto it = Connections.begin(); it != Connections.end();) { if (it->second.Code.empty() && now - it->second.Since > 10000) { Peer->CloseConnection(Address(it->first), true); it = Connections.erase(it); } else ++it; }
+  for (auto it = Connections.begin(); it != Connections.end();) { if (it->second.Code.empty() && it->second.HostedCode.empty() && now - it->second.Since > 10000) { Peer->CloseConnection(Address(it->first), true); it = Connections.erase(it); } else ++it; }
   std::vector<std::string> expired;
-  for (auto& [code, room]: Rooms) { if (room.Members[0].Address.empty() && now >= room.Members[0].Until) expired.push_back(code); else for (int i = 1; i < 4; ++i) if (room.Members[i].Address.empty() && now >= room.Members[i].Until) room.Members[i] = {}; }
+  for (const auto& code : Workers.Poll()) EraseRoom(code);
+  for (auto& [address, connection] : Connections) if (!connection.HostedCode.empty()) {
+   const auto room = Rooms.find(connection.HostedCode);
+   if (room == Rooms.end() || now - connection.Since > 120000) { Error(address, "AWS match server could not start. Please create a new room."); connection.HostedCode.clear(); }
+   else if (Workers.Ready(connection.HostedCode)) {
+    R::Writer accepted(R::Kind::HostedAccepted); accepted.Text(connection.HostedCode, R::CodeLength); accepted.Text(Workers.Config.Address + ":" + std::to_string(room->second.Port), 253); accepted.Text(connection.HostedOwner ? room->second.Members[0].Token : "", R::TokenLength);
+    Send(address, accepted.Data); connection.HostedCode.clear();
+   }
+  }
+  for (auto& [code, room]: Rooms) { if (room.Hosted) continue; if (room.Members[0].Address.empty() && now >= room.Members[0].Until) expired.push_back(code); else for (int i = 1; i < 4; ++i) if (room.Members[i].Address.empty() && now >= room.Members[i].Until) room.Members[i] = {}; }
   for (const auto& code: expired) EraseRoom(code);
   std::erase_if(IPs, [now](const auto& item) { return now - item.second.Last > 60000; });
   if (now >= NextMetrics) {
@@ -187,7 +215,7 @@ public:
  }
 };
 int main(int argc, char** argv) {
- uint16_t port = 8001; std::string bind = "0.0.0.0", metrics; size_t rooms = 100; double mbps = 800;
+ uint16_t port = 8001; std::string bind = "0.0.0.0", metrics; size_t rooms = 100; double mbps = 800; HostedWorkers::Settings hosted;
  try { for (int i = 1; i < argc; ++i) {
   const std::string arg = argv[i]; if (arg == "--help") { std::cout << "cc-room-service [--port 8001] [--bind 0.0.0.0] [--max-rooms 100] [--max-mbps 800] [--metrics-file path]\n"; return 0; }
   if (i + 1 == argc) throw std::runtime_error("Missing option value"); const std::string value = argv[++i];
@@ -196,10 +224,19 @@ int main(int argc, char** argv) {
   else if (arg == "--max-rooms") { rooms = std::stoul(value); if (!rooms || rooms > 1000) throw std::runtime_error("Invalid room limit"); }
   else if (arg == "--max-mbps") { mbps = std::stod(value); if (!std::isfinite(mbps) || mbps < 1 || mbps > 10000) throw std::runtime_error("Invalid bandwidth limit"); }
   else if (arg == "--metrics-file") metrics = value;
+  else if (arg == "--game-executable") hosted.Executable = std::filesystem::absolute(value).string();
+  else if (arg == "--game-directory") hosted.Directory = std::filesystem::absolute(value).string();
+  else if (arg == "--hosted-address") hosted.Address = value;
+  else if (arg == "--state-directory") hosted.StateDirectory = std::filesystem::absolute(value).string();
+  else if (arg == "--game-port-base") { const int n = std::stoi(value); if (n < 1024 || n > 65527) throw std::runtime_error("Invalid worker base port"); hosted.PortBase = uint16_t(n); }
+  else if (arg == "--max-hosted") { hosted.Capacity = std::stoul(value); if (!hosted.Capacity || hosted.Capacity > 8) throw std::runtime_error("Hosted capacity must be 1 through 8"); }
+  else if (arg == "--idle-seconds") { hosted.IdleSeconds = std::stoul(value); if (hosted.IdleSeconds < 1 || hosted.IdleSeconds > 86400) throw std::runtime_error("Invalid worker idle timeout"); }
+  else if (arg == "--startup-seconds") { hosted.StartupSeconds = std::stoul(value); if (hosted.StartupSeconds < 1 || hosted.StartupSeconds > 600) throw std::runtime_error("Invalid worker startup timeout"); }
   else throw std::runtime_error("Unknown option: " + arg);
  } } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 2; }
  std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
- Service service; if (!service.Start(port, bind, rooms, mbps, metrics)) { std::cerr << "Unable to bind UDP service port.\n"; return 1; }
+ if (hosted.Capacity && (hosted.Executable.empty() || !std::filesystem::is_regular_file(hosted.Executable) || hosted.Directory.empty() || !std::filesystem::is_directory(hosted.Directory) || hosted.Address.empty() || hosted.Address.size() > 240 || hosted.Address.find_first_of(" :/\\\t\r\n") != std::string::npos || hosted.StateDirectory.empty())) { std::cerr << "Invalid hosted worker configuration.\n"; return 1; }
+ Service service; if (!service.Start(port, bind, rooms, mbps, metrics, hosted)) { std::cerr << "Unable to bind UDP service port.\n"; return 1; }
  while (Running) { service.Tick(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
  std::cout << "Room service stopped.\n"; return 0;
 }

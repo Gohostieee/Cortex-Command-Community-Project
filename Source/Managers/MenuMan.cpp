@@ -25,6 +25,11 @@ using namespace RTE;
 
 void MenuMan::Initialize(bool firstTimeInit) {
 	m_ActiveMenu = ActiveMenu::MenusDisabled;
+	if (g_WindowMan.IsHeadless()) {
+		m_IsInMenuScreen = false;
+		if (firstTimeInit) { g_LoadingScreen.Create(nullptr, nullptr, true); }
+		return;
+	}
 
 	m_GUIScreen = std::make_unique<AllegroScreen>(g_FrameMan.GetBackBuffer32());
 	m_GUIInput = std::make_unique<GUIInputWrapper>(-1, g_UInputMan.GetJoystickCount() > 0);
@@ -106,6 +111,7 @@ void MenuMan::SetActiveMenu() {
 }
 
 void MenuMan::HandleTransitionIntoMenuLoop() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	if (g_MultiplayerMan.IsUIOpen()) { SetMultiplayerMenuBackground(true); return; }
 	if (g_MetaMan.GameInProgress()) {
 		if (g_ActivityMan.SkipPauseMenuWhenPausingActivity()) {
@@ -131,13 +137,15 @@ void MenuMan::HandleTransitionIntoMenuLoop() {
 	}
 }
 
-void MenuMan::UpdateMultiplayerBackground() { m_TitleScreen->Update(); }
+void MenuMan::UpdateMultiplayerBackground() { if (m_TitleScreen) { m_TitleScreen->Update(); } }
 void MenuMan::SetMultiplayerMenuBackground(bool open) {
+	if (!m_TitleScreen) { return; }
 	if (open) m_TitleScreen->SkipIntro();
 	m_TitleScreen->SetTitleTransitionState(open ? TitleScreen::TitleTransition::ScenarioFadeIn : TitleScreen::TitleTransition::ScrollingFadeIn);
 }
 
 bool MenuMan::Update() {
+	if (g_WindowMan.IsHeadless()) { return false; }
 	m_TitleScreen->Update();
 	SetActiveMenu();
 
@@ -256,6 +264,7 @@ void MenuMan::UpdatePauseMenu() const {
 }
 
 void MenuMan::Draw() const {
+	if (g_WindowMan.IsHeadless()) { return; }
 	g_FrameMan.ClearBackBuffer32();
 
 	// Early return when changing resolution so screen remains black while everything is being recreated instead of being stuck showing a badly aligned title screen.

@@ -4,6 +4,7 @@
 #include <cmath>
 #include "Draw.h"
 #include "GLResourceMan.h"
+#include "WindowMan.h"
 #include "tracy/Tracy.hpp"
 #include "tracy/TracyOpenGL.hpp"
 
@@ -11,6 +12,12 @@ using namespace RTE;
 int BigTexture::s_MaxGLTextureSize{0};
 
 BigTexture::BigTexture(BITMAP* bitmap) {
+	if (g_WindowMan.IsHeadless()) {
+		m_Bitmap = bitmap;
+		m_Width = bitmap->w;
+		m_Height = bitmap->h;
+		return;
+	}
 	if (!s_MaxGLTextureSize) {
 		glGetIntegerv(GL_MAX_TEXTURE_SIZE, &s_MaxGLTextureSize);
 		s_MaxGLTextureSize /= 2;
@@ -59,6 +66,7 @@ BigTexture::~BigTexture() {
 }
 
 void BigTexture::Draw(Rectangle source, Rectangle dest) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	ZoneScoped;
 	TracyGpuZone("BigTexture::Draw");
 	float scaleX = dest.width / source.width;
@@ -98,6 +106,7 @@ void BigTexture::Draw(Rectangle source, Rectangle dest) {
 }
 
 void BigTexture::Update(const Box& updateRegion) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	ZoneScoped;
 	TracyGpuZone("BigTexture Upload");
 	if (!m_Bitmap->extra) {

@@ -186,7 +186,8 @@ void ConsoleMan::SaveInputLog(const std::string& filePath) {
 }
 
 bool ConsoleMan::SaveAllText(const std::string& filePath) {
-	Writer logWriter(filePath.c_str());
+	const std::string outputPath = g_WindowMan.IsHeadless() && std::filesystem::path(filePath).is_relative() ? System::GetUserdataDirectory() + filePath : filePath;
+	Writer logWriter(outputPath.c_str());
 	if (logWriter.WriterOK()) {
 		for (const std::string& loggedString: m_OutputLog) {
 			logWriter << loggedString;

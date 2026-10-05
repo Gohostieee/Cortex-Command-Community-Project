@@ -72,18 +72,20 @@ void MultiplayerMenuGUI::SetVerificationPage(int page) {
 
 void MultiplayerMenuGUI::Prepare(const View& view) {
 	const int width = g_WindowMan.GetResX(), height = g_WindowMan.GetResY();
-	if (m_Width != width || m_Height != height || m_Page != view.Page || m_Host != view.Host || m_Rebuild || !m_Manager) {
+	if (m_Width != width || m_Height != height || m_Page != view.Page || m_Host != view.Host || m_Online != view.Online || m_Hosted != view.Hosted || m_Rebuild || !m_Manager) {
 		Hide();
 		m_Manager.reset(); m_Input.reset(); m_Screen.reset(); m_MenuBitmap.reset();
 		if (m_Texture) { rlUnloadTexture(m_Texture); m_Texture = 0; }
-		if (m_Page != view.Page) { m_Tab = Tab::Join; m_ConfirmLeave = false; }
+		if (m_Page != view.Page) { m_Tab = Tab::Join; m_ConfirmLeave = m_ConfirmCloseRoom = false; }
+		if (m_Host && !view.Host && m_ConfirmCloseRoom) m_ConfirmLeave = m_ConfirmCloseRoom = false;
 		if (m_VerificationPage >= 0) {
 			const int page = m_VerificationPage;
 			m_Tab = page == 1 ? Tab::Host : page == 2 ? Tab::Connection : page == 3 ? Tab::Rules : page == 4 ? Tab::Factions : page == 5 ? Tab::Chat : Tab::Join;
-			m_ConfirmLeave = page == 6;
+			m_ConfirmLeave = page == 6 || page == 7;
+			m_ConfirmCloseRoom = page == 7;
 			m_VerificationPage = -1;
 		}
-		m_Width = width; m_Height = height; m_Page = view.Page; m_Host = view.Host;
+		m_Width = width; m_Height = height; m_Page = view.Page; m_Host = view.Host; m_Online = view.Online; m_Hosted = view.Hosted;
 		m_MenuBitmap = std::make_unique<AllegroBitmap>(); m_MenuBitmap->Create(width, height, 32);
 		m_Screen = std::make_unique<AllegroScreen>(m_MenuBitmap->GetBitmap());
 		m_Input = std::make_unique<GUIInputWrapper>(-1, true);
@@ -107,9 +109,10 @@ void MultiplayerMenuGUI::Build(const View& view) {
 	Label("Feedback", 16, h - 67, w - 32, 30, "", true);
 
 	if (m_ConfirmLeave) {
-		Label("ConfirmTitle", 24, 96, w - 48, 24, view.Host ? "CLOSE THIS ROOM?" : "LEAVE THIS ROOM?");
-		Label("ConfirmText", 24, 132, w - 48, 64, view.Host ? "Everyone will be disconnected. Return to the lobby to keep your group together for another match." : "You will leave the group. You can join again using the room code.", true);
-		Add("ConfirmLeave", "BUTTON", w - 184, h - 32, 168, 22, view.Host ? "Close room" : "Leave room");
+		const bool closeRoom = m_ConfirmCloseRoom || (view.Host && !view.Hosted);
+		Label("ConfirmTitle", 24, 96, w - 48, 24, closeRoom ? "CLOSE THIS ROOM?" : "LEAVE THIS ROOM?");
+		Label("ConfirmText", 24, 132, w - 48, 64, closeRoom ? "Everyone will be disconnected. Return to the lobby to keep your group together for another match." : view.Hosted ? "The server keeps your match running for the other players. You can join again using the room code." : "You will leave the group. You can join again using the room code.", true);
+		Add(m_ConfirmCloseRoom ? "ConfirmCloseRoom" : "ConfirmLeave", "BUTTON", w - 184, h - 32, 168, 22, closeRoom ? "Close room" : "Leave room");
 		Add("KeepRoom", "BUTTON", 16, h - 32, 168, 22, "Stay in room");
 		return;
 	}
@@ -121,9 +124,9 @@ void MultiplayerMenuGUI::Build(const View& view) {
 		dynamic_cast<GUIButton*>(m_Manager->GetControl(m_Tab == Tab::Connection ? "ConnectionTab" : m_Tab == Tab::Host || m_Tab == Tab::Rules ? "HostTab" : "JoinTab"))->SetPushed(true);
 		const int half = (w - 48) / 2;
 		if (m_Tab == Tab::Connection) {
-			Combo("Online", 16, 112, w - 32, {"Online - invitation codes", "Local network / direct address"}, view.Online ? 0 : 1);
+			Combo("Online", 16, 112, w - 32, {"Online - AWS hosted", "Online - player hosted", "Local network / direct address"}, view.Online ? view.Hosted ? 0 : 1 : 2);
 			Field("Service", 16, 146, w - 32, "Room server", view.Service, 255);
-			Label("ConnectionHelp", 16, 197, w - 32, 38, "Friends must use the same room server. Leave this as supplied for normal online play.", true);
+			Label("ConnectionHelp", 16, 197, w - 32, 38, view.Online ? view.Hosted ? "AWS runs the match for every player. Friends use the same room server and join with an invitation code." : "Friends must use the same room server. Player-hosted matches use the creator's computer to run game logic." : "Direct games connect to the host's computer. Enter its address or find a game on your local network.", true);
 			Add("SaveService", "BUTTON", 16, 245, half, 22, "Save server");
 			Add("DefaultService", "BUTTON", 32 + half, 245, half, 22, "Use default")->SetEnabled(!view.DefaultService.empty());
 			Add("EntryBack", "BUTTON", 16, h - 32, 160, 22, "Back to main menu");
@@ -132,18 +135,19 @@ void MultiplayerMenuGUI::Build(const View& view) {
 			Field("Password", 32 + half, 105, half, "Room password (optional)", view.Password, 63);
 			if (m_Tab == Tab::Host) {
 				Field("Room", 16, 158, w - 32, "Room name", view.Room, 63);
-				Label("HostHelp", 16, 214, w - 32, 22, "Create a lobby, invite your friends, then choose the battlefield together.", true);
+				Label("HostHelp", 16, 208, w - 32, 26, view.Online && view.Hosted ? "AWS runs your match. Invite your friends; your room keeps running if you disconnect." : "Create a lobby, invite your friends, then choose the battlefield together.", true);
 				Add("HostConnectionSettings", "BUTTON", 16, std::min(264, h - 93), 176, 22, "Connection settings");
 				Add("Create", "BUTTON", w - 184, h - 32, 168, 22, "Create lobby");
 			} else if (m_Tab == Tab::Rules) {
-				Label("HostConnectionTitle", 16, 155, w - 32, 16, "HOST CONNECTION SETTINGS", true);
-				Label("ResolutionInfo", 16, 180, w - 32, 22, "Each guest draws at their own game resolution.", true);
-				Field("Bandwidth", 16, 214, half, "Upload per guest (1-48 Mbps)", std::to_string(view.Bandwidth), 2);
+				Label("HostConnectionTitle", 16, 155, w - 32, 16, view.Online && view.Hosted ? "SERVER CONNECTION SETTINGS" : "HOST CONNECTION SETTINGS", true);
+				Label("ResolutionInfo", 16, 180, w - 32, 22, view.Online && view.Hosted ? "Every player draws locally. AWS handles physics, AI and game rules." : "Each guest draws at their own game resolution.", true);
+				Field("Bandwidth", 16, 214, half, view.Online && view.Hosted ? "Server stream budget (1-48 Mbps)" : "Upload per guest (1-48 Mbps)", std::to_string(view.Bandwidth), 2);
 				Field("Port", 32 + half, 214, half, "Direct connection port", std::to_string(view.Port), 5);
+				if (view.Online && view.Hosted) m_Manager->GetControl("Port")->SetEnabled(false);
 				Add("HostDone", "BUTTON", w - 184, h - 32, 168, 22, "Done");
 			} else {
 				Field(view.Online ? "Code" : "Address", 16, 158, w - 32, view.Online ? "Invitation code" : "Host address", view.Online ? view.Code : view.Address, view.Online ? 31 : 255);
-				Label("JoinHelp", 16, 214, w - 32, 38, view.Online ? "Ask your host for the room code. Your group stays together between matches." : "Enter the host's address, or find a game on your local network.", true);
+				Label("JoinHelp", 16, 214, w - 32, 38, view.Online ? "Ask your group for the room code. Your group stays together between matches." : "Enter the host's address, or find a game on your local network.", true);
 				if (!view.Online) { const int y = std::min(255, h - 93); Add("Discover", "BUTTON", 16, y, 150, 22, "Find LAN games"); Combo("LANRooms", 178, y, w - 194, view.LANRooms, -1); }
 				Add("Join", "BUTTON", w - 184, h - 32, 168, 22, "Join lobby");
 			}
@@ -153,7 +157,7 @@ void MultiplayerMenuGUI::Build(const View& view) {
 	}
 	if (view.Page == Screen::Connecting || view.Page == Screen::Loading) {
 		Label("ConnectTitle", 24, h / 2 - 35, w - 48, 24, view.Page == Screen::Loading ? "PREPARING THE BATTLEFIELD" : "CONNECTING TO YOUR GROUP");
-		Label("ConnectInfo", 24, h / 2, w - 48, 58, view.Page == Screen::Loading ? "The host is loading the scene. Your game will appear here as soon as it is ready." : "Your player slot and team are restored automatically when reconnecting.", true);
+		Label("ConnectInfo", 24, h / 2, w - 48, 58, view.Page == Screen::Loading ? view.Hosted ? "The server is loading the scene. Your game will appear here as soon as it is ready." : "The host is loading the scene. Your game will appear here as soon as it is ready." : "Your player slot and team are restored automatically when reconnecting.", true);
 		Add(view.Page == Screen::Loading ? "Session" : "Cancel", "BUTTON", 16, h - 32, 160, 22, view.Page == Screen::Loading ? "Session menu" : "Cancel");
 		return;
 	}
@@ -166,11 +170,12 @@ void MultiplayerMenuGUI::Build(const View& view) {
 			Add("MatchTab", "BUTTON", w - 184, h - 32, 168, 22, "Back to session");
 			return;
 		}
-		Label("SessionInfo", 24, 119, w - 48, 46, view.Host ? "The match continues while this menu is open. Return to the lobby to set up another round with the same group." : "The match continues while this menu is open. Your host can return everyone to the lobby for another round.", true);
+		Label("SessionInfo", 24, 119, w - 48, 46, view.Host ? "The match continues while this menu is open. Return to the lobby to set up another round with the same group." : view.Hosted ? "AWS keeps the match running while this menu is open. Your room owner can return everyone to the lobby." : "The match continues while this menu is open. Your host can return everyone to the lobby for another round.", true);
 		Add("Resume", "BUTTON", 24, 174, w - 48, 24, "Resume match");
 		if (view.Host) Add("Return", "BUTTON", 24, 210, w - 48, 24, "Return everyone to lobby");
 		Add("ChatTab", "BUTTON", 24, std::min(246, h - 93), w - 48, 22, "Room chat");
-		Add("Leave", "BUTTON", 16, h - 32, 160, 22, view.Host ? "Close room..." : "Leave room...");
+		Add("Leave", "BUTTON", 16, h - 32, 160, 22, view.Host && !view.Hosted ? "Close room..." : "Leave room...");
+		if (view.Host && view.Hosted) Add("CloseRoom", "BUTTON", w - 184, h - 32, 168, 22, "Close room...");
 		return;
 	}
 
@@ -235,7 +240,8 @@ void MultiplayerMenuGUI::Build(const View& view) {
 		} else Label("RulesSummary", x, 218, rw, 16, "", true);
 		Add("RulesTab", "BUTTON", x, h - 99, rw, 22, view.Host ? "Match rules and factions" : "View rules and factions");
 	}
-	Add("Leave", "BUTTON", 16, h - 32, 160, 22, view.Host ? "Close room..." : "Leave room...");
+	Add("Leave", "BUTTON", 16, h - 32, 160, 22, view.Host && !view.Hosted ? "Close room..." : "Leave room...");
+	if (view.Host && view.Hosted) Add("CloseRoom", "BUTTON", 184, h - 32, 160, 22, "Close room...");
 	Add("Primary", "BUTTON", w - 206, h - 32, 190, 22, "");
 }
 
@@ -247,7 +253,8 @@ void MultiplayerMenuGUI::Sync(const View& view) {
 	SetField("Name", view.Name); SetField("Room", view.Room); SetField("Password", view.Password);
 	SetField("Code", view.Code); SetField("Address", view.Address); SetField("Service", view.Service);
 	if (auto* rooms = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("LANRooms")); rooms && rooms->GetCount() != view.LANRooms.size()) { rooms->ClearList(); for (const auto& room: view.LANRooms) rooms->AddItem(room); }
-	if (auto* mode = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("Online")); mode && !mode->IsDropped() && mode->GetSelectedIndex() != (view.Online ? 0 : 1)) mode->SetSelectedIndex(view.Online ? 0 : 1);
+	const int connectionMode = view.Online ? view.Hosted ? 0 : 1 : 2;
+	if (auto* mode = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("Online")); mode && !mode->IsDropped() && mode->GetSelectedIndex() != connectionMode) mode->SetSelectedIndex(connectionMode);
 	if (view.Page == Screen::Loading) SetLabel("ConnectInfo", view.LoadingMessage.empty() ? "Preparing your battlefield..." : view.LoadingMessage);
 	if (view.Page == Screen::Session && !view.Host && !view.NetworkStatus.empty()) SetLabel("SessionInfo", view.NetworkStatus + "\nThe match continues while this menu is open.");
 	if (m_ConfirmLeave) return;
@@ -259,7 +266,7 @@ void MultiplayerMenuGUI::Sync(const View& view) {
 	if (auto* copy = m_Manager->GetControl("Copy")) copy->SetEnabled(view.Online ? !view.Code.empty() : !view.Address.empty());
 	for (int i = 0; i < 4; ++i) {
 		const auto& slot = view.Players[i]; const std::string suffix = std::to_string(i);
-		SetLabel("Player" + suffix, slot.Occupied ? slot.Name + (i == 0 ? " [HOST]" : i == view.LocalSlot ? " [YOU]" : "") : "Open player slot");
+		SetLabel("Player" + suffix, slot.Occupied ? slot.Name + (i == view.OwnerSlot ? view.Hosted ? " [OWNER]" : " [HOST]" : i == view.LocalSlot ? " [YOU]" : "") : "Open player slot");
 		SetLabel("Status" + suffix, slot.Status);
 		auto* team = dynamic_cast<GUIComboBox*>(m_Manager->GetControl("Team" + suffix));
 		if (team) {
@@ -331,8 +338,8 @@ std::vector<MultiplayerMenuGUI::Event> MultiplayerMenuGUI::Update(const View& vi
 			g_GUISound.ButtonPressSound()->Play();
 			if (name == "JoinTab" || name == "HostTab" || name == "HostDone" || name == "ConnectionTab" || name == "HostConnectionSettings" || name == "RulesTab" || name == "FactionsTab" || name == "ChatTab" || name == "MatchTab") {
 				m_Tab = name == "HostTab" || name == "HostDone" ? Tab::Host : name == "ConnectionTab" ? Tab::Connection : name == "RulesTab" || name == "HostConnectionSettings" ? Tab::Rules : name == "FactionsTab" ? Tab::Factions : name == "ChatTab" ? Tab::Chat : Tab::Join; m_Rebuild = true;
-			} else if (name == "Leave") { m_ConfirmLeave = m_Rebuild = true; }
-			else if (name == "KeepRoom") { m_ConfirmLeave = false; m_Rebuild = true; }
+			} else if (name == "Leave" || name == "CloseRoom") { m_ConfirmLeave = m_Rebuild = true; m_ConfirmCloseRoom = name == "CloseRoom"; }
+			else if (name == "KeepRoom") { m_ConfirmLeave = m_ConfirmCloseRoom = false; m_Rebuild = true; }
 			else { std::string text; if (name == "Send") if (auto* chat = dynamic_cast<GUITextBox*>(m_Manager->GetControl("Chat"))) { text = chat->GetText(); chat->SetText(""); } result.push_back({name, text}); }
 		} else if (auto* field = dynamic_cast<GUITextBox*>(control); field && (event.GetMsg() == GUITextBox::Changed || event.GetMsg() == GUITextBox::Enter)) {
 			result.push_back({name == "Chat" && event.GetMsg() == GUITextBox::Enter ? "Send" : name, field->GetText()});
@@ -390,6 +397,6 @@ std::string MultiplayerMenuGUI::VerifyLayout() const {
 		const auto& [a, ax, ay, aw, ah] = interactive[i]; const auto& [b, bx, by, bw, bh] = interactive[j];
 		if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) return "Overlapping controls: " + a + " / " + b;
 	}
-	const char* expected = m_ConfirmLeave ? "ConfirmLeave" : m_Page == Screen::Entry ? m_Tab == Tab::Host ? "Create" : m_Tab == Tab::Connection ? "SaveService" : m_Tab == Tab::Rules ? "ResolutionInfo" : "Join" : m_Page == Screen::Lobby ? m_Tab == Tab::Rules ? "Gold" : m_Tab == Tab::Factions ? "FactionsTitle" : m_Tab == Tab::Chat ? "ChatLog" : "Activity" : m_Page == Screen::Session ? m_Tab == Tab::Chat ? "ChatLog" : "Resume" : "ConnectTitle";
+	const char* expected = m_ConfirmLeave ? m_ConfirmCloseRoom ? "ConfirmCloseRoom" : "ConfirmLeave" : m_Page == Screen::Entry ? m_Tab == Tab::Host ? "Create" : m_Tab == Tab::Connection ? "SaveService" : m_Tab == Tab::Rules ? "ResolutionInfo" : "Join" : m_Page == Screen::Lobby ? m_Tab == Tab::Rules ? "Gold" : m_Tab == Tab::Factions ? "FactionsTitle" : m_Tab == Tab::Chat ? "ChatLog" : "Activity" : m_Page == Screen::Session ? m_Tab == Tab::Chat ? "ChatLog" : "Resume" : "ConnectTitle";
 	return m_Manager->GetControl(expected) ? "" : "Expected page missing: " + std::string(expected);
 }

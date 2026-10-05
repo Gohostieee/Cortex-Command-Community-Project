@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cortex Command hosted matches on isolated fixed-performance Linux compute, with one native simulation process per room and a stable UDP broker address.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    arch: Room broker allocates separate native game workers. Every human player connects as a client. Existing relay stacks remain independent.
+    must: Release includes matching game assets and private immutable source. Replacement interrupts this stack's matches.
+    ref: Services/DedicatedServer/README.md
+Parameters:
+  ArtifactBucket:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+    Description: Existing private artifact bucket in this region.
+  ArtifactKey:
+    Type: String
+    AllowedPattern: '[a-zA-Z0-9/_.-]+'
+  ArtifactSha256:
+    Type: String
+    AllowedPattern: '[a-f0-9]{64}'
+  PlayersCIDR:
+    Type: String
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+    Description: Explicit IPv4 range allowed to use the public broker and game worker ports.
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+  InstanceType:
+    Type: String
+    Default: c7i.xlarge
+    AllowedValues: [c6i.large, c6i.xlarge, c7i.large, c7i.xlarge, c7i.2xlarge, c7a.large, c7a.xlarge, c7a.2xlarge]
+    Description: Fixed-performance x86_64 compute; burstable CPU-credit instances are excluded.
+  ServicePort:
+    Type: Number
+    Default: 8001
+    MinValue: 1024
+    MaxValue: 65535
+  GamePortBase:
+    Type: Number
+    Default: 8100
+    MinValue: 1024
+    MaxValue: 65527
+  GamePortEnd:
+    Type: Number
+    Default: 8101
+    MinValue: 1024
+    MaxValue: 65535
+  MaxHosted:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 8
+    Description: Admission limit; tune after measuring full-match simulation cost.
+Resources:
+  Network:
+    Type: AWS::EC2::VPC
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Independent network prevents hosted-server iteration from changing existing relay resources.
+        must: This stack owns its network; do not attach unrelated resources.
+    Properties:
+      CidrBlock: 10.80.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-network'}]
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-gateway'}]
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Network
+      InternetGatewayId: !Ref Gateway
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.80.0.0/25
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-workers'}]
+  Routes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Network
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref Routes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Gateway
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref Routes
+  Firewall:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Broker admissions and assigned worker endpoints use UDP; SSM supplies administration without inbound SSH.
+        must: Only this isolated stack uses these rules. Game port range must cover MaxHosted ports beginning at GamePortBase.
+    Properties:
+      GroupDescription: Hosted room broker and bounded native worker UDP range
+      VpcId: !Ref Network
+      SecurityGroupIngress:
+        - IpProtocol: udp
+          FromPort: !Ref ServicePort
+          ToPort: !Ref ServicePort
+          CidrIp: !Ref PlayersCIDR
+        - IpProtocol: udp
+          FromPort: !Ref GamePortBase
+          ToPort: !Ref GamePortEnd
+          CidrIp: !Ref PlayersCIDR
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+  Role:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Bootstrap downloads exactly one release and signals readiness; SSM provides auditable administration.
+        must: No user credentials on disk. No access to other release objects or buckets.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: bootstrap-release
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactKey}'
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+  Profile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+  PublicAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Clients keep the same broker endpoint through worker host replacement.
+        must: Address is billable and belongs exclusively to this stack.
+    Properties:
+      Domain: vpc
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-endpoint'}]
+  Release:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Immutable release/config changes create a new template version and rerun bootstrap on replacement.
+        must: Replacement ends active hosted rooms; verify in an isolated stack before switching the client default.
+    Properties:
+      VersionDescription: !Ref ArtifactSha256
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends awscli ca-certificates libminizip1t64 liblz4-1 libpng16-16t64 libtbb12
+            test_pid=
+            signal() {
+              rm -f /var/lib/cc-dedicated/bootstrap-probe/server.ini
+              if [ -n "$test_pid" ]; then kill "$test_pid" 2>/dev/null || true; fi
+              result=FAILURE
+              if [ "$1" = 0 ]; then result=SUCCESS; fi
+              aws cloudformation signal-resource --stack-name '${AWS::StackName}' --logical-resource-id Worker --unique-id "$(hostname)" --status "$result" --region '${AWS::Region}' || true
+            }
+            trap 'signal "$?"' EXIT
+            mkdir -p /opt/cc-dedicated/current
+            aws s3 cp 's3://${ArtifactBucket}/${ArtifactKey}' /opt/cc-dedicated/runtime.tar.gz --region '${AWS::Region}' --only-show-errors
+            echo '${ArtifactSha256}  /opt/cc-dedicated/runtime.tar.gz' | sha256sum --check -
+            tar -xzf /opt/cc-dedicated/runtime.tar.gz -C /opt/cc-dedicated/current
+            cd /opt/cc-dedicated/current
+            sha256sum --check --quiet data.sha256
+            export LD_LIBRARY_PATH=/opt/cc-dedicated/current
+            linkage=$(ldd ./CortexCommand)
+            if grep -q 'not found' <<< "$linkage"; then exit 1; fi
+            useradd --system --create-home --home-dir /var/lib/cc-dedicated --shell /usr/sbin/nologin cc-dedicated
+            install -d -o cc-dedicated -g cc-dedicated /var/lib/cc-dedicated/rooms /var/lib/cc-dedicated/Userdata
+            ln -s /var/lib/cc-dedicated/Userdata /opt/cc-dedicated/current/Userdata
+            ./cc-room-service --bind 127.0.0.1 --port 38997 --max-rooms 8 --metrics-file /var/log/cc-dedicated-relay-test-metrics.json > /var/log/cc-dedicated-relay-test.log 2>&1 &
+            test_pid=$!
+            for attempt in $(seq 1 200); do
+              kill -0 "$test_pid"
+              if [ -s /var/log/cc-dedicated-relay-test-metrics.json ]; then break; fi
+              sleep 0.01
+            done
+            test -s /var/log/cc-dedicated-relay-test-metrics.json
+            ./relay-tests 38997
+            kill "$test_pid"
+            wait "$test_pid" || true
+            test_pid=
+            install -d -o cc-dedicated -g cc-dedicated /var/lib/cc-dedicated/bootstrap-probe
+            probe_token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+            umask 0077
+            printf 'port=38998\nowner_token=%s\nroom_name=Bootstrap\nidle_seconds=2\nstatus_file=/var/lib/cc-dedicated/bootstrap-probe/status.txt\n' "$probe_token" > /var/lib/cc-dedicated/bootstrap-probe/server.ini
+            chown cc-dedicated:cc-dedicated /var/lib/cc-dedicated/bootstrap-probe/server.ini
+            runuser -u cc-dedicated -- timeout 180 ./CortexCommand -mp-dedicated /var/lib/cc-dedicated/bootstrap-probe/server.ini > /var/log/cc-dedicated-engine-test.log 2>&1
+            rm -f /var/lib/cc-dedicated/bootstrap-probe/server.ini
+            grep -q '^ready=1$' /var/lib/cc-dedicated/bootstrap-probe/status.txt
+            grep -q '^headless=1$' /var/lib/cc-dedicated/bootstrap-probe/status.txt
+            cat > /etc/systemd/system/cc-dedicated.service <<'UNIT'
+            [Unit]
+            Description=Cortex Command hosted room broker and dedicated native game workers
+            After=network-online.target
+            Wants=network-online.target
+            [Service]
+            User=cc-dedicated
+            Group=cc-dedicated
+            StateDirectory=cc-dedicated
+            WorkingDirectory=/opt/cc-dedicated/current
+            Environment=CC_STATE_DIRECTORY=/var/lib/cc-dedicated
+            Environment=CC_HOSTED_ADDRESS=${PublicAddress}
+            Environment=CC_SERVICE_PORT=${ServicePort}
+            Environment=CC_GAME_PORT_BASE=${GamePortBase}
+            Environment=CC_MAX_HOSTED=${MaxHosted}
+            Environment=HOME=/var/lib/cc-dedicated
+            ExecStart=/opt/cc-dedicated/current/cc-start
+            Restart=on-failure
+            RestartSec=3
+            KillMode=control-group
+            TimeoutStopSec=15
+            NoNewPrivileges=true
+            ProtectSystem=strict
+            ProtectHome=true
+            PrivateTmp=true
+            ReadWritePaths=/var/lib/cc-dedicated
+            UMask=0077
+            TasksMax=512
+            LimitNOFILE=4096
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            systemctl daemon-reload
+            systemctl enable --now cc-dedicated
+            sleep 3
+            systemctl is-active --quiet cc-dedicated
+  Worker:
+    Type: AWS::EC2::Instance
+    DependsOn: [InternetRoute, SubnetRoutes]
+    CreationPolicy:
+      ResourceSignal: {Count: 1, Timeout: PT30M}
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fixed CPU performance hosts native simulations independently of any player computer.
+        must: x86_64 Ubuntu 24.04 ABI, IMDSv2, encrypted volume, no inbound administration, unprivileged runtime.
+        mutable: review-required
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref Release
+        Version: !GetAtt Release.LatestVersionNumber
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref Profile
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled, HttpPutResponseHopLimit: 1}
+      Monitoring: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 24, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref Subnet
+          GroupSet: [!Ref Firewall]
+      Tags: [{Key: Name, Value: !Sub '${AWS::StackName}-native-worker'}]
+  AddressAttachment:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref Worker
+      AllocationId: !GetAtt PublicAddress.AllocationId
+Outputs:
+  ServiceAddress:
+    Description: Hosted broker endpoint. Switch client configuration only after real native match verification.
+    Value: !Sub '${PublicAddress}:${ServicePort}'
+  InstanceId:
+    Description: Dedicated worker host; administer through SSM.
+    Value: !Ref Worker
+  GamePortRange:
+    Description: Direct UDP endpoints assigned to hosted clients.
+    Value: !Sub '${GamePortBase}-${GamePortEnd}'

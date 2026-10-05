@@ -54,11 +54,12 @@ void PostProcessMan::Clear() {
 }
 
 int PostProcessMan::Initialize() {
-	InitializeGLPointers();
-	CreateGLBackBuffers();
-
-	m_Blit8 = std::make_unique<Shader>(g_PresetMan.GetFullModulePath("Base.rte/Shaders/Blit8.vert"), g_PresetMan.GetFullModulePath("Base.rte/Shaders/Blit8.frag"));
-	m_PostProcessShader = std::make_unique<Shader>(g_PresetMan.GetFullModulePath("Base.rte/Shaders/PostProcess.vert"), g_PresetMan.GetFullModulePath("Base.rte/Shaders/PostProcess.frag"));
+	if (!g_WindowMan.IsHeadless()) {
+		InitializeGLPointers();
+		CreateGLBackBuffers();
+		m_Blit8 = std::make_unique<Shader>(g_PresetMan.GetFullModulePath("Base.rte/Shaders/Blit8.vert"), g_PresetMan.GetFullModulePath("Base.rte/Shaders/Blit8.frag"));
+		m_PostProcessShader = std::make_unique<Shader>(g_PresetMan.GetFullModulePath("Base.rte/Shaders/PostProcess.vert"), g_PresetMan.GetFullModulePath("Base.rte/Shaders/PostProcess.frag"));
+	}
 	// TODO: Make more robust and load more glows!
 	ContentFile glowFile("Base.rte/Effects/Glows/YellowTiny.png");
 	m_YellowGlow = glowFile.GetAsBitmap();
@@ -90,6 +91,7 @@ void PostProcessMan::InitializeGLPointers() {
 }
 
 void PostProcessMan::DestroyGLPointers() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	GL_CHECK(glDeleteTextures(1, &m_BackBuffer8));
 	GL_CHECK(glDeleteTextures(1, &m_Palette8Texture));
 	GL_CHECK(glDeleteVertexArrays(1, &m_VertexArray));
@@ -117,6 +119,7 @@ void PostProcessMan::CreateGLBackBuffers() {
 }
 
 void PostProcessMan::UpdatePalette() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	GL_CHECK(glBindTexture(GL_TEXTURE_2D, m_Palette8Texture));
 	std::array<unsigned int, c_PaletteEntriesNumber> palette;
 	for (int i = 0; i < c_PaletteEntriesNumber; ++i) {

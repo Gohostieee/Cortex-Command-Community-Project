@@ -12,14 +12,16 @@ namespace { RakNet::SystemAddress ParseAddress(const std::string& text) { RakNet
 namespace { uint64_t Milliseconds() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); } }
 struct Transport::Impl {
 	RakNet::RakPeerInterface* Peer = nullptr;
-	bool Relay = false, HostRoom = false, Ready = false, Retrying = false;
+	bool Relay = false, HostRoom = false, Ready = false, Retrying = false, HostedRequest = false;
+	std::string RoomName;
 	std::string Service, Central, Code, Token, Password;
 	uint16_t Port = 8001;
 	int Slot = -1;
 	uint64_t Started = 0, RetryUntil = 0, NextRetry = 0;
 	std::array<bool, 4> Peers{};
 	void Request() {
-		Relay::Writer w(HostRoom ? Relay::Kind::Create : Relay::Kind::Join); w.Text(Code, Relay::CodeLength); w.Text(Password, 63); w.Text(Token, Relay::TokenLength);
+		Relay::Writer w(HostRoom ? HostedRequest ? Relay::Kind::HostedCreate : Relay::Kind::Create : Relay::Kind::Join); w.Text(Code, Relay::CodeLength); w.Text(Password, 63); w.Text(Token, Relay::TokenLength);
+		if (HostedRequest && HostRoom) w.Text(RoomName, 63);
 		Peer->Send(reinterpret_cast<const char*>(w.Data.data()), static_cast<int>(w.Data.size()), HIGH_PRIORITY, RELIABLE_ORDERED, 0, ParseAddress(Central), false);
 	}
 };
@@ -30,7 +32,7 @@ bool Transport::Start(bool host, uint16_t port, const std::string& password, std
 	Stop(); m_Impl->Peer = RakNet::RakPeerInterface::GetInstance();
 	RakNet::SocketDescriptor socket(host ? port : 0, nullptr); socket.socketFamily = AF_INET;
 	if (m_Impl->Peer->Startup(8, &socket, 1) != RakNet::RAKNET_STARTED) { error = "Unable to open the UDP port. Another host may already be using it."; Stop(); return false; }
-	m_Impl->Peer->SetMaximumIncomingConnections(host ? 3 : 0);
+	m_Impl->Peer->SetMaximumIncomingConnections(host ? 4 : 0);
 	m_Impl->Peer->SetIncomingPassword(password.data(), static_cast<int>(password.size()));
 	m_Impl->Peer->SetOccasionalPing(true); m_Impl->Peer->SetTimeoutTime(5000, RakNet::UNASSIGNED_SYSTEM_ADDRESS);
 	m_Impl->Peer->SetUnreliableTimeout(0); return true;
@@ -39,10 +41,10 @@ bool Transport::Connect(const std::string& host, uint16_t port, const std::strin
 	if (!m_Impl->Peer || m_Impl->Peer->Connect(host.c_str(), port, password.data(), static_cast<int>(password.size())) != RakNet::CONNECTION_ATTEMPT_STARTED) { error = "Could not connect. Check the host address and port."; return false; }
 	return true;
 }
-bool Transport::ConnectRelay(bool hostRoom, const std::string& service, uint16_t port, const std::string& code, const std::string& password, std::string& error) {
+bool Transport::ConnectRelay(bool hostRoom, const std::string& service, uint16_t port, const std::string& code, const std::string& password, std::string& error, bool hosted, const std::string& roomName) {
 	auto& impl = *m_Impl;
 	if (!impl.Peer || (!hostRoom && Relay::NormalizeCode(code).empty())) { error = "Enter the ten-character room code."; return false; }
-	impl.Relay = true; impl.HostRoom = hostRoom; impl.Ready = false; impl.Service = service; impl.Port = port; impl.Code = hostRoom ? "" : Relay::NormalizeCode(code); impl.Token.clear(); impl.Password = password; impl.Started = Milliseconds();
+	impl.Relay = true; impl.HostRoom = hostRoom; impl.HostedRequest = hosted; impl.RoomName = roomName; impl.Ready = false; impl.Service = service; impl.Port = port; impl.Code = hostRoom ? "" : Relay::NormalizeCode(code); impl.Token.clear(); impl.Password = password; impl.Started = Milliseconds();
 	return Connect(service, port, "", error);
 }
 bool Transport::ReconnectRelay(std::string& error) {
@@ -62,7 +64,7 @@ void Transport::Stop() {
 		if (m_Impl->Relay && m_Impl->Ready) { Relay::Writer w(Relay::Kind::Leave); m_Impl->Peer->Send(reinterpret_cast<const char*>(w.Data.data()), static_cast<int>(w.Data.size()), HIGH_PRIORITY, RELIABLE_ORDERED, 0, ParseAddress(m_Impl->Central), false); }
 		m_Impl->Peer->Shutdown(100); RakNet::RakPeerInterface::DestroyInstance(m_Impl->Peer); m_Impl->Peer = nullptr;
 	}
-	m_Impl->Relay = m_Impl->Ready = m_Impl->Retrying = false; m_Impl->Code.clear(); m_Impl->Token.clear(); m_Impl->Peers = {};
+	m_Impl->Relay = m_Impl->Ready = m_Impl->Retrying = m_Impl->HostedRequest = false; m_Impl->Code.clear(); m_Impl->Token.clear(); m_Impl->Peers = {};
 }
 std::vector<TransportEvent> Transport::Poll(size_t budget) {
 	std::vector<TransportEvent> events;
@@ -97,7 +99,14 @@ std::vector<TransportEvent> Transport::Poll(size_t budget) {
 			else if (packet->data[0] == Relay::PacketID && event.Address == impl.Central && packet->length <= Relay::MaxPacket) {
 				deliver = false; Reader reader({packet->data, packet->length}); Relay::Kind kind;
 				if (Relay::Header(reader, kind)) {
-					if (kind == Relay::Kind::Accepted) {
+					if (kind == Relay::Kind::HostedAccepted) {
+						std::string code, endpoint, owner;
+						if (reader.Text(code, Relay::CodeLength) && !Relay::NormalizeCode(code).empty() && reader.Text(endpoint, 253) && reader.Text(owner, Relay::TokenLength) && (owner.empty() || owner.size() == Relay::TokenLength) && reader.Done()) {
+							impl.Code = code; impl.Relay = impl.Ready = impl.Retrying = false;
+							TransportEvent hosted{TransportEvent::Type::HostedRoom, endpoint, {}, {}}; hosted.Data.assign(owner.begin(), owner.end()); events.push_back(std::move(hosted));
+							impl.Peer->CloseConnection(ParseAddress(impl.Central), true);
+						}
+					} else if (kind == Relay::Kind::Accepted) {
 						std::string code, token; uint8_t slot;
 						if (reader.Text(code, Relay::CodeLength) && !Relay::NormalizeCode(code).empty() && reader.Text(token, Relay::TokenLength) && token.size() == Relay::TokenLength && reader.U8(slot) && slot <= 3 && (impl.HostRoom ? slot == 0 : slot > 0) && reader.Done()) { impl.Code = code; impl.Token = token; impl.Slot = slot; impl.Ready = true; impl.Retrying = false; events.push_back({TransportEvent::Type::RoomCode, code, {}, {}}); }
 					} else if (kind == Relay::Kind::PeerUp || kind == Relay::Kind::PeerDown) {
@@ -120,7 +129,7 @@ std::vector<TransportEvent> Transport::Poll(size_t budget) {
 		}
 		m_Impl->Peer->DeallocatePacket(packet); if (deliver) events.push_back(std::move(event));
 	}
-	if (impl.Relay && !impl.Ready && !impl.Retrying && now - impl.Started > 10000) { events.push_back({TransportEvent::Type::Failed, {}, "Room service connection timed out.", {}}); impl.Started = now; }
+	if (impl.Relay && !impl.Ready && !impl.Retrying && now - impl.Started > (impl.HostedRequest ? 120000 : 10000)) { events.push_back({TransportEvent::Type::Failed, {}, "Room service connection timed out.", {}}); impl.Started = now; }
 	return events;
 }
 bool Transport::Send(const std::string& address, std::span<const uint8_t> data, Delivery delivery) {

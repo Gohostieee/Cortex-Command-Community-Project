@@ -206,6 +206,10 @@ void RTEError::SetExceptionHandlers() {
 }
 
 void RTEError::ShowMessageBox(const std::string& message) {
+	if (g_WindowMan.IsHeadless()) {
+		g_ConsoleMan.PrintString(message);
+		return;
+	}
 	if (std::getenv("CCCP_TEST_ACTIVITY")) {
 		g_ConsoleMan.PrintString(message);
 		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
@@ -215,6 +219,7 @@ void RTEError::ShowMessageBox(const std::string& message) {
 }
 
 bool RTEError::ShowAbortMessageBox(const std::string& message) {
+	if (g_WindowMan.IsHeadless()) { return false; }
 	if (std::getenv("CCCP_TEST_ACTIVITY")) {
 		g_ConsoleMan.PrintString(message);
 		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
@@ -253,6 +258,7 @@ bool RTEError::ShowAbortMessageBox(const std::string& message) {
 }
 
 bool RTEError::ShowAssertMessageBox(const std::string& message) {
+	if (g_WindowMan.IsHeadless()) { return true; }
 	if (std::getenv("CCCP_TEST_ACTIVITY")) {
 		g_ConsoleMan.SaveAllText("build-mp/native-test-error.log");
 		return true;
@@ -336,7 +342,7 @@ void RTEError::UnhandledExceptionFunc(const std::string& description, const std:
 		SDL_SetWindowFullscreen(g_WindowMan.GetWindow(), 0);
 	}
 
-	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RTE CATASTROPHIC ERROR!!! (X_X)", exceptionMessage.c_str(), nullptr);
+	if (!g_WindowMan.IsHeadless()) { SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RTE CATASTROPHIC ERROR!!! (X_X)", exceptionMessage.c_str(), nullptr); }
 	AbortAction;
 }
 
@@ -446,6 +452,7 @@ void RTEError::AssertFunc(const std::string& description, const std::source_loca
 }
 
 void RTEError::DumpHardwareInfo() {
+	if (g_WindowMan.IsHeadless()) { g_ConsoleMan.PrintString("Dedicated runtime: video and OpenGL are disabled."); return; }
 	std::string glVersion = reinterpret_cast<const char*>(glGetString(GL_VERSION));
 	std::string glVendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
 	std::string glRenderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
@@ -572,6 +579,7 @@ void RTEError::DumpHardwareInfo() {
 }
 
 bool RTEError::DumpAbortScreen() {
+	if (g_WindowMan.IsHeadless()) { return false; }
 	int success = -1;
 	if (glReadPixels != nullptr) {
 		int w, h;

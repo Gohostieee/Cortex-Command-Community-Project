@@ -88,7 +88,7 @@ namespace RTE {
 		/// Gets the currently used input device of the specified player.
 		/// @param whichPlayer Which player to get input device for.
 		/// @return A number value representing the currently used input device of this player. See InputDevice enumeration for values.
-		int GetInputDevice(int whichPlayer) const { return whichPlayer > 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active ? m_RemoteInputs[whichPlayer].State.Snapshot.Device : m_ControlScheme.at(whichPlayer).GetDevice(); }
+		int GetInputDevice(int whichPlayer) const { return whichPlayer >= 0 && whichPlayer < 4 && m_RemoteInputs[whichPlayer].Active ? m_RemoteInputs[whichPlayer].State.Snapshot.Device : m_ControlScheme.at(whichPlayer).GetDevice(); }
 
 		/// Access a specific player's control scheme.
 		/// @param whichPlayer Which player to get the scheme for.

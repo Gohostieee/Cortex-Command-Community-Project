@@ -1,6 +1,7 @@
 #include "GLResourceMan.h"
 
 #include "ContentFile.h"
+#include "WindowMan.h"
 #include "RTEError.h"
 
 #include "GLCheck.h"
@@ -20,6 +21,7 @@ GLResourceMan::GLResourceMan() = default;
 GLResourceMan::~GLResourceMan() = default;
 
 void GLResourceMan::Clear() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	for (auto prog: m_Shaders) {
 		GL_CHECK(glDeleteProgram(prog));
 	}
@@ -39,6 +41,7 @@ GLuint GLResourceMan::CompileShader(const std::string& filename, ShaderType type
 }
 
 GLuint GLResourceMan::MakeGLProgram() {
+	if (g_WindowMan.IsHeadless()) { return 0; }
 	return glCreateProgram();
 }
 
@@ -68,6 +71,7 @@ GLBitmapInfo* GLResourceMan::MakeBitmapInfo() {
 }
 
 Texture2D GLResourceMan::GetStaticTextureFromBitmap(BITMAP* bitmap) {
+	if (g_WindowMan.IsHeadless()) { return {0, bitmap->w, bitmap->h, 0, 0}; }
 	if (!bitmap->extra) {
 		m_StaticTextures.emplace_back(new GLBitmapInfo);
 		m_StaticTextures.back()->m_ID = m_StaticTextures.size();
@@ -94,6 +98,7 @@ Texture2D GLResourceMan::GetStaticTextureFromBitmap(BITMAP* bitmap) {
 
 
 GLuint GLResourceMan::GetDynamicUploadBuffer(BITMAP* bitmap) {
+	if (g_WindowMan.IsHeadless()) { return 0; }
 	if (!bitmap->extra) {
 		GetStaticTextureFromBitmap(bitmap);
 	}
@@ -111,6 +116,7 @@ GLuint GLResourceMan::GetDynamicUploadBuffer(BITMAP* bitmap) {
 }
 
 GLuint GLResourceMan::UpdateDynamicBitmap(BITMAP* bitmap, bool updated, const std::vector<Box>& updateRegions) {
+	if (g_WindowMan.IsHeadless()) { return 0; }
 	ZoneScopedN("Bitmap Upload");
 	GLuint texture = GetStaticTextureFromBitmap(bitmap).id;
 	if (updated) {
@@ -153,6 +159,7 @@ GLuint GLResourceMan::UpdateDynamicBitmap(BITMAP* bitmap, bool updated, const st
 }
 
 void GLResourceMan::DestroyBitmapInfo(BITMAP* bitmap) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	GLBitmapInfo* info = GetBitmapInfo(bitmap);
 	if (info) {
 		rlUnloadTexture(info->m_Texture);

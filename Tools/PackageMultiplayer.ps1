@@ -38,11 +38,15 @@ Cortex Command Multiplayer - $Version (Windows x64)
 
 Extract this entire folder, then open Cortex Command.exe.
 Choose Multiplayer, set your name, and choose Host or Join.
+Online - AWS hosted runs the match on the dedicated server.
 Host: Create room, copy the code, and share it with your friends.
 Join: Paste that code, select your team, and choose Ready.
-The host starts the match when everyone is ready. Up to four players.
+The room owner starts the match when everyone is ready. Up to four players.
+Every player renders locally; AWS handles physics, AI, damage and terrain.
+Leaving an AWS-hosted room keeps the match running for the other players.
+Close room is a separate owner action that ends the match for everyone.
 
-The bundled room server is $endpoint. Hosts do not forward router ports.
+The bundled room server is $endpoint. Players do not forward router ports.
 To use another server: Multiplayer > Connection settings > Server IP or hostname
 and Save server address. Use default server restores the bundled address.
 Everyone in a room must use the same server and game build.

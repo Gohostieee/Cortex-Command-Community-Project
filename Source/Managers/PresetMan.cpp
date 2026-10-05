@@ -160,7 +160,7 @@ bool PresetMan::LoadAllDataModules() {
 
 		// Load userdata modules AFTER all other techs etc are loaded; might be referring to stuff in user mods.
 		for (const auto& [userdataModuleName, userdataModuleFriendlyName]: c_UserdataModules) {
-			if (!std::filesystem::exists(System::GetWorkingDirectory() + System::GetUserdataDirectory() + userdataModuleName)) {
+			if (!std::filesystem::exists(std::filesystem::path(System::GetWorkingDirectory()) / System::GetUserdataDirectory() / userdataModuleName)) {
 				bool scanContentsAndIgnoreMissing = userdataModuleName == c_UserScenesModuleName;
 				DataModule::CreateOnDiskAsUserdata(userdataModuleName, userdataModuleFriendlyName, scanContentsAndIgnoreMissing, scanContentsAndIgnoreMissing);
 			}
@@ -240,6 +240,10 @@ std::string PresetMan::GetModuleNameFromPath(const std::string& dataPath) const 
 	if (dataPath.empty()) {
 		return "";
 	}
+	if (dataPath.starts_with(System::GetUserdataDirectory())) {
+		const std::string moduleRelativePath = dataPath.substr(System::GetUserdataDirectory().size());
+		return moduleRelativePath.substr(0, moduleRelativePath.find_first_of("/\\"));
+	}
 	size_t slashPos = dataPath.find_first_of("/\\");
 
 	// Include trailing slash in the substring range in case we need to match against the Data/Mods/Userdata directory.
@@ -282,6 +286,7 @@ std::string PresetMan::GetFullModulePath(const std::string& modulePath) const {
 	// Since Windows supports both forward and backslash separators it's safe to replace all backslashes with forward slashes.
 	std::string modulePathGeneric = std::filesystem::path(modulePath).generic_string();
 	std::replace(modulePathGeneric.begin(), modulePathGeneric.end(), '\\', '/');
+	if (modulePathGeneric.starts_with(System::GetUserdataDirectory())) { return modulePathGeneric; }
 
 	const std::string pathTopDir = modulePathGeneric.substr(0, modulePathGeneric.find_first_of("/") + 1);
 	const std::string moduleName = GetModuleNameFromPath(modulePathGeneric);

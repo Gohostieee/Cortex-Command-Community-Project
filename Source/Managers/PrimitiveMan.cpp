@@ -13,6 +13,7 @@
 #include "glad/gl.h"
 #include "Shader.h"
 #include "PresetMan.h"
+#include "WindowMan.h"
 
 using namespace RTE;
 
@@ -229,6 +230,14 @@ void PrimitiveMan::DrawPrimitives(int player, BITMAP* targetBitmap, const Vector
 	ZoneScoped;
 
 	if (m_ScheduledPrimitives.empty()) {
+		return;
+	}
+	if (g_WindowMan.IsHeadless()) {
+		for (const auto& primitive : m_ScheduledPrimitives) {
+			if (primitive->m_Player == player || primitive->m_Player == -1) {
+				primitive->DrawTiled(targetBitmap, targetPos);
+			}
+		}
 		return;
 	}
 

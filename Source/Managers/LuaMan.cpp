@@ -1034,7 +1034,7 @@ const std::vector<std::string>* LuaMan::FileList(const std::string& path) {
 }
 
 bool LuaMan::FileExists(const std::string& path) {
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (fullPath.find("..") == std::string::npos) {
 #ifndef _WIN32
 		fullPath = GetCaseInsensitiveFullPath(fullPath);
@@ -1045,7 +1045,7 @@ bool LuaMan::FileExists(const std::string& path) {
 }
 
 bool LuaMan::DirectoryExists(const std::string& path) {
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (fullPath.find("..") == std::string::npos) {
 #ifndef _WIN32
 		fullPath = GetCaseInsensitiveFullPath(fullPath);
@@ -1078,7 +1078,7 @@ int LuaMan::FileOpen(const std::string& path, const std::string& accessMode) {
 		return -1;
 	}
 
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (IsValidModulePath(fullPath)) {
 #ifdef _WIN32
 		FILE* file = fopen(fullPath.c_str(), accessMode.c_str());
@@ -1088,7 +1088,7 @@ int LuaMan::FileOpen(const std::string& path, const std::string& accessMode) {
 				return fopen(fullPath.c_str(), accessMode.c_str());
 			}
 
-			std::filesystem::path inspectedPath = System::GetWorkingDirectory();
+			std::filesystem::path inspectedPath = std::filesystem::path(System::GetUserdataDirectory()).is_absolute() && fullPath.starts_with(System::GetUserdataDirectory()) ? System::GetUserdataDirectory() : System::GetWorkingDirectory();
 			const std::filesystem::path relativeFilePath = std::filesystem::path(fullPath).lexically_relative(inspectedPath);
 
 			// Iterate over all path parts
@@ -1145,7 +1145,7 @@ void LuaMan::FileCloseAll() {
 }
 
 bool LuaMan::FileRemove(const std::string& path) {
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (IsValidModulePath(fullPath)) {
 #ifndef _WIN32
 		fullPath = GetCaseInsensitiveFullPath(fullPath);
@@ -1159,7 +1159,7 @@ bool LuaMan::FileRemove(const std::string& path) {
 }
 
 bool LuaMan::DirectoryCreate(const std::string& path, bool recursive) {
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (fullPath.find("..") == std::string::npos) {
 #ifndef _WIN32
 		fullPath = GetCaseInsensitiveFullPath(fullPath);
@@ -1177,7 +1177,7 @@ bool LuaMan::DirectoryCreate(const std::string& path, bool recursive) {
 }
 
 bool LuaMan::DirectoryRemove(const std::string& path, bool recursive) {
-	std::string fullPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(path);
+	std::string fullPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(path)).generic_string();
 	if (fullPath.find("..") == std::string::npos) {
 #ifndef _WIN32
 		fullPath = GetCaseInsensitiveFullPath(fullPath);
@@ -1197,8 +1197,8 @@ bool LuaMan::DirectoryRemove(const std::string& path, bool recursive) {
 }
 
 bool LuaMan::FileRename(const std::string& oldPath, const std::string& newPath) {
-	std::string fullOldPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(oldPath);
-	std::string fullNewPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(newPath);
+	std::string fullOldPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(oldPath)).generic_string();
+	std::string fullNewPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(newPath)).generic_string();
 	if (IsValidModulePath(fullOldPath) && IsValidModulePath(fullNewPath)) {
 #ifndef _WIN32
 		fullOldPath = GetCaseInsensitiveFullPath(fullOldPath);
@@ -1218,8 +1218,8 @@ bool LuaMan::FileRename(const std::string& oldPath, const std::string& newPath) 
 }
 
 bool LuaMan::DirectoryRename(const std::string& oldPath, const std::string& newPath) {
-	std::string fullOldPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(oldPath);
-	std::string fullNewPath = System::GetWorkingDirectory() + g_PresetMan.GetFullModulePath(newPath);
+	std::string fullOldPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(oldPath)).generic_string();
+	std::string fullNewPath = (std::filesystem::path(System::GetWorkingDirectory()) / g_PresetMan.GetFullModulePath(newPath)).generic_string();
 	if (fullOldPath.find("..") == std::string::npos && fullNewPath.find("..") == std::string::npos) {
 #ifndef _WIN32
 		fullOldPath = GetCaseInsensitiveFullPath(fullOldPath);

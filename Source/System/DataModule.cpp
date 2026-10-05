@@ -439,7 +439,7 @@ void DataModule::ReloadAllScripts() const {
 int DataModule::FindAndRead(const ProgressCallback& progressCallback) {
 	int result = 0;
 	const std::string directoryToScan = g_PresetMan.GetFullModulePath(m_FileName);
-	for (const std::filesystem::directory_entry& directoryEntry: std::filesystem::directory_iterator(System::GetWorkingDirectory() + directoryToScan)) {
+	for (const std::filesystem::directory_entry& directoryEntry: std::filesystem::directory_iterator(std::filesystem::path(System::GetWorkingDirectory()) / directoryToScan)) {
 		if (directoryEntry.path().extension() == ".ini" && directoryEntry.path().filename() != "Index.ini") {
 			Reader iniReader;
 			if (iniReader.Create(directoryToScan + "/" + directoryEntry.path().filename().generic_string(), false, progressCallback) >= 0) {

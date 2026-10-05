@@ -1,5 +1,6 @@
-param([switch]$Smoke, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$GuestInput, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [switch]$SkipTransportTests, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
+param([switch]$Smoke, [switch]$Hosted, [switch]$ExplosionBurst, [ValidateRange(1, 3)][int]$Guests = 1, [switch]$Relay, [switch]$Deployment, [switch]$GuestInput, [switch]$Loss, [switch]$CombatStress, [switch]$Encounter, [switch]$NativeBaseline, [switch]$SkipTransportTests, [ValidateSet('640x360', '960x540', '1280x720', '1920x1080')][string[]]$GuestResolutions = @(), [string]$ServiceAddress = '', [string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe')
 $ErrorActionPreference = 'Stop'
+if ($Hosted) { $Smoke = $Relay = $true }
 if ($ExplosionBurst) { $Smoke = $Encounter = $CombatStress = $true }
 if ($GuestInput) { $Smoke = $Deployment = $true }
 if ($NativeBaseline -and !$Encounter) { throw 'Use -Encounter with -NativeBaseline.' }
@@ -38,11 +39,13 @@ try {
         $previousCombat = $env:CCCP_MPSMOKE_COMBAT
         $previousEncounter = $env:CCCP_MPSMOKE_ENCOUNTER
         $previousBaseline = $env:CCCP_MPSMOKE_BASELINE
+        $previousHosted = $env:CCCP_MPSMOKE_HOSTED
         $previousService = $env:CCCP_MP_SERVICE
         $env:CCCP_MPSMOKE_BURST = if ($ExplosionBurst) { '1' } else { $null }
         $env:CCCP_MPSMOKE_COMBAT = if ($CombatStress) { '1' } else { $null }
         $env:CCCP_MPSMOKE_ENCOUNTER = if ($Encounter) { '1' } else { $null }
         $env:CCCP_MPSMOKE_BASELINE = if ($NativeBaseline) { '1' } else { $null }
+        $env:CCCP_MPSMOKE_HOSTED = if ($Hosted) { '1' } else { $null }
         $env:CCCP_MPSMOKE_GUESTS = "$Guests"
         $env:CCCP_MPSMOKE_DEPLOYMENT = if ($Deployment) { '1' } else { $null }
         $env:CCCP_MPSMOKE_GUEST_INPUT = if ($GuestInput) { '1' } else { $null }
@@ -57,8 +60,35 @@ try {
                 $env:CCCP_MP_SERVICE = if ($ServiceAddress) { $ServiceAddress } else { '127.0.0.1:38997' }
                 $codeFile = Join-Path $gameRoot 'build-mp/room-code.txt'
                 if (Test-Path -LiteralPath $codeFile) { Remove-Item -LiteralPath $codeFile }
-                if (!$ServiceAddress) { $roomService = Start-Process -FilePath (Join-Path $taskRoot 'build-mp/cc-room-service.exe') -ArgumentList '--bind 127.0.0.1 --port 38997 --max-rooms 8' -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput 'build-mp/native-relay-service.log' -RedirectStandardError 'build-mp/native-relay-service-error.log' -PassThru }
+                if (!$ServiceAddress) {
+                    $serviceArguments = '--bind 127.0.0.1 --port 38997 --max-rooms 8'
+                    if ($Hosted) {
+                        $workerRoot = Join-Path $gameRoot 'build-mp/hosted-workers'
+                        New-Item -ItemType Directory -Path $workerRoot -Force | Out-Null
+                        $dedicatedLog = Join-Path $workerRoot 'worker-39000/userdata/verification/dedicated-smoke.log'
+                        if (Test-Path -LiteralPath $dedicatedLog) { Remove-Item -LiteralPath $dedicatedLog }
+                        $dedicatedSettings = Join-Path $gameRoot 'build-mp/dedicated-settings.ini'
+                        $disabledMods = (Get-ChildItem -LiteralPath (Join-Path $gameRoot 'Mods') -Directory -Filter '*.rte' | ForEach-Object { "    DisableMod = $($_.Name)" }) -join "`n"
+                        @"
+SettingsMan
+    ResolutionX = 960
+    ResolutionY = 540
+    ResolutionMultiplier = 1
+    Fullscreen = 0
+    EnableVSync = 0
+    UseMultiDisplays = 0
+    SkipIntro = 1
+    LaunchIntoActivity = 0
+$disabledMods
+"@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $dedicatedSettings
+                        $env:CCCP_SETTINGSPATH = $dedicatedSettings
+                        $env:CCCP_MPSMOKE_ROLE = 'dedicated'
+                        $serviceArguments += ' --game-executable "' + (Join-Path $gameRoot $GameExecutable) + '" --game-directory "' + $gameRoot + '" --hosted-address 127.0.0.1 --game-port-base 39000 --max-hosted 1 --state-directory "' + $workerRoot + '"'
+                    }
+                    $roomService = Start-Process -FilePath (Join-Path $taskRoot 'build-mp/cc-room-service.exe') -ArgumentList $serviceArguments -WorkingDirectory $taskRoot -WindowStyle Hidden -RedirectStandardOutput 'build-mp/native-relay-service.log' -RedirectStandardError 'build-mp/native-relay-service-error.log' -PassThru
+                }
             } else { $env:CCCP_MP_SERVICE = $null }
+            $hostedCloseConfirmed = $false
             foreach ($role in $roles) {
                 $settings = Join-Path $gameRoot "build-mp/$role-settings.ini"
                 $guestIndex = [array]::IndexOf($roles, $role) - 1
@@ -79,6 +109,8 @@ $disabledMods
 "@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $settings
                 $env:CCCP_SETTINGSPATH = $settings
                 $env:CCCP_MPSMOKE_ROLE = $role
+                $roleLog = Join-Path $gameRoot "build-mp/$role-smoke.log"
+                if (Test-Path -LiteralPath $roleLog) { Remove-Item -LiteralPath $roleLog }
                 if ($Relay -and $role -ne 'host') {
                     $codeDeadline = [DateTime]::UtcNow.AddSeconds(120)
                     while (!(Test-Path -LiteralPath $codeFile) -and [DateTime]::UtcNow -lt $codeDeadline) {
@@ -88,7 +120,7 @@ $disabledMods
                     if (!(Test-Path -LiteralPath $codeFile)) { throw 'Host did not receive a room code.' }
                     $roomCode = (Get-Content -LiteralPath $codeFile -Raw).Trim()
                 }
-                $argument = if ($role -eq 'host') { '-mp-smoke-host 38998' } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
+                $argument = if ($role -eq 'host') { if ($Hosted) { '-mp-smoke-hosted 38998' } else { '-mp-smoke-host 38998' } } elseif ($Relay) { "-mp-smoke-client $roomCode" } else { '-mp-smoke-client 127.0.0.1:38998' }
                 $instances += Start-Process -FilePath (Join-Path $gameRoot $GameExecutable) -ArgumentList $argument -WorkingDirectory $gameRoot -WindowStyle Hidden -PassThru
             }
             $deadline = [DateTime]::UtcNow.AddSeconds(300)
@@ -98,6 +130,21 @@ $disabledMods
                 $log = Get-Content -LiteralPath (Join-Path $gameRoot "build-mp/$role-smoke.log")
                 $log
                 if (!($log -match '^PASS:') -or ($log -match '^FAIL:')) { throw "$role native verification failed." }
+                if ($Hosted -and !($log -match '^PASS: hosted client received two matches, combat updates and persistent lobby$')) { throw "$role did not verify the hosted client match lifecycle." }
+                if ($Hosted -and $role -eq 'host' -and !($log -match "^PASS: native leave and room-code join restores creator's original slot during combat$")) { throw 'The room creator did not verify native leave and room-code rejoin during combat.' }
+                if ($Hosted -and ($log -match '^PASS: owner explicitly closes hosted room$')) { $hostedCloseConfirmed = $true }
+            }
+            if ($Hosted -and !$hostedCloseConfirmed) { throw 'The transferred owner did not receive confirmation that the hosted room closed.' }
+            if ($Hosted -and !$ServiceAddress) {
+                if (!(Test-Path -LiteralPath $dedicatedLog)) { throw 'The dedicated match process did not write native verification evidence.' }
+                $serverLog = Get-Content -LiteralPath $dedicatedLog
+                $serverLog
+                if (!($serverLog -match '^PASS:') -or ($serverLog -match '^FAIL:')) { throw 'Dedicated match native verification failed.' }
+                if (!($serverLog -match '^PASS: owner disconnect preserves the match; server keeps sending states and creator rejoins original slot$')) { throw 'The dedicated server did not verify room creator disconnect survival.' }
+                if (!($serverLog -match '^PASS: headless dedicated authority, all remote inputs, combat, owner transfer, reconnect and two-match lobby lifecycle$')) { throw 'The dedicated server did not verify the full hosted match lifecycle.' }
+                for ($slot = 0; $slot -le $Guests; $slot++) {
+                    if (!($serverLog -match "^REMOTE PLAYER: $slot input=[1-9][0-9]* moved=1 fired=1$")) { throw "The dedicated server did not verify remote controls for player slot $slot." }
+                }
             }
         } finally {
             foreach ($instance in $instances) { if (!$instance.HasExited) { Stop-Process -Id $instance.Id } }
@@ -112,6 +159,7 @@ $disabledMods
             $env:CCCP_MPSMOKE_COMBAT = $previousCombat
             $env:CCCP_MPSMOKE_ENCOUNTER = $previousEncounter
             $env:CCCP_MPSMOKE_BASELINE = $previousBaseline
+            $env:CCCP_MPSMOKE_HOSTED = $previousHosted
             $env:CCCP_MP_SERVICE = $previousService
         }
     }

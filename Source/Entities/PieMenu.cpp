@@ -3,6 +3,7 @@
 #include "FrameMan.h"
 #include "UInputMan.h"
 #include "MultiplayerWorld.h"
+#include "WindowMan.h"
 #include "Draw.h"
 #include "PresetMan.h"
 #include "SettingsMan.h"
@@ -646,11 +647,11 @@ void PieMenu::Update() {
 }
 
 void PieMenu::Draw(BITMAP* targetBitmap, const Vector& targetPos) const {
-	rlZDepth(c_GuiDepth);
+	if (!g_WindowMan.IsHeadless()) { rlZDepth(c_GuiDepth); }
 	Vector drawPos;
 	CalculateDrawPosition(targetBitmap, targetPos, drawPos);
 
-	rlZDepth(c_GuiDepth);
+	if (!g_WindowMan.IsHeadless()) { rlZDepth(c_GuiDepth); }
 	if (m_EnabledState != EnabledState::Disabled) {
 		MultiplayerWorld::BeginRadialBackground();
 		if (m_DrawBackgroundTransparent) {
@@ -663,7 +664,7 @@ void PieMenu::Draw(BITMAP* targetBitmap, const Vector& targetPos) const {
 		}
 		MultiplayerWorld::EndInteraction();
 	}
-	rlZDepth(c_DefaultDrawDepth);
+	if (!g_WindowMan.IsHeadless()) { rlZDepth(c_DefaultDrawDepth); }
 
 	if (m_EnabledState == EnabledState::Enabled) {
 		DrawPieIcons(targetBitmap, drawPos);
@@ -675,7 +676,7 @@ void PieMenu::Draw(BITMAP* targetBitmap, const Vector& targetPos) const {
 	if (m_ActiveSubPieMenu) {
 		m_ActiveSubPieMenu->Draw(targetBitmap, targetPos);
 	}
-	rlZDepth(c_DefaultDrawDepth);
+	if (!g_WindowMan.IsHeadless()) { rlZDepth(c_DefaultDrawDepth); }
 }
 
 void PieMenu::UpdateWobbling() {

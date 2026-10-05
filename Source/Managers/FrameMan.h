@@ -106,7 +106,7 @@ namespace RTE {
 
 		/// Gets the number of currently active screens, counting all splits.
 		/// @return The number of currently active screens.
-		int GetScreenCount() const { return m_HSplit || m_VSplit ? (m_HSplit && m_VSplit ? 4 : 2) : 1; }
+		int GetScreenCount() const;
 
 		/// Gets the width of the individual player screens. This will only be less than the backbuffer resolution if there are split screens.
 		/// @return The width of the player screens.
@@ -381,6 +381,9 @@ namespace RTE {
 #pragma endregion
 
 #pragma region Draw Breakdown
+		/// Capture authoritative remote world and GUI state using CPU resources only.
+		void DrawHeadless();
+
 		/// Updates the drawing position of each player screen on the backbuffer when split screen is active. This is called during Draw().
 		/// @param playerScreen The player screen to update offset for.
 		/// @param screenOffset Vector representing the screen offset.

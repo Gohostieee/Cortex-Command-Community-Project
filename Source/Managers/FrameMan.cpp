@@ -228,6 +228,7 @@ void FrameMan::Update() {
 
 	// Update redundantly in sim update to ensure our values are exactly precise for the purposes of script GetOffset()
 	int screenCount = (m_HSplit ? 2 : 1) * (m_VSplit ? 2 : 1);
+	if (g_WindowMan.IsHeadless() && g_ActivityMan.GetActivity()) { screenCount = g_ActivityMan.GetActivity()->GetHumanCount(); }
 	for (int playerScreen = 0; playerScreen < screenCount; ++playerScreen) {
 		g_CameraMan.Update(playerScreen);
 	}
@@ -289,6 +290,11 @@ Vector FrameMan::GetMiddleOfPlayerScreen(int whichPlayer) {
 		}
 	}
 	return middleOfPlayerScreen;
+}
+
+int FrameMan::GetScreenCount() const {
+	if (g_WindowMan.IsHeadless() && g_ActivityMan.GetActivity()) { return std::max(1, int(g_ActivityMan.GetActivity()->GetHumanCount())); }
+	return m_HSplit || m_VSplit ? (m_HSplit && m_VSplit ? 4 : 2) : 1;
 }
 
 int FrameMan::GetPlayerFrameBufferWidth(int whichPlayer) const {
@@ -369,6 +375,7 @@ void FrameMan::ClearScreenText(int whichScreen) {
 }
 
 void FrameMan::SetBlendMode(DrawBlendMode blendMode) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	GLint invertLoc = rlGetLocationUniformCurrent("rteBlendInvert");
 	glUniform1i(invertLoc, 0);
 	switch (blendMode) {
@@ -620,6 +627,7 @@ int FrameMan::SaveBitmap(SaveBitmapMode modeToSave, const std::string& nameBase,
 }
 
 void FrameMan::SaveScreenToBitmap() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	if (!m_ScreenDumpBuffer) {
 		return;
 	}
@@ -815,6 +823,7 @@ void FrameMan::UpdateScreenOffsetForSplitScreen(int playerScreen, Vector& screen
 
 void FrameMan::Draw() {
 	ZoneScopedN("Draw");
+	if (g_WindowMan.IsHeadless()) { DrawHeadless(); return; }
 	TracyGpuZone("FrameMan::Draw");
 
 	// rlSetShader(rlGetShaderIdDefault(), rlGetShaderLocsDefault());
@@ -982,6 +991,49 @@ void FrameMan::Draw() {
 	// Draw scene seam
 	vline(m_BackBuffer8.get(), 0, 0, g_SceneMan.GetSceneHeight(), 5);
 #endif
+}
+
+void FrameMan::DrawHeadless() {
+	Activity* activity = g_ActivityMan.GetActivity();
+	if (!activity || !g_MultiplayerMan.IsHostingMatch() || !g_SceneMan.GetScene()) { return; }
+	const int screenCount = activity->GetHumanCount();
+	std::array<bool, c_MaxScreenCount> captureViews{};
+	bool captureObjects = false;
+	for (int screen = 0; screen < screenCount; ++screen) {
+		captureViews[screen] = g_MultiplayerMan.WantsState(activity->PlayerOfScreen(screen));
+		captureObjects |= captureViews[screen];
+	}
+	// Object state is shared by all views and sampled only when a peer needs
+	// a snapshot. No battlefield or guest framebuffer is sent to a GPU.
+	if (captureObjects) { g_MovableMan.Draw(m_BackBuffer8.get(), Vector()); }
+	g_PostProcessMan.ClearScreenPostEffects();
+	for (int screen = 0; screen < screenCount; ++screen) {
+		const int player = activity->PlayerOfScreen(screen);
+		g_CameraMan.Update(screen);
+		float cameraX, cameraY;
+		if (g_MultiplayerMan.GuestView(player, cameraX, cameraY)) { g_CameraMan.SetOffset(Vector(cameraX, cameraY), screen); }
+		g_SceneMan.Update(screen);
+		if (!captureViews[screen]) { continue; }
+		const int width = g_MultiplayerMan.ViewWidth(screen), height = g_MultiplayerMan.ViewHeight(screen);
+		auto& gui = m_RemoteScreenGUIs[screen];
+		if (!gui || gui->w != width || gui->h != height) {
+			gui = std::shared_ptr<BITMAP>(create_bitmap_ex(8, width, height), BitmapDeleter());
+			RTEAssert(gui, "Unable to allocate dedicated client view");
+		}
+		Vector camera = g_CameraMan.GetOffset(screen);
+		if (!g_SceneMan.SceneWrapsX() && width > g_SceneMan.GetSceneWidth()) { camera.m_X += (width - g_SceneMan.GetSceneWidth()) / 2; }
+		if (!g_SceneMan.SceneWrapsY() && height > g_SceneMan.GetSceneHeight()) { camera.m_Y += (height - g_SceneMan.GetSceneHeight()) / 2; }
+		g_MultiplayerMan.BeginGuestView(gui.get(), camera.GetX(), camera.GetY());
+		if (!IsHudDisabled(screen)) {
+			g_MovableMan.DrawHUD(gui.get(), camera, screen);
+			activity->DrawGUI(gui.get(), camera, screen);
+		}
+		g_PrimitiveMan.DrawPrimitives(screen, gui.get(), camera);
+		DrawScreenText(screen, AllegroBitmap(gui.get()));
+		DrawScreenFlash(screen, gui.get());
+		g_MultiplayerMan.EndGuestView(player);
+	}
+	g_SceneMan.ClearSeenPixels();
 }
 
 void FrameMan::DrawScreenText(int playerScreen, AllegroBitmap playerGUIBitmap) {

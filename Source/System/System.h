@@ -90,7 +90,7 @@ namespace RTE {
 		static bool IsLoggingToCLI() { return s_LogToCLI; }
 
 		/// Enables printing the loading progress report and console to command-line. For Windows, also allocates a console instance and redirects cout to it.
-		static void EnableLoggingToCLI();
+		static void EnableLoggingToCLI(bool allocateConsole = true);
 
 		/// Prints the loading progress report to command-line.
 		static void PrintLoadingToCLI(const std::string& reportString, bool newItem = false);

@@ -50,6 +50,10 @@ namespace RTE {
 
 		/// Makes the WindowMan object ready for use.
 		void Initialize();
+
+		/// Select the CPU-only dedicated runtime before any manager initialization.
+		void SetHeadless(bool headless) { m_Headless = headless; }
+		bool IsHeadless() const { return m_Headless; }
 #pragma endregion
 
 #pragma region Destruction
@@ -67,7 +71,7 @@ namespace RTE {
 
 		/// Gets whether any of the game windows is currently in focus.
 		/// @return Whether any of the game windows is currently in focus.
-		bool AnyWindowHasFocus() const { return m_AnyWindowHasFocus; }
+		bool AnyWindowHasFocus() const { return m_Headless || m_AnyWindowHasFocus; }
 
 		/// Gets the maximum horizontal resolution the game can be resized to.
 		/// @return The maximum horizontal resolution the game can be resized to.
@@ -191,6 +195,7 @@ namespace RTE {
 #pragma endregion
 
 	private:
+		bool m_Headless = false; //!< No video subsystem, window, graphics context or GPU allocations.
 		std::vector<SDL_Event> m_EventQueue; //!< List of incoming window events.
 
 		bool m_FocusEventsDispatchedByMovingBetweenWindows; //!< Whether queued events were dispatched due to raising windows when moving between windows in multi-display fullscreen in the previous update.

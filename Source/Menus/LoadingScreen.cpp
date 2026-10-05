@@ -30,6 +30,11 @@ void LoadingScreen::Clear() {
 }
 
 void LoadingScreen::Create(AllegroScreen* guiScreen, GUIInputWrapper* guiInput, bool progressReportDisabled) {
+	if (g_WindowMan.IsHeadless()) {
+		m_LoadingLogWriter = std::make_unique<Writer>(System::GetUserdataDirectory() + "LogLoading.txt");
+		if (!m_LoadingLogWriter->WriterOK()) { m_LoadingLogWriter.reset(); }
+		return;
+	}
 	GUIControlManager loadingScreenManager;
 	RTEAssert(loadingScreenManager.Create(guiScreen, guiInput, "Base.rte/GUIs/Skins/Menus", "LoadingScreenSkin.ini"), "Failed to create GUI Control Manager and load it from Base.rte/GUIs/Skins/Menus/LoadingScreenSkin.ini");
 	loadingScreenManager.Load("Base.rte/GUIs/LoadingGUI.ini");
@@ -63,6 +68,7 @@ void LoadingScreen::Create(AllegroScreen* guiScreen, GUIInputWrapper* guiInput, 
 }
 
 void LoadingScreen::CreateLoadingSplash(int xOffset) {
+	if (g_WindowMan.IsHeadless()) { return; }
 	if (m_LoadingSplashBitmap) {
 		destroy_bitmap(m_LoadingSplashBitmap);
 		m_LoadingSplashBitmap = nullptr;
@@ -153,5 +159,6 @@ void LoadingScreen::LoadingSplashProgressReport(const std::string& reportString,
 }
 
 void LoadingScreen::DrawLoadingSplash() {
+	if (g_WindowMan.IsHeadless()) { return; }
 	draw_sprite(g_FrameMan.GetBackBuffer32(), m_LoadingSplashBitmap, 0, 0);
 }

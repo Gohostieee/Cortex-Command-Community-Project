@@ -14,7 +14,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 6, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 7, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	input.ViewValid = input.CursorValid = input.PointerValid = true; input.ViewX = 2500; input.CursorMode = 3; input.CursorX = 2820; input.PointerX = 100;
@@ -292,15 +292,15 @@ void TransportLoopback() {
     }
     std::cout << "UDP retained resource: " << received << " chunks, " << Now() - started << " ms\n";
     Check(resourceReceived, "real UDP retained resource failed to assemble");
-	std::array<Transport, 2> guests; Transport overflow; unsigned accepted = 0; bool full = false;
+	std::array<Transport, 3> guests; Transport overflow; unsigned accepted = 0; bool full = false;
 	for (auto& guest: guests) Check(guest.Start(false, 0, "", error) && guest.Connect("127.0.0.1", port, "room-secret", error), "additional player connection failed");
 	const auto roomDeadline = Now() + 3000;
-	while (Now() < roomDeadline && accepted < 2) { host.Poll(); for (auto& guest: guests) for (const auto& event: guest.Poll()) if (event.Kind == TransportEvent::Type::Connected) ++accepted; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
-	Check(accepted == 2, "four-player room did not admit its player slots");
+	while (Now() < roomDeadline && accepted < 3) { host.Poll(); for (auto& guest: guests) for (const auto& event: guest.Poll()) if (event.Kind == TransportEvent::Type::Connected) ++accepted; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+	Check(accepted == 3, "dedicated transport did not admit all four remote player slots");
 	Check(overflow.Start(false, 0, "", error) && overflow.Connect("127.0.0.1", port, "room-secret", error), "overflow setup failed");
 	const auto overflowDeadline = Now() + 3000;
 	while (Now() < overflowDeadline && !full) { host.Poll(); for (const auto& event: overflow.Poll()) if (event.Kind == TransportEvent::Type::Failed) full = event.Error == "This room is full."; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
-	Check(full, "fifth player was not rejected from the full room");
+	Check(full, "fifth remote player was not rejected from the full dedicated transport");
 	std::vector<uint8_t> oversized(1401, PacketID); Check(!client.Send(hostAddress, oversized, Delivery::State), "oversized datagram sent");
 	client.Close(hostAddress);
 	const auto closeDeadline = Now() + 3000;

@@ -7,6 +7,7 @@
 #include "ActivityMan.h"
 #include "GameActivity.h"
 #include "MultiplayerWorld.h"
+#include "WindowMan.h"
 #include "SceneEditor.h"
 #include "UInputMan.h"
 
@@ -1202,7 +1203,7 @@ void SceneEditorGUI::Update() {
 
 void SceneEditorGUI::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 	ZoneScoped;
-	TracyGpuZone("SceneEditor Draw");
+	TracyGpuZoneTransient(sceneEditorGPU, "SceneEditor Draw", !g_WindowMan.IsHeadless());
 	// Done, so don't draw the UI
 	if (m_EditorGUIMode == DONEEDITING)
 		return;
@@ -1344,22 +1345,22 @@ void SceneEditorGUI::Draw(BITMAP* pTargetBitmap, const Vector& targetPos) {
 	}
 	// If the held object will be placed at the end of the std::list, draw it last to the scene, transperent blinking
 	else if (m_pCurrentObject && (m_ObjectListOrder < 0 || (pSceneObjectList && m_ObjectListOrder == pSceneObjectList->size()))) {
-		rlZDepth(c_GuiDepth);
+		if (!g_WindowMan.IsHeadless()) { rlZDepth(c_GuiDepth); }
 		g_FrameMan.SetTransTableFromPreset(m_BlinkTimer.AlternateReal(333) || m_EditorGUIMode == PLACINGOBJECT ? TransparencyPreset::LessTrans : TransparencyPreset::HalfTrans);
 		m_pCurrentObject->Draw(m_DrawBitmap.get(), targetPos, g_DrawTrans);
 		Actor* pActor = dynamic_cast<Actor*>(m_pCurrentObject);
 		if (pActor && m_FeatureSet != BLUEPRINTEDIT && m_FeatureSet != AIPLANEDIT)
 			pActor->DrawHUD(pTargetBitmap, targetPos);
-		rlZDepth(c_DefaultDrawDepth);
+		if (!g_WindowMan.IsHeadless()) { rlZDepth(c_DefaultDrawDepth); }
 	}
 
 	m_pPicker->Draw(pTargetBitmap);
 
 	if (!MultiplayerWorld::CanvasOverlay(m_DrawBitmap.get(), pTargetBitmap, overlayOrder)) {
 		m_DrawTexture->Update(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
-		rlZDepth(-1);
+		if (!g_WindowMan.IsHeadless()) { rlZDepth(-1); }
 		m_DrawTexture->Draw(Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height), Box(Vector(), m_DrawTexture->m_Width, m_DrawTexture->m_Height));
-		rlZDepth(0);
+		if (!g_WindowMan.IsHeadless()) { rlZDepth(0); }
 	}
 
 	// Draw the pie menu

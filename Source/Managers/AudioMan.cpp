@@ -54,6 +54,11 @@ void AudioMan::Clear() {
 
 bool AudioMan::Initialize() {
 	FMOD_RESULT audioSystemSetupResult = FMOD::System_Create(&m_AudioSystem);
+	// Keep sound lifetimes, channels and replication events on the server,
+	// without needing an audio device or producing local sound.
+	if (g_WindowMan.IsHeadless() && audioSystemSetupResult == FMOD_OK) {
+		audioSystemSetupResult = m_AudioSystem->setOutput(FMOD_OUTPUTTYPE_NOSOUND);
+	}
 
 	FMOD_ADVANCEDSETTINGS audioSystemAdvancedSettings;
 	memset(&audioSystemAdvancedSettings, 0, sizeof(audioSystemAdvancedSettings));
