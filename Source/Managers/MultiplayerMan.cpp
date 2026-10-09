@@ -119,6 +119,18 @@ struct MultiplayerMan::Impl {
 	std::string ServerAddress, Error, RoomName, ActivityName, SceneName;
 	std::vector<std::string> Chat;
 	uint64_t LastChatSent = 0;
+	// Opt-in benchmark traces contain counters and timings, never session credentials.
+	bool Benchmark = std::getenv("CCCP_MPBENCHMARK") != nullptr;
+	std::ofstream BenchmarkLog;
+	uint64_t BenchmarkLastSample = 0;
+	void BenchmarkRecord(const char* event, uint64_t now, uint64_t delta) {
+		if (!Benchmark) return;
+		if (!BenchmarkLog.is_open()) {
+			BenchmarkLog.open(SmokeLogDirectory + "/" + SmokeRole + "-benchmark.csv");
+			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps\n";
+		}
+		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << '\n';
+	}
 	char Name[32] = "Player", Room[64] = "Cortex room", HostAddress[256] = "127.0.0.1:8000", Password[64] = "";
 	char ServiceAddress[256] = "", JoinCode[32] = "";
 	bool Online = true, Hosted = true, Dedicated = false;
@@ -777,6 +789,7 @@ void MultiplayerMan::Impl::PresentWorld(MP::World::Snapshot snapshot) {
 	if (!World.Install(std::move(snapshot), Now())) return;
 	const uint64_t now = Now();
 	if (SmokeCombatStress && SmokeStage == 3 && LastFrameReceived && World.Updates() > 1) { SmokeMaxUpdateGap = std::max(SmokeMaxUpdateGap, now - LastFrameReceived); ++SmokeStressUpdates; }
+	BenchmarkRecord("world", now, LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0);
 	LastFrameReceived = now;
 	RecentWorldUpdates.push_back(now);
 	while (RecentWorldUpdates.size() > 64) RecentWorldUpdates.pop_front();
@@ -1011,6 +1024,13 @@ void MultiplayerMan::Impl::Tick() {
 		if (event.Kind == TransportEvent::Type::Data) Receive(event);
 		else if (event.Kind == TransportEvent::Type::HostedRoom) {
 			Hosted = HostedEndpoint = true; OwnerCredential.assign(event.Data.begin(), event.Data.end()); ServerAddress = event.Address;
+			// The benchmark proxy forwards the actual AWS worker's UDP traffic.
+			if (Benchmark && Smoke) if (const char* proxy = std::getenv("CCCP_MPBENCH_PROXY_BASE")) {
+				std::string workerHost; uint16_t workerPort;
+				const int base = std::atoi(proxy);
+				if (base > 0 && base < 65535 && Address(ServerAddress, workerHost, workerPort) && workerPort >= 8100 && workerPort <= 8101)
+					ServerAddress = "127.0.0.1:" + std::to_string(base + workerPort - 8100);
+			}
 			std::snprintf(JoinCode, sizeof(JoinCode), "%s", Net.RoomCode().c_str());
 			std::string host; uint16_t port;
 			if (!Address(ServerAddress, host, port) || !Net.Connect(host, port, Password, Error)) { Stop(); UI = true; }
@@ -1102,6 +1122,11 @@ void MultiplayerMan::Impl::Tick() {
 		if (now - DedicatedLastStatus >= 1000 && !DedicatedStatus.empty()) { DedicatedLastStatus = now; std::ofstream status(DedicatedStatus, std::ios::trunc); status << "ready=1\nconnected=" << std::count_if(Players.begin(), Players.end(), [](const auto& player) { return player.Connected; }) << "\nplaying=" << Playing << "\nheadless=" << g_WindowMan.IsHeadless() << '\n'; }
 	}
 	SmokeTick();
+	if (Benchmark && now - BenchmarkLastSample >= 100) {
+		BenchmarkLastSample = now;
+		BenchmarkRecord("sample", now, LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0);
+		BenchmarkLog.flush();
+	}
 	if (!CursorVerification && g_MenuMan.GetIsInMenuScreen()) UpdateMenu();
 }
 
@@ -1263,6 +1288,10 @@ void MultiplayerMan::Impl::HostedSmokeTick() {
 	if (State == Mode::Client) {
 		if (!SmokeChatSent) { SmokeChatSent = true; MP::Writer chat(Kind::Chat, Session, Epoch); chat.Text("Hosted room chat test", 192); Net.Send(ServerAddress, chat.Data, Delivery::Control); }
 		if (!Playing && (SmokeStage == 0 || SmokeStage == 2) && now - SmokeReadySent > 1000) {
+			if (Benchmark && Admin()) if (const char* upload = std::getenv("CCCP_MPBENCH_UPLOAD")) {
+				const int target = std::clamp(std::atoi(upload), 1, 48);
+				if (BandwidthMbps != target) { SendControl("Bandwidth", target); SmokeReadySent = now; Verify("BENCHMARK: requested upload Mbps=" + std::to_string(target)); return; }
+			}
 			if (!Menu) UpdateMenu();
 			if (Admin()) { if (std::count_if(Players.begin(), Players.end(), [](const auto& peer) { return peer.Connected && peer.Ready; }) == SmokeGuests + 1) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted owner start button"); } }
 			else if (!Players[LocalSlot].Ready) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted player ready button"); }
@@ -1792,7 +1821,9 @@ void MultiplayerMan::Impl::Draw() {
 	if (State == Mode::Client && Playing && World.Ready()) {
 		World.SetLocalInput(LocalInput, !UI && Controls && !World.Paused());
 		Texture = World.Render(Now()); TextureWidth = World.Width(); TextureHeight = World.Height();
-		const uint64_t now = Now(); if (LastRender && now > LastRender) FPS = FPS * 0.9f + 100.0f / float(now - LastRender); LastRender = now;
+		const uint64_t now = Now();
+		BenchmarkRecord("render", now, LastRender && now >= LastRender ? now - LastRender : 0);
+		if (LastRender && now > LastRender) FPS = FPS * 0.9f + 100.0f / float(now - LastRender); LastRender = now;
 	}
 	if (State == Mode::Client && Playing && Texture) {
 		const auto* viewport = ImGui::GetMainViewport(); const float scale = std::min(viewport->Size.x / TextureWidth, viewport->Size.y / TextureHeight);
