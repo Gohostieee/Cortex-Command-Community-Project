@@ -39,6 +39,8 @@ Individual game workers accept `-mp-dedicated CONFIG_PATH`. The private UTF-8 co
 
 The new CloudFormation stack is isolated from the existing relay. It creates its own VPC, public subnet, UDP security group, stable Elastic IP, encrypted volume, instance profile, launch template, and fixed-performance EC2 worker host. Administration uses SSM; inbound SSH is closed. IMDSv2 is required. The instance role can download only the selected immutable release object. The game and broker run unprivileged under systemd. Bootstrap verifies the runtime archive and every game data file, runs real UDP integration tests, and proves headless game startup before signaling readiness.
 
+Bootstrap installs a checksum-pinned official AWS CLI v2 archive. Ubuntu 24.04's package repositories do not currently supply the `awscli` package; using the pinned installer keeps fresh-instance startup reproducible.
+
 The initial instance choice is `c7i.xlarge` (4 vCPU/8 GiB), with two admitted hosted rooms. Burstable CPU-credit instances are excluded. This is a starting capacity that must be assessed using full-game timing measurements. Resizing and release upgrades replace the worker host and end its running rooms; the service address remains stable. Room state is ephemeral. Multiple fleet machines, cross-machine allocation, failover, and live match migration are not implemented by this initial stack.
 
 Use an authenticated AWS CLI and an existing private encrypted artifact bucket. The existing `Services/RoomService/aws/artifacts.yaml` can create one. Prepare a reviewable change set:

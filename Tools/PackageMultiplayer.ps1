@@ -25,6 +25,9 @@ New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $stage = Join-Path $releaseRoot ("$Version-" + [guid]::NewGuid().ToString('N'))
 $game = Join-Path $stage 'CortexCommand-Multiplayer'
 New-Item -ItemType Directory -Path $game -Force | Out-Null
+foreach ($directory in @('Mods', 'ScreenShots')) {
+    New-Item -ItemType Directory -Path (Join-Path $game $directory) -Force | Out-Null
+}
 foreach ($path in @('Data','Licences','LICENSE','MultiplayerService.txt')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot $path) -Destination $game -Recurse
 }
@@ -33,6 +36,9 @@ Copy-Item -LiteralPath (Join-Path $taskRoot 'external/lib/win/fmod.dll') -Destin
 Get-ChildItem -LiteralPath $RuntimeDirectory -Filter '*.dll' | Copy-Item -Destination $game
 $commit = & git -C $taskRoot rev-parse HEAD
 if ($LASTEXITCODE) { throw 'Cannot determine the source revision.' }
+$sourceArchive = Join-Path $game 'SOURCE.tar.gz'
+& git -C $taskRoot archive --format=tar.gz "--output=$sourceArchive" HEAD -- . ':(exclude)Data'
+if ($LASTEXITCODE) { throw 'Cannot package the matching source revision.' }
 @"
 Cortex Command Multiplayer - $Version (Windows x64)
 
@@ -57,7 +63,8 @@ Visual C++ runtime are included. Traffic uses UDP and is not encrypted.
 Create a new room after a server restart. Custom mods are not included.
 
 Source and license:
-https://github.com/Gohostieee/Cortex-Command-Community-Project/tree/$commit
+Matching source is included in SOURCE.tar.gz; use the included Data folder.
+Project: https://github.com/Gohostieee/Cortex-Command-Community-Project
 GNU AGPL v3; see LICENSE and Licences for component notices.
 Build source revision: $commit
 "@ | Set-Content -LiteralPath (Join-Path $game 'START-HERE.txt') -Encoding UTF8

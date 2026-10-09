@@ -161,6 +161,7 @@ Resources:
       com.aws.cloudformation.Context:
         why: Immutable release/config changes create a new template version and rerun bootstrap on replacement.
         must: Replacement ends active hosted rooms; verify in an isolated stack before switching the client default.
+        ops: Ubuntu 24.04 does not provide awscli through apt; bootstrap installs a checksum-pinned official AWS CLI v2 release.
     Properties:
       VersionDescription: !Ref ArtifactSha256
       LaunchTemplateData:
@@ -170,7 +171,13 @@ Resources:
             set -euo pipefail
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install -y --no-install-recommends awscli ca-certificates libminizip1t64 liblz4-1 libpng16-16t64 libtbb12
+            apt-get install -y --no-install-recommends curl unzip ca-certificates libminizip1t64 liblz4-1 libpng16-16t64 libtbb12
+            cli_install=$(mktemp -d /tmp/cc-awscli.XXXXXX)
+            curl --fail --silent --show-error --retry 3 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.36.9.zip' -o "$cli_install/awscli.zip"
+            echo "9b92ccb50dfc55479ac14c4ba1bb36f603a1cbfb004b50e4a50b1592ffad3da0  $cli_install/awscli.zip" | sha256sum --check -
+            unzip -q "$cli_install/awscli.zip" -d "$cli_install"
+            "$cli_install/aws/install" --update
+            rm -rf -- "$cli_install"
             test_pid=
             signal() {
               rm -f /var/lib/cc-dedicated/bootstrap-probe/server.ini
