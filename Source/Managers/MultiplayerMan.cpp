@@ -95,6 +95,8 @@ struct MultiplayerMan::Impl {
 		uint16_t ViewWidth = 960, ViewHeight = 540;
 		InputReceiver Inputs;
 		uint32_t FrameID = 0, AckID = 0;
+		// The newest input the simulation has applied, and when it first did.
+		uint32_t AppliedSequence = 0; uint64_t AppliedAt = 0;
 		double Budget = 0;
 		std::unordered_set<uint64_t> WorldResources;
 		std::unordered_map<uint64_t, uint64_t> PendingResources;
@@ -165,9 +167,9 @@ struct MultiplayerMan::Impl {
 		if (!Benchmark) return;
 		if (!BenchmarkLog.is_open()) {
 			BenchmarkLog.open(SmokeLogDirectory + "/" + SmokeRole + "-benchmark.csv");
-			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps,stale_tiles,black_tiles,black_fog_tiles\n";
+			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps,stale_tiles,black_tiles,black_fog_tiles,motion_active,motion_correction_px\n";
 		}
-		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << ',' << World.StaleTiles() << ',' << World.BlackTiles() << ',' << World.BlackFogTiles() << '\n';
+		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << ',' << World.StaleTiles() << ',' << World.BlackTiles() << ',' << World.BlackFogTiles() << ',' << World.MotionActive() << ',' << int(std::lround(World.MotionCorrection() * 10)) << '\n';
 	}
 	// Per-second attribution of the authority's single main loop. Every stage
 	// that competes with simulation time is measured separately.
@@ -580,7 +582,7 @@ struct MultiplayerMan::Impl {
 	// Set while the simulation runs well below real time, measured over
 	// half-second windows of simulated against real time.
 	bool Overloaded = false;
-	uint64_t SpeedWindowStart = 0; long long SpeedWindowTicks = 0;
+	uint64_t SpeedWindowStart = 0; long long SpeedWindowTicks = 0; float SimulationSpeed = 1;
 	void MeasureSimulationSpeed(uint64_t now);
 	void PumpWorld(Player& player, uint64_t now);
 	void ReceiveWorld(Kind kind, MP::Reader& reader);
@@ -798,7 +800,10 @@ void MultiplayerMan::EndGuestView(int player) {
 	++impl.Profile.Captures;
 	const uint64_t captured = NowMicros();
 	if (!++peer.FrameID) ++peer.FrameID;
-	auto snapshot = impl.World.EndView(player, peer.FrameID, peer.Inputs.LastInput().Sequence, peer.LastWorld);
+	// The state reflects the inputs the simulation has applied, not merely received.
+	auto snapshot = impl.World.EndView(player, peer.FrameID, peer.AppliedSequence, peer.LastWorld);
+	snapshot.InputAge = uint16_t(std::min<uint64_t>(65535, peer.AppliedAt ? Now() - peer.AppliedAt : 0));
+	snapshot.SimSpeed = uint8_t(std::clamp(int(std::lround(impl.SimulationSpeed * 100)), 1, 200));
 	snapshot.Paused = snapshot.Paused || impl.WarmingGuests;
 	const uint64_t composed = NowMicros();
 	impl.ProfileStage(Impl::ServerProfile::Compose, captured);
@@ -1454,7 +1459,11 @@ void MultiplayerMan::Impl::SampleInput() {
 
 void MultiplayerMan::ApplyInputs() {
 	if (!IsHostingMatch()) return;
-	for (int i = m_Impl->FirstRemote(); i < 4; ++i) if (IsRemotePlayer(i)) g_UInputMan.SetRemoteInput(i, m_Impl->Players[i].Inputs.Consume(Now()));
+	for (int i = m_Impl->FirstRemote(); i < 4; ++i) if (IsRemotePlayer(i)) {
+		auto& player = m_Impl->Players[i]; const auto input = player.Inputs.Consume(Now());
+		if (input.Snapshot.Sequence != player.AppliedSequence) { player.AppliedSequence = input.Snapshot.Sequence; player.AppliedAt = Now(); }
+		g_UInputMan.SetRemoteInput(i, input);
+	}
 }
 
 void MultiplayerMan::Impl::MeasureSimulationSpeed(uint64_t now) {
@@ -1463,7 +1472,7 @@ void MultiplayerMan::Impl::MeasureSimulationSpeed(uint64_t now) {
 	if (!SpeedWindowStart) { SpeedWindowStart = now; SpeedWindowTicks = g_TimerMan.GetSimTickCount(); return; }
 	if (now - SpeedWindowStart < 500) return;
 	const double simulatedMS = double(g_TimerMan.GetSimTickCount() - SpeedWindowTicks) * 1000.0 / double(g_TimerMan.GetTicksPerSecond());
-	const double speed = simulatedMS / std::max(.01f, g_TimerMan.GetTimeScale()) / double(now - SpeedWindowStart);
+	const double speed = simulatedMS / std::max(.01f, g_TimerMan.GetTimeScale()) / double(now - SpeedWindowStart); SimulationSpeed = float(std::min(1.0, speed));
 	Overloaded = speed < .85 || (Overloaded && speed < .95);
 	SpeedWindowStart = now; SpeedWindowTicks = g_TimerMan.GetSimTickCount();
 }

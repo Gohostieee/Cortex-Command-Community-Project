@@ -51,6 +51,9 @@ public:
     uint8_t ViewMode() const;
     // Scene tiles in the last rendered frame shown from an older revision, and covered black while missing.
     unsigned StaleTiles() const;
+    // Whether the guest predicts its own actor's movement, and the last correction a host state made (pixels).
+    bool MotionActive() const;
+    float MotionCorrection() const;
     unsigned BlackTiles() const;
     unsigned BlackFogTiles() const;
     bool Paused() const;

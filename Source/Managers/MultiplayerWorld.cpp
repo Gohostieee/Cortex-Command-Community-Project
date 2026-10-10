@@ -10,6 +10,8 @@
 #include "GameActivity.h"
 #include "SceneEditorGUI.h"
 #include "Actor.h"
+#include "AHuman.h"
+#include "ACrab.h"
 #include "UInputMan.h"
 #include "FrameMan.h"
 #include "CameraMan.h"
@@ -75,6 +77,7 @@ struct MultiplayerWorld::Impl {
     Vector PointerPosition;
     MP::Input LocalInput;
     LocalCamera CameraPrediction;
+    LocalMotion Motion;
     LocalPointer Pointer;
     RetainedLayers SceneLayers;
     bool LocalInputEnabled = false;
@@ -392,7 +395,7 @@ void MultiplayerWorld::Reset() {
 void MultiplayerWorld::ResetPresentation() {
     auto& impl = *m_Impl;
     impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.TileRevisions.clear(); impl.SceneAssets.clear();
-    impl.CameraPrediction.Reset();
+    impl.CameraPrediction.Reset(); impl.Motion.Reset();
     impl.Pointer.Reset(); impl.SceneLayers.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
@@ -517,6 +520,14 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         const Vector aim = g_UInputMan.AnalogAimValues(player);
         snapshot.AimX = aim.GetX(); snapshot.AimY = aim.GetY();
         if (!actor->GetController()->IsState(PIE_MENU_ACTIVE)) { const Vector look = actor->GetViewPoint() - actor->GetPos(); snapshot.LookX = look.GetX(); snapshot.LookY = look.GetY(); }
+        // A walking actor the player drives in the normal view can be predicted by the guest.
+        const auto* human = dynamic_cast<const AHuman*>(actor);
+        if ((human || dynamic_cast<const ACrab*>(actor)) && actor->GetStatus() == Actor::STABLE && actor->GetController()->GetInputMode() == Controller::CIM_PLAYER && active->GetViewState(player) == Activity::Normal) {
+            snapshot.MotionFlags = MotionPredictable | (human && human->GetJetpack() ? MotionJetpack : 0);
+        }
+        snapshot.ActorX = actor->GetPos().GetX(); snapshot.ActorY = actor->GetPos().GetY();
+        snapshot.ActorVelX = actor->GetVel().GetX() * c_PPM; snapshot.ActorVelY = actor->GetVel().GetY() * c_PPM;
+        snapshot.Gravity = g_SceneMan.GetGlobalAcc().GetY() * c_PPM;
     }
     auto* scene = g_SceneMan.GetScene(); if (!scene) return snapshot;
     auto lap = [stage = std::chrono::steady_clock::now()](uint64_t& total) mutable { const auto now = std::chrono::steady_clock::now(); total += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now - stage).count()); stage = now; };
@@ -667,6 +678,8 @@ bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready()
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
 uint8_t MultiplayerWorld::ViewMode() const { return m_Impl->States.Empty() ? 0 : m_Impl->States.Latest().ViewMode; }
 unsigned MultiplayerWorld::StaleTiles() const { return m_Impl->StaleTiles; }
+bool MultiplayerWorld::MotionActive() const { return m_Impl->Motion.Active(); }
+float MultiplayerWorld::MotionCorrection() const { return m_Impl->Motion.LastCorrection(); }
 unsigned MultiplayerWorld::BlackTiles() const { return m_Impl->BlackTiles; }
 unsigned MultiplayerWorld::BlackFogTiles() const { return m_Impl->BlackFogTiles; }
 bool MultiplayerWorld::RenderedCenter(Vector& center) const {
@@ -786,6 +799,13 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
 unsigned MultiplayerWorld::Render(uint64_t time) {
     auto& impl = *m_Impl; if (impl.States.Empty()) return 0;
     Snapshot scene = impl.States.Sample(time);
+    // The player's own movement shows at once; host states correct it.
+    if (const auto& latest = impl.States.Latest(); latest.ControlledActor) {
+        const auto find = [&](uint64_t id) -> const Resource* { const auto found = impl.Resources.find(id); return found == impl.Resources.end() ? nullptr : &found->second; };
+        const LocalMotion::Solid solid = [&](float x, float y) { return impl.SceneLayers.Solid(x, y, latest.SceneWidth, latest.Wrap & 1, find); };
+        float x, y;
+        if (impl.Motion.Update(latest, time, impl.LocalInput.Sequence, impl.LocalInputEnabled ? MotionControl(impl.LocalInput) : LocalMotion::Control{}, solid, x, y)) PlaceActor(scene, latest, x, y);
+    }
     if (impl.LocalInput.Device == DEVICE_MOUSE_KEYB) impl.Pointer.Apply(scene, impl.States.Latest(), impl.LocalInput, impl.LocalInputEnabled);
     impl.CameraPrediction.Apply(scene, impl.States.Latest(), impl.LocalInput, time, impl.LocalInputEnabled);
     if (impl.LocalInputEnabled) {

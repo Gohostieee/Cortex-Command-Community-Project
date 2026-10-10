@@ -69,7 +69,11 @@ def analyze(path):
         'black_fog_tiles_p95': percentile([r.get('black_fog_tiles', 0) for r in samples], 95),
         'samples': len(samples),
         'samples_with_black_tiles': sum(r.get('black_tiles', 0) > 0 for r in samples),
-        'samples_with_black_fog_tiles': sum(r.get('black_fog_tiles', 0) > 0 for r in samples)
+        'samples_with_black_fog_tiles': sum(r.get('black_fog_tiles', 0) > 0 for r in samples),
+        # Own-movement prediction: share of samples predicting, and host corrections (pixels).
+        'motion_active_share': round(sum(r.get('motion_active', 0) for r in samples) / max(1, len(samples)), 2),
+        'motion_correction_px_p50': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 50),
+        'motion_correction_px_p95': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 95)
     }
 
 

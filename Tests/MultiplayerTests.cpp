@@ -14,7 +14,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 9, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 10, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	input.ViewValid = input.CursorValid = input.PointerValid = true; input.ViewX = 2500; input.CursorMode = 3; input.CursorX = 2820; input.PointerX = 100;
@@ -28,6 +28,7 @@ void Wire() {
 	}
 	writer.Data.push_back(0); Reader extra(writer.Data); Check(ReadHeader(extra, header) && !ReadInput(extra, decoded), "extra input bytes accepted");
 	writer.Data = fixture; writer.Data[6] = 1; Reader legacy(writer.Data); Check(!ReadHeader(legacy, header), "legacy protocol accepted");
+    writer.Data = fixture; writer.Data[6] = 9; Reader previous(writer.Data); Check(!ReadHeader(previous, header), "v9 accepted the incompatible own-motion snapshot format");
 	Writer nan(Kind::Input); input.AimY = std::numeric_limits<float>::quiet_NaN(); WriteInput(nan, input); Reader bad(nan.Data); Check(ReadHeader(bad, header) && !ReadInput(bad, decoded), "nonfinite aim accepted");
 	input.AimY = 0; input.ViewX = std::numeric_limits<float>::infinity(); Writer unsafe(Kind::Input); WriteInput(unsafe, input); Reader badView(unsafe.Data);
 	Check(ReadHeader(badView, header) && !ReadInput(badView, decoded), "nonfinite local camera accepted");
@@ -128,6 +129,10 @@ void Worlds() {
     W::Node node; node.ID = 11; node.Asset = resource.ID; node.Width = node.SourceWidth = 4; node.Height = node.SourceHeight = 3; node.ClipWidth = 200; first.Nodes.push_back(node);
     Writer sw(Kind::WorldSnapshot); W::WriteSnapshot(sw, first); Reader sr(sw.Data); W::Snapshot copy;
     Check(ReadHeader(sr, h) && W::ReadSnapshot(sr, copy) && copy.Nodes == first.Nodes && copy.InputSequence == 7, "world state round trip failed");
+    { auto motion = first; motion.ControlledActor = 11; motion.MotionFlags = W::MotionPredictable | W::MotionJetpack;
+      motion.ActorX = 150; motion.ActorY = 70; motion.ActorVelX = -90; motion.ActorVelY = 25; motion.Gravity = 600; motion.InputAge = 65535; motion.SimSpeed = 52;
+      Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, motion); Reader reader(writer.Data);
+      Check(ReadHeader(reader, h) && W::ReadSnapshot(reader, copy) && copy.ControlledActor == motion.ControlledActor && copy.MotionFlags == motion.MotionFlags && copy.ActorX == motion.ActorX && copy.ActorY == motion.ActorY && copy.ActorVelX == motion.ActorVelX && copy.ActorVelY == motion.ActorVelY && copy.Gravity == motion.Gravity && copy.InputAge == motion.InputAge && copy.SimSpeed == motion.SimSpeed && copy.Nodes == motion.Nodes, "own-motion state or input timing changed in transit"); }
     for (size_t i = 0; i < sw.Data.size(); ++i) { Reader truncated(std::span(sw.Data).first(i)); W::Snapshot value; Check(!(ReadHeader(truncated, h) && W::ReadSnapshot(truncated, value)), "truncated state accepted"); }
     auto duplicate = first; duplicate.Nodes.push_back(node); Writer dw(Kind::WorldSnapshot); W::WriteSnapshot(dw, duplicate); Reader dr(dw.Data); Check(ReadHeader(dr, h) && !W::ReadSnapshot(dr, copy), "duplicate entity identity accepted");
     for (uint64_t time : {uint64_t(0), W::MaxTime + 1, std::numeric_limits<uint64_t>::max()}) { auto invalid = first; invalid.Time = time; Writer writer(Kind::WorldSnapshot); W::WriteSnapshot(writer, invalid); Reader reader(writer.Data); Check(ReadHeader(reader, h) && !W::ReadSnapshot(reader, copy), "unsafe presentation clock accepted"); }
@@ -341,7 +346,7 @@ void Deltas() {
     W::Node added; added.ID = 999 << 8; added.Asset = 78; added.X = 12; added.Y = 13; added.Width = added.Height = added.SourceWidth = added.SourceHeight = 4; next.Nodes.push_back(added);
     Writer delta(Kind::WorldSnapshot); W::WriteSnapshot(delta, next, &base);
     Check(delta.Data.size() < full.Data.size() / 5, "delta state was not much smaller than the complete state");
-    Check(delta.Data.size() - 120 < 199 * 3 + 40, "unchanged entities cost more than about two bytes each");
+    Check(delta.Data.size() - 144 < 199 * 3 + 40, "unchanged entities cost more than about two bytes each"); // 144: state header with the own-actor motion record
     auto lookup = [&](uint32_t id) -> const W::Snapshot* { return id == decodedBase.ID ? &decodedBase : nullptr; };
     Reader dr(delta.Data); W::Snapshot decoded;
     Check(ReadHeader(dr, h) && W::ReadSnapshot(dr, decoded, lookup) && decoded.Nodes == next.Nodes, "delta state did not reconstruct moved, unchanged, removed and new entities");
@@ -404,7 +409,39 @@ void Adaptation() {
     sampled = own.Sample(2125); Check(find(sampled, actor.ID) > 290 && find(sampled, actor.ID) < 291, "the own actor did not settle on the host's position");
 }
 }
+void Motion() {
+    namespace W = World;
+    // A floor at y = 100 and a wall from x = 200.
+    const W::LocalMotion::Solid solid = [](float x, float y) { return y >= 100 || x >= 200 ? 1 : 0; };
+    W::Snapshot host; host.ID = 1; host.Time = 1000; host.SceneWidth = 2000; host.SceneHeight = 400; host.ControlledActor = 7 << 8; host.MotionFlags = W::MotionPredictable;
+    host.ActorX = 50; host.ActorY = 70; host.Gravity = 600; host.SimSpeed = 100; host.InputSequence = 1;
+    W::LocalMotion motion; W::LocalMotion::Control still, right; right.Move = 1;
+    float x = 0, y = 0; uint64_t now = 5000; uint32_t sequence = 1;
+    auto frames = [&](const W::LocalMotion::Control& control, int count) { for (int i = 0; i < count; ++i) { now += 16; motion.Update(host, now, sequence, control, solid, x, y); } };
+    motion.Update(host, now, sequence, still, solid, x, y);
+    host.ID = 2; host.Time = 1050; now += 16;
+    Check(motion.Update(host, now, sequence, still, solid, x, y) && std::abs(x - 50) < .01f && std::abs(y - 70) < .01f, "own-movement prediction does not start from a standing host state");
+    // The host shows the actor walking at 90 px/s while right is held: that gait's speed.
+    sequence = 2; frames(right, 1);
+    host.ID = 3; host.Time = 1100; host.InputSequence = 2; host.InputAge = 0; host.ActorVelX = 90; frames(right, 1);
+    const float walking = x; frames(right, 6);
+    Check(x - walking > 7 && x - walking < 10 && std::abs(y - 70) < .01f, "own movement waits for the host instead of following the player's input");
+    frames(still, 8); const float stopped = x; frames(still, 4);
+    Check(std::abs(x - stopped) < .15f, "own movement keeps sliding after the player lets go");
+    // A host state that disagrees moves the drawn actor gradually.
+    host.ID = 4; host.Time = 1150; host.InputSequence = 2; host.InputAge = 300; host.ActorX = stopped - 10; host.ActorVelX = 0;
+    now += 16; motion.Update(host, now, sequence, still, solid, x, y);
+    Check(std::abs(x - stopped) < 2 && motion.LastCorrection() > 9, "a host correction makes the own actor jump");
+    frames(still, 40); Check(std::abs(x - (stopped - 10)) < .5f, "own movement does not settle on the host's position");
+    frames(right, 200); Check(x > 185 && x < 194, "own movement walks through a wall");
+    // Falling from a height lands on the floor.
+    W::LocalMotion fall; host.ID = 10; host.ControlledActor = 8 << 8; host.ActorX = 50; host.ActorY = 70; host.ActorVelX = host.ActorVelY = 0; host.InputSequence = 3; sequence = 3;
+    fall.Update(host, now, sequence, still, solid, x, y);
+    host.ID = 11; host.ActorY = 0; host.Time = 1200; host.InputAge = 0;
+    for (int i = 0; i < 90; ++i) { now += 16; fall.Update(host, now, sequence, still, solid, x, y); }
+    Check(std::abs(y - 70) < 1, "own movement falls through the floor or never lands");
+}
 int main() {
-	try { Wire(); Inputs(); Worlds(); Deltas(); Adaptation(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
+	try { Wire(); Inputs(); Worlds(); Deltas(); Adaptation(); Motion(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
 	catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

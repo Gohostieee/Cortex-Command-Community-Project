@@ -5,6 +5,7 @@
 #include <deque>
 #include <memory>
 #include <tuple>
+#include <functional>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +42,9 @@ struct Node {
     std::vector<uint8_t> PixelColors;
     bool operator==(const Node&) const = default;
 };
+// The controlled actor can be predicted (a walking actor under the player's control
+// in the normal view), and has a jetpack.
+inline constexpr uint8_t MotionPredictable = 1, MotionJetpack = 2;
 struct Snapshot {
     uint32_t ID = 0, InputSequence = 0;
     uint32_t MouseX = 0, MouseY = 0;
@@ -54,6 +58,14 @@ struct Snapshot {
     float AimX = 0, AimY = 0, LookX = 0, LookY = 0;
     uint8_t ViewMode = 0;
     float CameraTargetX = 0, CameraTargetY = 0, MouseScale = 0, ScrollSpeed = 0.1f;
+    // The controlled actor's movement, for the guest's own-movement prediction:
+    // flags, position and velocity (pixels, pixels per second), scene gravity,
+    // the time the host has simulated since applying InputSequence, and the
+    // host's simulation speed in percent of real time.
+    uint8_t MotionFlags = 0;
+    float ActorX = 0, ActorY = 0, ActorVelX = 0, ActorVelY = 0, Gravity = 0;
+    uint16_t InputAge = 0;
+    uint8_t SimSpeed = 100;
     std::vector<Node> Nodes;
     // Capture-only importance; receivers need only the selected drawing nodes.
     // Shared with the capture pass rather than copied for every guest.
@@ -261,7 +273,9 @@ inline void WriteSnapshot(Writer& writer, const Snapshot& s, const Snapshot* bas
     writer.U32(s.ID); writer.U32(baseline ? baseline->ID : 0); writer.U32(s.InputSequence); writer.U64(s.Time); writer.U16(s.Width); writer.U16(s.Height); writer.U16(s.SceneWidth); writer.U16(s.SceneHeight); writer.U8(s.Wrap); writer.U8(s.Phase);
     writer.F32(s.CameraX); writer.F32(s.CameraY); writer.U64(s.ControlledActor); writer.U32(s.MouseX); writer.U32(s.MouseY);
     writer.F32(s.AimX); writer.F32(s.AimY); writer.F32(s.LookX); writer.F32(s.LookY);
-    writer.U8(s.Paused); writer.U8(s.ViewMode); writer.F32(s.CameraTargetX); writer.F32(s.CameraTargetY); writer.F32(s.MouseScale); writer.F32(s.ScrollSpeed); writer.U32(uint32_t(s.Nodes.size()));
+    writer.U8(s.Paused); writer.U8(s.ViewMode); writer.F32(s.CameraTargetX); writer.F32(s.CameraTargetY); writer.F32(s.MouseScale); writer.F32(s.ScrollSpeed);
+    writer.U8(s.MotionFlags); writer.F32(s.ActorX); writer.F32(s.ActorY); writer.F32(s.ActorVelX); writer.F32(s.ActorVelY); writer.F32(s.Gravity); writer.U16(s.InputAge); writer.U8(s.SimSpeed);
+    writer.U32(uint32_t(s.Nodes.size()));
     NodeIndex local; if (baseline && !index) { local = IndexNodes(*baseline); index = &local; }
     const NodeIndex empty; const NodeIndex& base = baseline ? *index : empty;
     const Node none; uint64_t previous = 0;
@@ -276,7 +290,9 @@ inline bool ReadSnapshot(Reader& reader, Snapshot& s, Lookup&& lookup) {
     uint32_t count, baselineID;
     if (!reader.U32(s.ID) || !reader.U32(baselineID) || !reader.U32(s.InputSequence) || !reader.U64(s.Time) || !reader.U16(s.Width) || !reader.U16(s.Height) || !reader.U16(s.SceneWidth) || !reader.U16(s.SceneHeight) || !reader.U8(s.Wrap) || !reader.U8(s.Phase) || !reader.F32(s.CameraX) || !reader.F32(s.CameraY) || !reader.U64(s.ControlledActor) || !reader.U32(s.MouseX) || !reader.U32(s.MouseY) || !reader.F32(s.AimX) || !reader.F32(s.AimY) || !reader.F32(s.LookX) || !reader.F32(s.LookY)) return false;
     uint8_t paused;
-    if (!reader.U8(paused) || paused > 1 || !reader.U8(s.ViewMode) || !reader.F32(s.CameraTargetX) || !reader.F32(s.CameraTargetY) || !reader.F32(s.MouseScale) || !reader.F32(s.ScrollSpeed) || !reader.U32(count)) return false;
+    if (!reader.U8(paused) || paused > 1 || !reader.U8(s.ViewMode) || !reader.F32(s.CameraTargetX) || !reader.F32(s.CameraTargetY) || !reader.F32(s.MouseScale) || !reader.F32(s.ScrollSpeed)) return false;
+    if (!reader.U8(s.MotionFlags) || s.MotionFlags > 3 || !reader.F32(s.ActorX) || !reader.F32(s.ActorY) || !reader.F32(s.ActorVelX) || !reader.F32(s.ActorVelY) || !reader.F32(s.Gravity) || !reader.U16(s.InputAge) || !reader.U8(s.SimSpeed) || s.SimSpeed > 200 || !reader.U32(count)) return false;
+    if (!Coordinate(s.ActorX) || !Coordinate(s.ActorY) || std::abs(s.ActorVelX) > 100000 || std::abs(s.ActorVelY) > 100000 || std::abs(s.Gravity) > 100000) return false;
     s.Paused = paused;
     if (s.ViewMode > 20 || !Coordinate(s.CameraTargetX) || !Coordinate(s.CameraTargetY) || s.MouseScale < 0 || s.MouseScale > 2 || s.ScrollSpeed < 0 || s.ScrollSpeed > 1) return false;
     if (!Coordinate(s.AimX) || !Coordinate(s.AimY) || std::abs(s.AimX) > 1 || std::abs(s.AimY) > 1 || !Coordinate(s.LookX) || !Coordinate(s.LookY)) return false;
@@ -356,13 +372,26 @@ inline constexpr uint8_t PhaseEditing = 2;
 // travelling farther never discards already known tiles.
 class RetainedLayers {
 public:
-    void Reset() { m_Nodes.clear(); }
+    void Reset() { m_Nodes.clear(); m_Foreground.clear(); }
     void Install(const SceneMap& map) { Reset(); for (const auto& n : map.Nodes) Store(n, map.CameraX, map.CameraY); }
     void Update(const Snapshot& snapshot) { for (const auto& n : snapshot.Nodes) Store(n, snapshot.CameraX, snapshot.CameraY); }
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> assets; for (const auto& [id, n] : m_Nodes) if (n.Asset) assets.insert(n.Asset); return assets; }
     // Assets of the retained tiles this view draws, so the first state can wait for its own surroundings.
     // A tile the state itself carries replaces the retained version, which a
     // battle may have changed (and the host discarded) since the manifest.
+    // Whether the guest's copy of the foreground terrain is solid at a world point:
+    // 1 solid, 0 open, -1 unknown (outside the map or pixels not yet held).
+    template <typename Find>
+    int Solid(float x, float y, float sceneWidth, bool wrapX, Find&& find) const {
+        if (wrapX && sceneWidth > 0) { x = std::fmod(x, sceneWidth); if (x < 0) x += sceneWidth; }
+        const auto tile = m_Foreground.find(TileKey(int(std::floor(x / TileSize)), int(std::floor(y / TileSize))));
+        if (tile == m_Foreground.end()) return -1;
+        const Node& n = m_Nodes.at(tile->second); if (!n.Asset) return 0;
+        const Resource* resource = find(n.Asset); if (!resource || resource->Depth != 8) return -1;
+        const int px = int(std::floor(x - n.X)), py = int(std::floor(y - n.Y));
+        if (px < 0 || py < 0 || px >= resource->Width || py >= resource->Height) return -1;
+        return resource->Pixels[size_t(py) * resource->Width + px] != ColorKeys::g_MaskColor ? 1 : 0;
+    }
     void VisibleAssets(const Snapshot& snapshot, std::unordered_set<uint64_t>& assets) const {
         std::unordered_set<uint64_t> replaced; for (const auto& n : snapshot.Nodes) if (LayerOrdinal(n)) replaced.insert(n.ID);
         for (const auto& [id, source] : m_Nodes) if (source.Asset && !replaced.contains(id) && (LayerOrdinal(source) != FogLayer || snapshot.Phase != PhaseEditing)) { Node n = Placed(source, snapshot); if (Visible(n, snapshot)) assets.insert(n.Asset); }
@@ -402,8 +431,11 @@ private:
     void Store(Node n, float cameraX, float cameraY) {
         const unsigned ordinal = LayerOrdinal(n); if (!ordinal || ordinal > FogLayer) return;
         n.X += cameraX * n.X3; n.Y += cameraY * n.Y3;
+        if (ordinal == ForegroundLayer && n.Type == Shape::Sprite) m_Foreground[TileKey(int(std::floor((n.X + 1) / TileSize)), int(std::floor((n.Y + 1) / TileSize)))] = n.ID;
         m_Nodes[n.ID] = std::move(n);
     }
+    static uint64_t TileKey(int x, int y) { return (uint64_t(uint32_t(x)) << 32) | uint32_t(y); }
+    std::unordered_map<uint64_t, uint64_t> m_Foreground;
     struct Order {
         bool operator()(uint64_t a, uint64_t b) const {
             const auto ordinal = [](uint64_t id) { return id & (uint64_t(1) << 62) ? (id >> 48) & 0x3fff : (id >> 32) & 0xffff; };
@@ -741,6 +773,155 @@ private:
     std::array<std::pair<uint32_t, float>, 64> m_SentCursor{};
     uint32_t m_Reconciled = 0;
 };
+// The guest's prediction of its own actor's movement. The actor moves at once
+// from the player's input, using a small model of walking, gravity and the
+// jetpack against the terrain the guest holds, instead of a round trip later.
+// The model's speeds come from the host's own states (per gait), so it needs
+// no copy of the actor. Each host state restarts the model from the host's
+// position and velocity at the last input the host applied, and replays the
+// inputs made since. What still differs fades out; if the model keeps
+// disagreeing with the host (doors, other actors, unusual bodies), it steps
+// aside and the host's movement is shown instead.
+class LocalMotion {
+public:
+    struct Control { float Move = 0; bool Jet = false, Fast = false, Crouch = false; };
+    using Solid = std::function<int(float x, float y)>; // 1 solid, 0 open, -1 unknown
+    static constexpr float GroundAcceleration = 1600, StepUp = 8, StepDown = 12, HalfWidth = 7, HeadHeight = 24, TrustedError = 12;
+    void Reset() { *this = LocalMotion(); }
+    // Advances one rendered frame. Returns whether (x, y) is the predicted
+    // position of the actor (its host position, as Snapshot::ActorX/Y).
+    bool Update(const Snapshot& latest, uint64_t now, uint32_t sequence, const Control& control, const Solid& solid, float& x, float& y) {
+        if (!(latest.MotionFlags & MotionPredictable) || !latest.ControlledActor) { if (m_Actor) Reset(); return false; }
+        m_Width = latest.Wrap & 1 ? float(latest.SceneWidth) : 0;
+        if (latest.ControlledActor != m_Actor) { Reset(); m_Actor = latest.ControlledActor; m_Width = latest.Wrap & 1 ? float(latest.SceneWidth) : 0; m_StateID = latest.ID; Learn(latest, Control{}, solid); m_State = Host(latest, solid); }
+        const float dt = m_LastTime && now > m_LastTime ? float(std::min<uint64_t>(now - m_LastTime, 100)) * .001f * std::max(.05f, latest.SimSpeed * .01f) : 0;
+        m_LastTime = now;
+        Step(m_State, control, dt, solid);
+        m_Frames.push_back({now, sequence, dt, control});
+        while (m_Frames.size() > 1 && now - m_Frames.front().Time > 2000) m_Frames.pop_front();
+        if (latest.ID != m_StateID) Reconcile(latest, solid);
+        const float fade = std::exp(-dt / .1f); m_OffsetX *= fade; m_OffsetY *= fade;
+        x = Wrapped(m_State.X + m_OffsetX); y = m_State.Y + m_OffsetY;
+        return m_FootKnown && m_Error < TrustedError;
+    }
+    // The last correction a host state made, in pixels.
+    float LastCorrection() const { return m_LastCorrection; }
+    bool Active() const { return m_Actor && m_FootKnown && m_Error < TrustedError; }
+private:
+    struct State { float X = 0, Y = 0, VX = 0, VY = 0; bool Ground = false; };
+    struct Frame { uint64_t Time; uint32_t Sequence; float Dt; Control Input; };
+    static int Gait(const Control& c) { return c.Crouch ? 2 : c.Fast ? 1 : 0; }
+    static float Approach(float value, float target, float step) { return value < target ? std::min(target, value + step) : std::max(target, value - step); }
+    static void Blend(float& value, float sample) { value = value > 0 ? value * .7f + sample * .3f : sample; }
+    float Wrapped(float x) const { if (m_Width > 0) { x = std::fmod(x, m_Width); if (x < 0) x += m_Width; } return x; }
+    // The first point at or below fromY, within range, that is not open terrain.
+    static bool Surface(float x, float fromY, float range, const Solid& solid, float& surface) {
+        for (float y = std::floor(fromY); y <= fromY + range; ++y) if (solid(x, y) != 0) { surface = y; return true; }
+        return false;
+    }
+    bool Wall(float x, float y, float vx, const Solid& solid) const {
+        if (vx == 0) return false;
+        const float edge = x + (vx > 0 ? HalfWidth : -HalfWidth);
+        return solid(edge, y + m_Foot - StepUp - 2) == 1 || solid(edge, y) == 1;
+    }
+    State Host(const Snapshot& latest, const Solid& solid) const {
+        State s{latest.ActorX, latest.ActorY, latest.ActorVelX, latest.ActorVelY, false};
+        float ground; s.Ground = m_FootKnown && std::abs(s.VY) < 40 && Surface(s.X, s.Y + m_Foot - 3, 7, solid, ground);
+        return s;
+    }
+    void Step(State& s, const Control& c, float dt, const Solid& solid) const {
+        if (dt <= 0 || !m_FootKnown) return;
+        if (s.Ground && !c.Jet) {
+            // Walking at the speed the host showed for this gait, or stopping.
+            const float walk = m_Walk[Gait(c)];
+            const float target = c.Move != 0 ? (walk > 0 ? c.Move * walk : s.VX) : 0;
+            s.VX = Approach(s.VX, target, GroundAcceleration * dt); s.VY = 0;
+            const float x = s.X + s.VX * dt;
+            if (Wall(x, s.Y, s.VX, solid)) { s.VX = 0; return; }
+            float ground;
+            if (Surface(x, s.Y + m_Foot - StepUp, StepUp + StepDown, solid, ground)) s.Y = ground - m_Foot; else s.Ground = false;
+            s.X = x;
+            return;
+        }
+        s.VY += m_Gravity * dt;
+        if (c.Jet && m_Jet > 0) s.VY -= m_Jet * dt;
+        if (c.Move != 0 && m_Air > 0) s.VX += c.Move * m_Air * dt;
+        const float x = s.X + s.VX * dt;
+        if (Wall(x, s.Y, s.VX, solid)) s.VX = 0; else s.X = x;
+        const float y = s.Y + s.VY * dt;
+        float ground;
+        if (s.VY > 0 && Surface(s.X, s.Y + m_Foot, y - s.Y + 1, solid, ground)) { s.Y = ground - m_Foot; s.VY = 0; s.Ground = true; return; }
+        if (s.VY < 0 && solid(s.X, y - HeadHeight) == 1) { s.VY = 0; return; }
+        s.Y = y;
+    }
+    void Learn(const Snapshot& latest, const Control& c, const Solid& solid) {
+        const float vx = latest.ActorVelX, vy = latest.ActorVelY;
+        m_Gravity = latest.Gravity;
+        // At rest vertically, the terrain just below is where the actor stands.
+        if (std::abs(vy) < 6 && (!m_HostTime || std::abs(m_HostVY) < 6)) {
+            // A hovering or jumping actor can also be still; only a plausible, consistent distance counts.
+            float ground; if (Surface(latest.ActorX, latest.ActorY + 4, 64, solid, ground) && solid(latest.ActorX, ground) == 1) {
+                const float foot = ground - latest.ActorY;
+                if (foot >= 8 && foot <= 60 && (!m_FootKnown || std::abs(foot - m_Foot) < 12)) { m_Foot = m_FootKnown ? m_Foot * .5f + foot * .5f : foot; m_FootKnown = true; }
+            }
+        }
+        const State host = Host(latest, solid);
+        const float elapsed = m_HostTime && latest.Time > m_HostTime ? float(latest.Time - m_HostTime) * .001f : 0;
+        if (host.Ground && !c.Jet && std::abs(c.Move) > .5f && vx * c.Move > 10) Blend(m_Walk[Gait(c)], std::abs(vx));
+        if (!host.Ground && m_HostAir && elapsed > .02f && elapsed < .25f) {
+            const float ay = (vy - m_HostVY) / elapsed, ax = (vx - m_HostVX) / elapsed;
+            if (c.Jet && m_HostJet && m_Gravity - ay > 0) Blend(m_Jet, m_Gravity - ay);
+            if (std::abs(c.Move) > .5f && ax * c.Move > 0) Blend(m_Air, std::abs(ax));
+        }
+        m_HostVX = vx; m_HostVY = vy; m_HostTime = latest.Time; m_HostAir = !host.Ground; m_HostJet = c.Jet;
+    }
+    void Reconcile(const Snapshot& latest, const Solid& solid) {
+        m_StateID = latest.ID;
+        // The frame that first sent the input the host reports, and the host's time with it since.
+        const auto sent = std::find_if(m_Frames.begin(), m_Frames.end(), [&](const Frame& f) { return !Newer(latest.InputSequence, f.Sequence); });
+        Learn(latest, sent != m_Frames.end() ? sent->Input : Control{}, solid);
+        const State before = m_State;
+        State state = Host(latest, solid);
+        if (sent != m_Frames.end()) { const uint64_t match = sent->Time + latest.InputAge; for (const auto& frame : m_Frames) if (frame.Time > match) Step(state, frame.Input, frame.Dt, solid); }
+        m_State = state;
+        const float dx = Displacement(m_State.X, before.X, m_Width, m_Width > 0), dy = before.Y - m_State.Y;
+        m_LastCorrection = std::hypot(dx, dy);
+        // A teleport or respawn is shown as it is.
+        if (m_LastCorrection > 96) m_OffsetX = m_OffsetY = 0; else { m_OffsetX += dx; m_OffsetY += dy; }
+        if (m_FootKnown) m_Error = m_Error * .8f + std::min(m_LastCorrection, 96.0f) * .2f;
+    }
+    std::deque<Frame> m_Frames;
+    State m_State;
+    uint64_t m_Actor = 0, m_LastTime = 0, m_HostTime = 0;
+    uint32_t m_StateID = 0;
+    float m_Width = 0, m_Gravity = 0, m_Foot = 0, m_Jet = 0, m_Air = 0;
+    std::array<float, 3> m_Walk{};
+    bool m_FootKnown = false, m_HostAir = false, m_HostJet = false;
+    float m_HostVX = 0, m_HostVY = 0;
+    float m_OffsetX = 0, m_OffsetY = 0, m_Error = 0, m_LastCorrection = 0;
+};
+inline LocalMotion::Control MotionControl(const Input& input) {
+    const auto held = [&](unsigned bit) { return bool(input.Held & (uint64_t(1) << bit)); };
+    LocalMotion::Control c;
+    // Right wins over left, as in the native controller.
+    c.Move = held(INPUT_L_RIGHT) ? 1.0f : held(INPUT_L_LEFT) ? -1.0f : 0.0f;
+    c.Jet = held(INPUT_JUMP); c.Fast = held(INPUT_MOVE_FAST); c.Crouch = held(INPUT_CROUCH) || held(INPUT_PRONE);
+    return c;
+}
+// Moves a drawn actor and everything attached to it so its host position is at (x, y).
+inline void PlaceActor(Snapshot& scene, const Snapshot& latest, float x, float y) {
+    const Node* hostRoot = nullptr; for (const auto& n : latest.Nodes) if (n.ID == latest.ControlledActor) { hostRoot = &n; break; }
+    const Node* root = nullptr; for (const auto& n : scene.Nodes) if (n.ID == latest.ControlledActor) { root = &n; break; }
+    if (!hostRoot || !root) return;
+    // The drawn root keeps its offset from the host position.
+    const float dx = Displacement(root->X, x + (hostRoot->X - latest.ActorX), latest.SceneWidth, latest.Wrap & 1), dy = y + (hostRoot->Y - latest.ActorY) - root->Y;
+    std::unordered_map<uint64_t, uint64_t> parents; for (const auto& n : scene.Nodes) if (!(n.Flags & ScreenSpace)) parents[n.ID] = n.Parent;
+    for (auto& n : scene.Nodes) {
+        if (n.Flags & ScreenSpace) continue;
+        uint64_t id = n.ID; for (unsigned depth = 0; id && id != latest.ControlledActor && depth < 32; ++depth) { const auto up = parents.find(id); id = up == parents.end() ? 0 : up->second; }
+        if (id == latest.ControlledActor) Translate(n, dx, dy);
+    }
+}
 // The presentation delay follows measured delivery instead of a fixed 75 ms:
 // it must cover one update interval plus the arrival jitter, or presentation
 // runs past the newest state and extrapolates or freezes. Source's default
