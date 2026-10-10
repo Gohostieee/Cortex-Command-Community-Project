@@ -1,5 +1,13 @@
 # Playing multiplayer
 
+**Development status (2026-10-10):** This branch now carries unfinished own-actor
+movement prediction with gameplay protocol **v10**. The implementation and
+recorded v9 results below describe the accepted pre-prediction baseline. The
+prediction checkpoint has a reported native rejoin failure and incomplete
+activation, and has not been deployed to AWS. See the
+[continuation specification](MultiplayerContinuationSpec.md) for completed work,
+known failures, compatibility requirements and the remaining acceptance gates.
+
 Multiplayer is available from the main menu. An AWS-hosted room supports four players. A dedicated Linux process runs physics, AI, Lua, terrain and activities; every player, including the room creator, connects as a client and renders locally. Player-hosted relay and direct LAN rooms remain available.
 
 ## Host a room
