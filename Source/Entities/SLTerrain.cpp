@@ -8,6 +8,7 @@
 #include "Atom.h"
 #include "DataModule.h"
 #include "PresetMan.h"
+#include "MultiplayerWorld.h"
 
 #include <array>
 #include <execution>
@@ -476,9 +477,17 @@ std::deque<MOPixel*> SLTerrain::EraseSilhouette(BITMAP* sprite, const Vector& po
 		}
 	}
 	// TODO: improve fit/tightness of box here.
-	m_UpdatedMaterialAreas.emplace_back(Box(pos - pivot, static_cast<float>(maxWidth), static_cast<float>(maxHeight)));
+	AddUpdatedMaterialArea(Box(pos - pivot, static_cast<float>(maxWidth), static_cast<float>(maxHeight)));
 
 	return dislodgedMOPixels;
+}
+
+void SLTerrain::AddUpdatedMaterialArea(const Box& newArea) {
+	m_UpdatedMaterialAreas.emplace_back(newArea);
+	// Callers drew into the colour layers too; replicated tiles in the area need verifying.
+	const int x = newArea.GetCorner().GetFloorIntX(), y = newArea.GetCorner().GetFloorIntY(), width = static_cast<int>(std::ceil(newArea.GetWidth())) + 1, height = static_cast<int>(std::ceil(newArea.GetHeight())) + 1;
+	MultiplayerWorld::MarkChanged(m_FGColorLayer->GetBitmap(), x, y, width, height);
+	MultiplayerWorld::MarkChanged(m_BGColorLayer->GetBitmap(), x, y, width, height);
 }
 
 void SLTerrain::Update() {

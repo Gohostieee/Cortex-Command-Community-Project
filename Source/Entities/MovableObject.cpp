@@ -1,4 +1,5 @@
 #include "MovableObject.h"
+#include "MultiplayerWorld.h"
 
 #include "ActivityMan.h"
 #include "PresetMan.h"
@@ -1117,6 +1118,8 @@ bool MovableObject::DrawToTerrain(SLTerrain* terrain) {
 		terrain->AddUpdatedMaterialArea(Box(tempBitmapPos, static_cast<float>(tempBitmap->w), static_cast<float>(tempBitmap->h)));
 	} else {
 		Draw(terrain->GetFGColorBitmap(), Vector(), DrawMode::g_DrawColor, true);
+		const int extent = static_cast<int>(std::ceil(GetDiameter())) + 2;
+		MultiplayerWorld::MarkChanged(terrain->GetFGColorBitmap(), m_Pos.GetFloorIntX() - extent / 2, m_Pos.GetFloorIntY() - extent / 2, extent, extent);
 		Material const* terrMat = g_SceneMan.GetMaterialFromID(g_SceneMan.GetTerrain()->GetMaterialPixel(m_Pos.GetFloorIntX(), m_Pos.GetFloorIntY()));
 		if (GetMaterial()->GetPriority() > terrMat->GetPriority()) {
 			Draw(terrain->GetMaterialBitmap(), Vector(), DrawMode::g_DrawMaterial, true);

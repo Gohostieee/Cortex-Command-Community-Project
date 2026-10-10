@@ -26,11 +26,15 @@ public:
     void EndObjects();
     void BeginView(BITMAP* gui, const Vector& camera);
     MP::World::Snapshot EndView(int player, uint32_t id, uint32_t inputSequence, uint64_t time);
+    // Composition time by stage (backdrops, trails, objects, foreground and fog, canvas and effects, bounding), for profiling.
+    static std::array<uint64_t, 6> TakeComposeTimes();
     const MP::World::Resource* FindResource(uint64_t id) const;
     bool Install(MP::World::Resource resource);
     bool Install(MP::World::Snapshot snapshot, uint64_t time);
     std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
     bool SceneryReady(const MP::World::Snapshot& snapshot) const;
+    // The assets SceneryReady still waits for.
+    std::vector<uint64_t> MissingScenery(const MP::World::Snapshot& snapshot) const;
     std::vector<uint64_t> PrepareScene();
     MP::World::SceneMap PrepareSceneMap(int width, int height);
     void InstallSceneMap(const MP::World::SceneMap& map);
@@ -50,6 +54,10 @@ public:
     bool VerifyPresentation(std::ostream& log);
     void SetLocalInput(const MP::Input& input, bool enabled);
     void ExportLocalView(MP::Input& input, bool enabled) const;
+    // Replicated scene bitmaps (terrain colour layers and team fog) record the
+    // 64-pixel tiles each write touches, so capture compares only those tiles
+    // plus a slow verification sweep instead of every visible tile per guest.
+    static void MarkChanged(BITMAP* bitmap, int x, int y, int width, int height);
     static void BeginAim(const Actor& actor, int screen);
     static void BeginRadialCursor();
     static void BeginRadialBackground();

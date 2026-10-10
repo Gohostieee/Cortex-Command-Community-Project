@@ -15,7 +15,7 @@ namespace RTE::MP {
 
 inline constexpr uint8_t PacketID = 220;
 inline constexpr uint32_t Magic = 0x43434D50;
-inline constexpr uint16_t Version = 8;
+inline constexpr uint16_t Version = 9;
 inline constexpr size_t MaxPlayers = 4;
 inline constexpr size_t InputCount = 64;
 inline constexpr uint16_t ChunkBytes = 1100, ParityGroup = 8;

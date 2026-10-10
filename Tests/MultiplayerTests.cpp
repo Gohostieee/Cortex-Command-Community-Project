@@ -14,7 +14,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 8, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 9, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	input.ViewValid = input.CursorValid = input.PointerValid = true; input.ViewX = 2500; input.CursorMode = 3; input.CursorX = 2820; input.PointerX = 100;
@@ -89,6 +89,10 @@ void Worlds() {
     Check(requestedTiles == missingTiles, "scene repair failed to reach the last missing tile");
     missingTiles = {4096}; Check(repairs.Select(missingTiles, 64001).empty(), "scene repair immediately duplicated an in-flight request");
     Check(repairs.Select(missingTiles, 69000) == std::vector<uint64_t>{4096}, "scene repair never retried a lost resource");
+    { W::ResourceRequests graced; std::unordered_set<uint64_t> lacking{7, 8, 9}, view{9};
+      Check(graced.Select(lacking, 1000, 2000, &view).empty(), "repair requested a resource the host had only just started sending");
+      const auto batch = graced.Select(lacking, 3000, 2000, &view);
+      Check(batch.size() == 3 && batch.front() == 9, "repair did not request the first view's scenery ahead of other resources"); }
     W::Resource resource; resource.Width = 4; resource.Height = 3; resource.Pixels = {1,2,3,4,5,6,7,8,9,10,11,12}; resource.ID = W::ResourceHash(resource);
     { std::vector<uint64_t> manifest{resource.ID, 1234}; Writer writer(Kind::WorldManifest); W::WriteManifest(writer, manifest); Reader reader(writer.Data); Header header; std::unordered_set<uint64_t> assets;
       Check(ReadHeader(reader, header) && W::ReadManifest(reader, assets) && assets.size() == 2 && assets.contains(resource.ID), "whole-scene warmup manifest changed resource identities");
@@ -112,7 +116,11 @@ void Worlds() {
       back.Width = back.SourceWidth = 64; back.Height = back.SourceHeight = 64;
       W::Node front; front.ID = (uint64_t(1) << 61) | (uint64_t(2) << 32) | 1; front.Flags = W::ScreenSpace | W::Layer; front.Type = W::Shape::Rectangle; front.Width = front.Height = 64;
       map.Nodes = {back, front}; W::RetainedLayers layers; layers.Install(map); W::Snapshot local; layers.Compose(local);
-      Check(local.Nodes.size() == 2 && W::LayerOrdinal(local.Nodes[0]) == 1 && W::LayerOrdinal(local.Nodes[1]) == 2, "retained scenery changes native parallax layer order"); }
+      Check(local.Nodes.size() == 2 && W::LayerOrdinal(local.Nodes[0]) == 1 && W::LayerOrdinal(local.Nodes[1]) == 2, "retained scenery changes native parallax layer order");
+      W::Snapshot pending; pending.Width = 640; pending.Height = 480; std::unordered_set<uint64_t> visible; layers.VisibleAssets(pending, visible);
+      Check(visible.contains(resource.ID), "first view does not wait for its retained scenery");
+      W::Node changed = back; changed.Asset = 4321; pending.Nodes = {changed}; visible.clear(); layers.VisibleAssets(pending, visible);
+      Check(!visible.contains(resource.ID), "first view waits for a tile version its own state replaces"); }
     Writer rw(Kind::WorldResource); W::WriteResource(rw, resource); Reader rr(rw.Data); Header h; W::Resource decoded;
     Check(ReadHeader(rr, h) && W::ReadResource(rr, decoded) && decoded.Pixels == resource.Pixels, "retained resource round trip failed");
     rw.Data.back() ^= 1; Reader corrupt(rw.Data); Check(ReadHeader(corrupt, h) && !W::ReadResource(corrupt, decoded), "resource corruption accepted");
@@ -145,7 +153,7 @@ void Worlds() {
     W::Timeline timeline; Check(timeline.Push(first, 1020), "initial state rejected");
     { auto burst = first; burst.Nodes.clear();
       for (uint64_t id = 100; id < 5100; ++id) { W::Node particle; particle.ID = id; particle.Type = W::Shape::Pixel; particle.X = float(id % 640); particle.Y = float(id % 360); particle.Color = 7; burst.Nodes.push_back(particle); }
-      auto actor = node; actor.ID = 6000; burst.Nodes.push_back(actor); burst.CriticalNodes.insert(actor.ID);
+      auto actor = node; actor.ID = 6000; burst.Nodes.push_back(actor); burst.CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>(std::unordered_set<uint64_t>{actor.ID});
       auto terrain = node; terrain.ID = 6001; terrain.Flags = W::Layer; burst.Nodes.push_back(terrain);
       auto hud = node; hud.ID = 6002; hud.Flags = W::ScreenSpace; burst.Nodes.push_back(hud);
       W::Node trail; trail.ID = 6003; trail.Type = W::Shape::PixelPath; trail.Pixels = {{0, 0}, {10, -3}}; trail.PixelColors = {4, 8}; burst.Nodes.push_back(trail);
@@ -308,6 +316,28 @@ void TransportLoopback() {
 	Check(disconnected, "disconnect not delivered");
 	for (int cycle = 0; cycle < 20; ++cycle) { Check(client.Start(false, 0, "", error), "transport restart failed"); client.Stop(); }
 }
+void Deltas() {
+    namespace W = World;
+    W::Snapshot base; base.ID = 10; base.Time = 1000; base.Width = base.SceneWidth = 640; base.Height = base.SceneHeight = 360;
+    for (uint64_t i = 1; i <= 200; ++i) { W::Node n; n.ID = i << 8; n.Asset = 77; n.X = float(i * 3) + .5f; n.Y = 40.25f; n.Angle = .125f; n.Width = n.Height = n.SourceWidth = n.SourceHeight = 8; base.Nodes.push_back(n); }
+    Writer full(Kind::WorldSnapshot); W::WriteSnapshot(full, base); Reader fr(full.Data); Header h; W::Snapshot decodedBase;
+    Check(ReadHeader(fr, h) && W::ReadSnapshot(fr, decodedBase) && decodedBase.Nodes == base.Nodes, "complete state did not survive quantized encoding");
+    auto next = base; next.ID = 11; next.Time = 1050;
+    next.Nodes[5].X += 1.75f; next.Nodes[5].Angle = -.5f;       // moved
+    next.Nodes.erase(next.Nodes.begin() + 7);                     // removed
+    W::Node added; added.ID = 999 << 8; added.Asset = 78; added.X = 12; added.Y = 13; added.Width = added.Height = added.SourceWidth = added.SourceHeight = 4; next.Nodes.push_back(added);
+    Writer delta(Kind::WorldSnapshot); W::WriteSnapshot(delta, next, &base);
+    Check(delta.Data.size() < full.Data.size() / 5, "delta state was not much smaller than the complete state");
+    Check(delta.Data.size() - 120 < 199 * 3 + 40, "unchanged entities cost more than about two bytes each");
+    auto lookup = [&](uint32_t id) -> const W::Snapshot* { return id == decodedBase.ID ? &decodedBase : nullptr; };
+    Reader dr(delta.Data); W::Snapshot decoded;
+    Check(ReadHeader(dr, h) && W::ReadSnapshot(dr, decoded, lookup) && decoded.Nodes == next.Nodes, "delta state did not reconstruct moved, unchanged, removed and new entities");
+    Reader missing(delta.Data); W::Snapshot orphan; Check(ReadHeader(missing, h) && !W::ReadSnapshot(missing, orphan), "delta state decoded without its acknowledged baseline");
+    // Quantization is 1/16 pixel; sub-step motion is withheld rather than drifting.
+    auto still = next; still.ID = 12; still.Nodes[0].X += .01f; Writer tiny(Kind::WorldSnapshot); W::WriteSnapshot(tiny, still, &next);
+    auto lookupNext = [&](uint32_t id) -> const W::Snapshot* { return id == decoded.ID ? &decoded : nullptr; };
+    Reader tr(tiny.Data); W::Snapshot quantized; Check(ReadHeader(tr, h) && W::ReadSnapshot(tr, quantized, lookupNext) && quantized.Nodes[0].X == next.Nodes[0].X, "sub-quantum motion changed the reconstructed position");
+}
 void Adaptation() {
     namespace W = World;
     // Random loss and jitter alone keep the full configured rate.
@@ -346,6 +376,6 @@ void Adaptation() {
 }
 }
 int main() {
-	try { Wire(); Inputs(); Worlds(); Adaptation(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
+	try { Wire(); Inputs(); Worlds(); Deltas(); Adaptation(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
 	catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

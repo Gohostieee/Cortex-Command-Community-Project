@@ -954,6 +954,7 @@ void FrameMan::Draw() {
 		if (!remoteScreen) g_PostProcessMan.AdjustEffectsPosToPlayerScreen(playerScreen, drawScreen, screenOffset, screenRelativeEffects, screenRelativeGlowBoxes);
 	}
 
+	if (networkHost) g_MultiplayerMan.FinishCaptures();
 	// Clears the pixels that have been revealed from the unseen layers
 	g_SceneMan.ClearSeenPixels();
 
@@ -1033,6 +1034,7 @@ void FrameMan::DrawHeadless() {
 		DrawScreenFlash(screen, gui.get());
 		g_MultiplayerMan.EndGuestView(player);
 	}
+	g_MultiplayerMan.FinishCaptures();
 	g_SceneMan.ClearSeenPixels();
 }
 

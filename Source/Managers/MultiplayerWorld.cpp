@@ -35,12 +35,29 @@ namespace {
 thread_local MultiplayerWorld* objectCollector = nullptr;
 thread_local MultiplayerWorld* canvasCollector = nullptr;
 std::atomic<MultiplayerWorld*> trailCollector = nullptr;
+// Microseconds spent per composition stage since the profiler last read them.
+std::array<uint64_t, 6> s_ComposeTimes{};
+// Write stamps per 64-pixel tile of the scene bitmaps the host replicates.
+// Registration happens only during capture on the main thread; writes may
+// come from threaded scripts, so stamps are atomic and the map is read-only.
+struct TrackedBitmap {
+    int Width = 0, Height = 0, Columns = 0, Rows = 0;
+    std::unique_ptr<std::atomic<uint64_t>[]> Stamps;
+    size_t SweepStart = 0;
+};
+std::unordered_map<BITMAP*, TrackedBitmap> s_Tracked;
+std::atomic<uint64_t> s_WriteClock{1};
+std::atomic<bool> s_Tracking{false};
+// Tiles re-verified per tracked bitmap per capture pass regardless of stamps,
+// so a write site that does not report still reaches guests within seconds.
+constexpr size_t SweepTiles = 32;
 uint64_t WorldNow() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 constexpr size_t ResourceLimit = 128 * 1024 * 1024;
 }
 struct MultiplayerWorld::Impl {
     MultiplayerWorld* Owner = nullptr;
     std::vector<Node> Objects, Canvas;
+    std::vector<uint64_t> ObjectRoots; // Root object node ID of each entry in Objects.
     std::deque<Node> Trails;
     std::mutex TrailMutex;
     uint64_t TrailSequence = 0, TrailTime = 0, TrailDuration = 17;
@@ -62,7 +79,7 @@ struct MultiplayerWorld::Impl {
     RetainedLayers SceneLayers;
     bool LocalInputEnabled = false;
     std::unordered_map<uint64_t, Vector> ObjectAnchors;
-    std::unordered_set<uint64_t> CriticalNodes;
+    std::shared_ptr<std::unordered_set<uint64_t>> CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>();
     bool PrimitiveStyle = false;
     Node CurrentStyle;
     std::unordered_map<uint64_t, uint8_t> Ordinals;
@@ -71,7 +88,9 @@ struct MultiplayerWorld::Impl {
     std::unordered_set<uint64_t> SceneAssets;
     std::unordered_map<uint64_t, Texture2D> Textures;
     std::unordered_map<BITMAP*, uint64_t> StaticAssets;
-    std::unordered_map<BITMAP*, std::unordered_map<uint64_t, uint64_t>> BitmapRegions;
+    // Clock is the write clock when the region's pixels were last verified.
+    struct Region { uint64_t Asset = 0, Clock = 0; };
+    std::unordered_map<BITMAP*, std::unordered_map<uint64_t, Region>> BitmapRegions;
     size_t BitmapRegionEntries = 0;
     std::unordered_map<uint64_t, uint64_t> LastUsed;
     size_t ResourceBytes = 0;
@@ -108,7 +127,11 @@ struct MultiplayerWorld::Impl {
         ResourceBytes += resource.Pixels.size(); Resources.emplace(id, std::move(resource)); return true;
     }
 
-    uint64_t Asset(BITMAP* bitmap, int sx = 0, int sy = 0, int width = -1, int height = -1, bool immutable = false) {
+    // A tracked scene tile whose last write stamp is no newer than its last
+    // verification needs no pixel comparison. Untracked bitmaps (including
+    // temporary GUI bitmaps, whose freed address can hold new content) pass
+    // no stamp and are always compared.
+    uint64_t Asset(BITMAP* bitmap, int sx = 0, int sy = 0, int width = -1, int height = -1, bool immutable = false, uint64_t stamp = 0) {
         if (!bitmap || (bitmap_color_depth(bitmap) != 8 && bitmap_color_depth(bitmap) != 32)) return 0;
         width = width < 0 ? bitmap->w : width; height = height < 0 ? bitmap->h : height;
         sx = std::clamp(sx, 0, bitmap->w); sy = std::clamp(sy, 0, bitmap->h);
@@ -117,14 +140,15 @@ struct MultiplayerWorld::Impl {
         const uint64_t region = (uint64_t(uint16_t(sx)) << 48) | (uint64_t(uint16_t(sy)) << 32) | (uint64_t(uint16_t(width)) << 16) | uint16_t(height);
         if (BitmapRegionEntries >= 65536) { BitmapRegions.clear(); BitmapRegionEntries = 0; }
         auto& regions = BitmapRegions[bitmap];
-        if (auto cached = regions.find(region); cached != regions.end()) if (auto old = Resources.find(cached->second); old != Resources.end() && old->second.Depth == bitmap_color_depth(bitmap)) {
+        const uint64_t now = WorldNow(), verified = s_WriteClock.load();
+        if (auto cached = regions.find(region); cached != regions.end()) if (auto old = Resources.find(cached->second.Asset); old != Resources.end() && old->second.Depth == bitmap_color_depth(bitmap)) {
             // StaticSceneLayer's native contract uploads pixels only once.
             // Its immutable backdrops need no repeated full-region comparison.
-            if (immutable) { LastUsed[cached->second] = WorldNow(); return cached->second; }
+            if (immutable || (stamp && cached->second.Clock >= stamp)) { LastUsed[cached->second.Asset] = now; return cached->second.Asset; }
             const auto& previous = old->second; const int stride = width * (previous.Depth / 8);
             bool unchanged = true;
             for (int y = 0; unchanged && y < height; ++y) unchanged = std::memcmp(previous.Pixels.data() + size_t(y) * stride, bitmap->line[sy + y] + sx * (previous.Depth / 8), stride) == 0;
-            if (unchanged) { LastUsed[cached->second] = WorldNow(); return cached->second; }
+            if (unchanged) { LastUsed[cached->second.Asset] = now; cached->second.Clock = verified; return cached->second.Asset; }
         }
         Resource resource; resource.Width = uint16_t(width); resource.Height = uint16_t(height); resource.Depth = uint8_t(bitmap_color_depth(bitmap));
         const int stride = width * (resource.Depth / 8); resource.Pixels.resize(size_t(stride) * height);
@@ -134,7 +158,7 @@ struct MultiplayerWorld::Impl {
         resource.ID = ResourceHash(resource); const uint64_t id = resource.ID;
         if (!Store(std::move(resource))) return 0;
         if (!regions.contains(region)) ++BitmapRegionEntries;
-        regions[region] = id; return id;
+        regions[region] = {id, verified}; return id;
     }
     uint64_t StaticAsset(BITMAP* bitmap) {
         if (auto found = StaticAssets.find(bitmap); found != StaticAssets.end() && Resources.contains(found->second)) { LastUsed[found->second] = WorldNow(); return found->second; }
@@ -171,10 +195,10 @@ struct MultiplayerWorld::Impl {
         const uint64_t id = uint64_t(owner.GetUniqueID());
         node.ID = (id << 8) | Ordinals[id]++;
         const auto* root = owner.GetRootParent();
-        if (root->IsActor() || root->IsDevice()) CriticalNodes.insert(node.ID);
+        if (root->IsActor() || root->IsDevice()) CriticalNodes->insert(node.ID);
         if (!(node.ID & 255)) ObjectAnchors[node.ID] = Vector(node.X, node.Y);
         if (const auto* parent = owner.GetParent()) node.Parent = uint64_t(parent->GetUniqueID()) << 8;
-        if (Objects.size() < MaxNodes && Valid(node)) Objects.push_back(node);
+        if (Objects.size() < MaxNodes && Valid(node)) { Objects.push_back(node); ObjectRoots.push_back(uint64_t(root->GetUniqueID()) << 8); }
     }
     static Impl* CanvasFor(BITMAP* bitmap) {
         if (!canvasCollector || !bitmap) return nullptr;
@@ -239,9 +263,24 @@ struct MultiplayerWorld::Impl {
     static void Pivot(BITMAP* d, BITMAP* s, fixed x, fixed y, fixed cx, fixed cy, fixed angle, fixed scale, int flip) {
         if (auto* impl = CanvasFor(d)) { Node n; n.Asset = impl->Asset(s); n.X = fixtof(x); n.Y = fixtof(y); n.Width = s->w * fixtof(scale); n.Height = s->h * fixtof(scale); n.PivotX = fixtof(cx) * fixtof(scale); n.PivotY = fixtof(cy) * fixtof(scale); n.Angle = -fixtof(angle) * 6.28318530718f / 256; n.SourceWidth = float(s->w); n.SourceHeight = float(s->h); n.Flags = Masked | (flip ? FlipY : 0); impl->AppendCanvas(n); }
     }
+    static TrackedBitmap& Track(BITMAP* bitmap) {
+        auto& tracked = s_Tracked[bitmap];
+        if (tracked.Width != bitmap->w || tracked.Height != bitmap->h || !tracked.Stamps) {
+            tracked.Width = bitmap->w; tracked.Height = bitmap->h; tracked.Columns = (bitmap->w + TileSize - 1) / TileSize; tracked.Rows = (bitmap->h + TileSize - 1) / TileSize; tracked.SweepStart = 0;
+            tracked.Stamps = std::make_unique<std::atomic<uint64_t>[]>(size_t(tracked.Columns) * tracked.Rows);
+            // A newly tracked bitmap is verified once in full.
+            const uint64_t initial = s_WriteClock.fetch_add(1) + 1;
+            for (size_t i = 0; i < size_t(tracked.Columns) * tracked.Rows; ++i) tracked.Stamps[i].store(initial, std::memory_order_relaxed);
+        }
+        return tracked;
+    }
     template<class LayerType> void Layer(std::vector<Node>& output, LayerType* layer, uint16_t ordinal, const Vector& camera, int width, int height, bool whole = false) {
         if (!layer || !layer->GetBitmap()) return;
         BITMAP* bitmap = layer->GetBitmap(); const Vector scale = layer->GetScaleFactor(); Vector offset = layer->GetOffset();
+        // Terrain colour and team fog report their writes; static backdrops never change.
+        TrackedBitmap* tracked = nullptr;
+        if constexpr (!std::is_base_of_v<StaticSceneLayer, LayerType>) tracked = &Track(bitmap);
+        const size_t trackedTiles = tracked ? size_t(tracked->Columns) * tracked->Rows : 0;
         if (scale.GetX() <= 0 || scale.GetY() <= 0) return;
         if constexpr (std::is_same_v<LayerType, SLBackground>) {
             if (!layer->IsAutoScrolling()) { const Vector ratio = layer->GetScrollRatio(); offset.SetXY(std::floor(offset.GetX() * ratio.GetX()), std::floor(offset.GetY() * ratio.GetY())); }
@@ -268,7 +307,12 @@ struct MultiplayerWorld::Impl {
             int sx = x * TileSize, sy = y * TileSize, w = std::min<int>(TileSize, bitmap->w - sx), h = std::min<int>(TileSize, bitmap->h - sy);
             Node n; n.ID = (uint64_t(1) << 62) | (uint64_t(ordinal) << 48) | (uint64_t(y) << 24) | uint16_t(x);
             if (!emitted.insert(n.ID).second) continue;
-            n.Asset = Asset(bitmap, sx, sy, w, h, std::is_base_of_v<StaticSceneLayer, LayerType>);
+            uint64_t stamp = 0;
+            if (tracked) {
+                const size_t index = size_t(y) * tracked->Columns + x;
+                stamp = (index + trackedTiles - tracked->SweepStart) % trackedTiles < SweepTiles ? UINT64_MAX : tracked->Stamps[index].load(std::memory_order_relaxed);
+            }
+            n.Asset = Asset(bitmap, sx, sy, w, h, std::is_base_of_v<StaticSceneLayer, LayerType>, stamp);
             // Empty tiles are explicit updates so a destroyed terrain tile
             // cannot remain in the guest's retained map.
             n.SourceWidth = float(w); n.SourceHeight = float(h); n.Width = w * scale.GetX(); n.Height = h * scale.GetY();
@@ -302,7 +346,28 @@ struct MultiplayerWorld::Impl {
 };
 MultiplayerWorld::MultiplayerWorld() : m_Impl(std::make_unique<Impl>()) { m_Impl->Owner = this; }
 MultiplayerWorld::~MultiplayerWorld() { Reset(); }
+void MultiplayerWorld::MarkChanged(BITMAP* bitmap, int x, int y, int width, int height) {
+    if (!s_Tracking.load(std::memory_order_relaxed) || !bitmap || width <= 0 || height <= 0) return;
+    const auto found = s_Tracked.find(bitmap); if (found == s_Tracked.end()) return;
+    auto& tracked = found->second; if (tracked.Width != bitmap->w || tracked.Height != bitmap->h) return;
+    const uint64_t stamp = s_WriteClock.fetch_add(1, std::memory_order_relaxed) + 1;
+    // Wrapped writes may start outside the bitmap; mark each wrapped piece.
+    auto spans = [](int start, int length, int extent) {
+        std::array<std::pair<int, int>, 2> result{}; int count = 0;
+        if (length >= extent) { result[count++] = {0, extent - 1}; return std::pair{result, count}; }
+        start = ((start % extent) + extent) % extent;
+        if (start + length <= extent) result[count++] = {start, start + length - 1};
+        else { result[count++] = {start, extent - 1}; result[count++] = {0, start + length - extent - 1}; }
+        return std::pair{result, count};
+    };
+    const auto [columns, columnCount] = spans(x, width, tracked.Width);
+    const auto [rows, rowCount] = spans(y, height, tracked.Height);
+    for (int r = 0; r < rowCount; ++r) for (int c = 0; c < columnCount; ++c)
+        for (int ty = rows[r].first / TileSize; ty <= rows[r].second / TileSize; ++ty) for (int tx = columns[c].first / TileSize; tx <= columns[c].second / TileSize; ++tx)
+            tracked.Stamps[size_t(ty) * tracked.Columns + tx].store(stamp, std::memory_order_relaxed);
+}
 void MultiplayerWorld::Reset() {
+    s_Tracking = false; s_Tracked.clear();
     EndObjects(); if (canvasCollector == this) { if (m_Impl->GUI) m_Impl->GUI->vtable = m_Impl->OriginalVTable; canvasCollector = nullptr; }
     if (trailCollector.load() == this) trailCollector.store(nullptr);
     for (const auto& [id, texture] : m_Impl->Textures) rlUnloadTexture(texture.id);
@@ -316,7 +381,11 @@ void MultiplayerWorld::ResetPresentation() {
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
 }
-void MultiplayerWorld::BeginObjects() { m_Impl->Objects.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); m_Impl->CriticalNodes.clear(); objectCollector = this; }
+void MultiplayerWorld::BeginObjects() {
+    // Each capture pass moves the verification sweep across every tracked bitmap.
+    s_Tracking = true;
+    for (auto& [bitmap, tracked] : s_Tracked) if (const size_t tiles = size_t(tracked.Columns) * tracked.Rows) tracked.SweepStart = (tracked.SweepStart + SweepTiles) % tiles;
+    m_Impl->Objects.clear(); m_Impl->ObjectRoots.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); m_Impl->CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>(); objectCollector = this; }
 void MultiplayerWorld::BeginTrails() {
     auto& impl = *m_Impl; const uint64_t now = WorldNow(); std::lock_guard lock(impl.TrailMutex);
     if (!++impl.TrailGeneration) { impl.CurrentTrailPixels.reset(); impl.CurrentTrailBuckets.reset(); ++impl.TrailGeneration; }
@@ -423,9 +492,12 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         if (!actor->GetController()->IsState(PIE_MENU_ACTIVE)) { const Vector look = actor->GetViewPoint() - actor->GetPos(); snapshot.LookX = look.GetX(); snapshot.LookY = look.GetY(); }
     }
     auto* scene = g_SceneMan.GetScene(); if (!scene) return snapshot;
+    auto lap = [stage = std::chrono::steady_clock::now()](uint64_t& total) mutable { const auto now = std::chrono::steady_clock::now(); total += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now - stage).count()); stage = now; };
+    auto& times = s_ComposeTimes;
     uint16_t layerID = 1;
     for (auto it = scene->GetBackLayers().rbegin(); it != scene->GetBackLayers().rend(); ++it) impl.Layer(snapshot.Nodes, *it, layerID++, impl.Camera, snapshot.Width, snapshot.Height);
     impl.Layer(snapshot.Nodes, scene->GetTerrain()->GetBGSceneLayer(), 100, impl.Camera, snapshot.Width, snapshot.Height);
+    lap(times[0]);
     { std::lock_guard lock(impl.TrailMutex);
       for (const auto& path : impl.Trails) {
         const float dx = Displacement(impl.Camera.GetX() + snapshot.Width / 2, path.X + path.Width / 2, snapshot.SceneWidth, snapshot.Wrap & 1);
@@ -439,13 +511,32 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         if (!visible.Pixels.empty()) snapshot.Nodes.push_back(std::move(visible));
       }
     }
-    // Passive world objects are independent of the guest camera. The team's
-    // complete fog layer below obscures unexplored regions on every view.
-    snapshot.Nodes.insert(snapshot.Nodes.end(), impl.Objects.begin(), impl.Objects.end());
+    lap(times[1]);
+    // Relevance: each guest receives the objects around its own view, with a
+    // margin for motion and local camera travel, plus its controlled actor
+    // wherever it is. Whole objects stay together by their root's position.
+    // The team's complete fog layer below still obscures unexplored regions.
+    {
+        const float marginX = std::max(256.0f, snapshot.Width * .5f), marginY = std::max(256.0f, snapshot.Height * .5f);
+        const float centerX = impl.Camera.GetX() + snapshot.Width / 2.0f, centerY = impl.Camera.GetY() + snapshot.Height / 2.0f;
+        std::unordered_map<uint64_t, bool> relevant;
+        for (size_t i = 0; i < impl.Objects.size(); ++i) {
+            const Node& node = impl.Objects[i]; const uint64_t root = impl.ObjectRoots[i];
+            auto [entry, added] = relevant.try_emplace(root, false);
+            if (added) {
+                const auto anchor = impl.ObjectAnchors.find(root); const float x = anchor != impl.ObjectAnchors.end() ? anchor->second.GetX() : node.X, y = anchor != impl.ObjectAnchors.end() ? anchor->second.GetY() : node.Y;
+                entry->second = root == snapshot.ControlledActor ||
+                    (std::abs(Displacement(centerX, x, snapshot.SceneWidth, snapshot.Wrap & 1)) <= snapshot.Width / 2.0f + marginX && std::abs(Displacement(centerY, y, snapshot.SceneHeight, snapshot.Wrap & 2)) <= snapshot.Height / 2.0f + marginY);
+            }
+            if (entry->second) snapshot.Nodes.push_back(node);
+        }
+    }
+    lap(times[2]);
     impl.Layer(snapshot.Nodes, scene->GetTerrain()->GetFGSceneLayer(), 101, impl.Camera, snapshot.Width, snapshot.Height);
     const auto* activity = g_ActivityMan.GetActivity(); const int team = activity->GetTeamOfPlayer(player);
     snapshot.Phase = uint8_t(activity->GetActivityState());
     if (activity->GetActivityState() != Activity::Editing) impl.Layer(snapshot.Nodes, scene->GetUnseenLayer(team), 102, impl.Camera, snapshot.Width, snapshot.Height, true);
+    lap(times[3]);
     snapshot.Nodes.insert(snapshot.Nodes.end(), impl.Canvas.begin(), impl.Canvas.end()); impl.GUI = nullptr;
     std::list<PostEffect> effects;
     g_PostProcessMan.GetPostScreenEffectsWrapped(impl.Camera, snapshot.Width, snapshot.Height, effects, team);
@@ -456,10 +547,13 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         n.Width = n.SourceWidth = float(effect.m_Bitmap->w); n.Height = n.SourceHeight = float(effect.m_Bitmap->h); n.PivotX = n.Width / 2; n.PivotY = n.Height / 2;
         n.Flags = Additive | Discontinuous; n.TintR = n.TintG = n.TintB = uint8_t(std::clamp(effect.m_Strength, 0, 255)); if (Valid(n)) snapshot.Nodes.push_back(n);
     }
+    lap(times[4]);
     snapshot.CriticalNodes = impl.CriticalNodes;
     BoundSnapshot(snapshot);
+    lap(times[5]);
     return snapshot;
 }
+std::array<uint64_t, 6> MultiplayerWorld::TakeComposeTimes() { const auto times = s_ComposeTimes; s_ComposeTimes = {}; return times; }
 const Resource* MultiplayerWorld::FindResource(uint64_t id) const { auto found = m_Impl->Resources.find(id); return found == m_Impl->Resources.end() ? nullptr : &found->second; }
 std::vector<uint64_t> MultiplayerWorld::PrepareScene() {
     auto& impl = *m_Impl;
@@ -510,6 +604,12 @@ bool MultiplayerWorld::SceneryReady(const Snapshot& snapshot) const {
     for (const auto& node : snapshot.Nodes) if (node.Asset && LayerOrdinal(node) && !m_Impl->Resources.contains(node.Asset)) return false;
     std::unordered_set<uint64_t> visible; m_Impl->SceneLayers.VisibleAssets(snapshot, visible);
     return std::all_of(visible.begin(), visible.end(), [&](uint64_t id) { return m_Impl->Resources.contains(id); });
+}
+std::vector<uint64_t> MultiplayerWorld::MissingScenery(const Snapshot& snapshot) const {
+    std::unordered_set<uint64_t> ids; for (const auto& node : snapshot.Nodes) if (node.Asset && LayerOrdinal(node) && !m_Impl->Resources.contains(node.Asset)) ids.insert(node.Asset);
+    std::unordered_set<uint64_t> visible; m_Impl->SceneLayers.VisibleAssets(snapshot, visible);
+    for (auto id : visible) if (!m_Impl->Resources.contains(id)) ids.insert(id);
+    return {ids.begin(), ids.end()};
 }
 std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const {
     std::unordered_set<uint64_t> ids; for (const auto& node : snapshot.Nodes) if (node.Asset && !m_Impl->Resources.contains(node.Asset)) ids.insert(node.Asset);
@@ -564,7 +664,7 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
         std::vector<Node> tiles; m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
         check(tiles.size() == 1 && m_Impl->EmptyMaskedAssets.contains(tiles.front().Asset), "transparent terrain explicitly clears its retained tile");
         tiles.clear();
-        putpixel(transparent, 10, 10, g_WhiteColor); m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
+        putpixel(transparent, 10, 10, g_WhiteColor); MarkChanged(transparent, 10, 10, 1, 1); m_Impl->Layer(tiles, &emptyLayer, 100, Vector(), 640, 360);
         check(!tiles.empty() && !m_Impl->EmptyMaskedAssets.contains(tiles.front().Asset), "changed terrain immediately restores a formerly transparent tile");
     }
     destroy_bitmap(preview);

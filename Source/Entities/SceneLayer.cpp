@@ -7,6 +7,7 @@
 #include "ThreadMan.h"
 #include "GLResourceMan.h"
 #include "BigTexture.h"
+#include "MultiplayerWorld.h"
 
 #include "Draw.h"
 #include "tracy/Tracy.hpp"
@@ -295,6 +296,7 @@ void SceneLayerImpl<TRACK_DRAWINGS, STATIC_TEXTURE>::SetPixel(int pixelX, int pi
 		return;
 	}
 	_putpixel(m_MainBitmap, pixelX, pixelY, materialID);
+	MultiplayerWorld::MarkChanged(m_MainBitmap, pixelX, pixelY, 1, 1);
 
 	RegisterDrawing(pixelX, pixelY, pixelX, pixelY);
 }

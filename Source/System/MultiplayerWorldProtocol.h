@@ -3,6 +3,8 @@
 #include "MultiplayerProtocol.h"
 #include "Constants.h"
 #include <deque>
+#include <memory>
+#include <tuple>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -54,13 +56,15 @@ struct Snapshot {
     float CameraTargetX = 0, CameraTargetY = 0, MouseScale = 0, ScrollSpeed = 0.1f;
     std::vector<Node> Nodes;
     // Capture-only importance; receivers need only the selected drawing nodes.
-    std::unordered_set<uint64_t> CriticalNodes;
+    // Shared with the capture pass rather than copied for every guest.
+    std::shared_ptr<const std::unordered_set<uint64_t>> CriticalNodes;
+    bool Critical(uint64_t id) const { return CriticalNodes && CriticalNodes->contains(id); }
 };
 template <typename Measure>
 inline size_t FitSnapshot(Snapshot& snapshot, size_t packedBudget, Measure measure) {
     size_t packedSize = measure(snapshot);
     if (packedSize <= packedBudget) return packedSize;
-    auto essential = [&](const Node& n) { return (n.Flags & (ScreenSpace | Layer)) || snapshot.CriticalNodes.contains(n.ID); };
+    auto essential = [&](const Node& n) { return (n.Flags & (ScreenSpace | Layer)) || snapshot.Critical(n.ID); };
     const size_t optional = std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [&](const Node& n) { return !essential(n); });
     if (!optional) return packedSize;
     auto original = std::move(snapshot.Nodes);
@@ -98,7 +102,7 @@ inline void BoundSnapshot(Snapshot& snapshot) {
     std::vector<bool> keep(snapshot.Nodes.size()); size_t count = 0; bytes = 256;
     auto priority = [&](const Node& node) {
         if ((node.Flags & Layer) && ((node.ID >> 48) & 0x3fff) == 102) return 0;
-        if ((node.Flags & (ScreenSpace | Layer)) || snapshot.CriticalNodes.contains(node.ID)) return 1;
+        if ((node.Flags & (ScreenSpace | Layer)) || snapshot.Critical(node.ID)) return 1;
         if (node.Type == Shape::Sprite && !(node.Flags & Discontinuous)) return 2;
         return node.Type == Shape::PixelPath || (node.Flags & Discontinuous) ? 4 : 3;
     };
@@ -157,27 +161,143 @@ inline bool ReadNode(Reader& reader, Node& n) {
     }
     return Valid(n);
 }
-inline void WriteSnapshot(Writer& writer, const Snapshot& s) {
-    writer.U32(s.ID); writer.U32(s.InputSequence); writer.U64(s.Time); writer.U16(s.Width); writer.U16(s.Height); writer.U16(s.SceneWidth); writer.U16(s.SceneHeight); writer.U8(s.Wrap); writer.U8(s.Phase);
+// Snapshots are delta-encoded against a baseline the guest has acknowledged
+// (Quake 3 style), or against default nodes when there is none. Each node
+// sends its identity as a difference from the previous node, a mask of
+// changed field groups, and only those fields. Positions are quantized to
+// 1/16 pixel and angles to 1/4096 radian as varint differences, so a moving
+// sprite costs a few bytes instead of 117 and an unchanged one about two.
+inline void WriteVarint(Writer& writer, uint64_t value) { while (value >= 0x80) { writer.U8(uint8_t(value) | 0x80); value >>= 7; } writer.U8(uint8_t(value)); }
+inline bool ReadVarint(Reader& reader, uint64_t& value) {
+    value = 0;
+    for (int shift = 0; shift < 64; shift += 7) { uint8_t byte; if (!reader.U8(byte)) return false; value |= uint64_t(byte & 0x7f) << shift; if (!(byte & 0x80)) return shift < 63 || byte <= 1; }
+    return false;
+}
+inline uint64_t ZigZag(int64_t value) { return (uint64_t(value) << 1) ^ uint64_t(value >> 63); }
+inline int64_t UnZigZag(uint64_t value) { return int64_t(value >> 1) ^ -int64_t(value & 1); }
+inline constexpr float PositionScale = 16, AngleScale = 4096;
+inline int64_t Quantize(float value, float scale) { return std::llround(double(value) * scale); }
+enum NodeField : uint32_t {
+    FieldAsset = 1, FieldParent = 2, FieldKind = 4, FieldColor = 8, FieldTime = 16, FieldStyle = 32, FieldX = 64, FieldY = 128, FieldAngle = 256,
+    FieldSize = 512, FieldPivot = 1024, FieldSource = 2048, FieldSpan = 4096, FieldRatio = 8192, FieldClip = 16384, FieldPixels = 32768
+};
+inline uint32_t ChangedFields(const Node& n, const Node& b) {
+    uint32_t mask = 0;
+    if (n.Asset != b.Asset) mask |= FieldAsset;
+    if (n.Parent != b.Parent) mask |= FieldParent;
+    if (n.Type != b.Type || n.Control != b.Control || n.Flags != b.Flags) mask |= FieldKind;
+    if (n.Color != b.Color || n.Alpha != b.Alpha) mask |= FieldColor;
+    if (n.StartTime != b.StartTime || n.EndTime != b.EndTime) mask |= FieldTime;
+    if (n.BlendMode != b.BlendMode || n.TintR != b.TintR || n.TintG != b.TintG || n.TintB != b.TintB) mask |= FieldStyle;
+    if (Quantize(n.X, PositionScale) != Quantize(b.X, PositionScale)) mask |= FieldX;
+    if (Quantize(n.Y, PositionScale) != Quantize(b.Y, PositionScale)) mask |= FieldY;
+    if (Quantize(n.Angle, AngleScale) != Quantize(b.Angle, AngleScale)) mask |= FieldAngle;
+    if (n.Width != b.Width || n.Height != b.Height) mask |= FieldSize;
+    if (n.PivotX != b.PivotX || n.PivotY != b.PivotY) mask |= FieldPivot;
+    if (n.SourceX != b.SourceX || n.SourceY != b.SourceY || n.SourceWidth != b.SourceWidth || n.SourceHeight != b.SourceHeight) mask |= FieldSource;
+    if (n.X2 != b.X2 || n.Y2 != b.Y2) mask |= FieldSpan;
+    if (n.X3 != b.X3 || n.Y3 != b.Y3) mask |= FieldRatio;
+    if (n.ClipX != b.ClipX || n.ClipY != b.ClipY || n.ClipWidth != b.ClipWidth || n.ClipHeight != b.ClipHeight) mask |= FieldClip;
+    if (n.Pixels != b.Pixels || n.PixelColors != b.PixelColors) mask |= FieldPixels;
+    return mask;
+}
+inline void WriteNodeDelta(Writer& writer, const Node& n, const Node& b, uint32_t mask) {
+    WriteVarint(writer, mask);
+    if (mask & FieldAsset) WriteVarint(writer, n.Asset);
+    if (mask & FieldParent) WriteVarint(writer, n.Parent);
+    if (mask & FieldKind) { writer.U8(uint8_t(n.Type)); writer.U8(uint8_t(n.Control)); writer.U8(n.Flags); }
+    if (mask & FieldColor) { writer.U8(n.Color); writer.U8(n.Alpha); }
+    if (mask & FieldTime) { WriteVarint(writer, n.StartTime); WriteVarint(writer, n.EndTime); }
+    if (mask & FieldStyle) { writer.U8(n.BlendMode); writer.U8(n.TintR); writer.U8(n.TintG); writer.U8(n.TintB); }
+    if (mask & FieldX) WriteVarint(writer, ZigZag(Quantize(n.X, PositionScale) - Quantize(b.X, PositionScale)));
+    if (mask & FieldY) WriteVarint(writer, ZigZag(Quantize(n.Y, PositionScale) - Quantize(b.Y, PositionScale)));
+    if (mask & FieldAngle) WriteVarint(writer, ZigZag(Quantize(n.Angle, AngleScale) - Quantize(b.Angle, AngleScale)));
+    if (mask & FieldSize) { writer.F32(n.Width); writer.F32(n.Height); }
+    if (mask & FieldPivot) { writer.F32(n.PivotX); writer.F32(n.PivotY); }
+    if (mask & FieldSource) { writer.F32(n.SourceX); writer.F32(n.SourceY); writer.F32(n.SourceWidth); writer.F32(n.SourceHeight); }
+    if (mask & FieldSpan) { writer.F32(n.X2); writer.F32(n.Y2); }
+    if (mask & FieldRatio) { writer.F32(n.X3); writer.F32(n.Y3); }
+    if (mask & FieldClip) { writer.U16(n.ClipX); writer.U16(n.ClipY); writer.U16(n.ClipWidth); writer.U16(n.ClipHeight); }
+    if (mask & FieldPixels) {
+        WriteVarint(writer, n.Pixels.size());
+        for (size_t i = 0; i < n.Pixels.size(); ++i) { writer.U16(uint16_t(n.Pixels[i].first)); writer.U16(uint16_t(n.Pixels[i].second)); writer.U8(i < n.PixelColors.size() ? n.PixelColors[i] : n.Color); }
+    }
+}
+inline bool ReadNodeDelta(Reader& reader, Node& n) {
+    uint64_t mask, value;
+    if (!ReadVarint(reader, mask) || mask >= (uint64_t(FieldPixels) << 1)) return false;
+    // Quantized fields continue from the baseline's own representable value.
+    const int64_t baseX = Quantize(n.X, PositionScale), baseY = Quantize(n.Y, PositionScale), baseAngle = Quantize(n.Angle, AngleScale);
+    if ((mask & FieldAsset) && !ReadVarint(reader, n.Asset)) return false;
+    if ((mask & FieldParent) && !ReadVarint(reader, n.Parent)) return false;
+    if (mask & FieldKind) { uint8_t type, control; if (!reader.U8(type) || !reader.U8(control) || !reader.U8(n.Flags)) return false; n.Type = Shape(type); n.Control = Interaction(control); }
+    if ((mask & FieldColor) && (!reader.U8(n.Color) || !reader.U8(n.Alpha))) return false;
+    if ((mask & FieldTime) && (!ReadVarint(reader, n.StartTime) || !ReadVarint(reader, n.EndTime))) return false;
+    if ((mask & FieldStyle) && (!reader.U8(n.BlendMode) || !reader.U8(n.TintR) || !reader.U8(n.TintG) || !reader.U8(n.TintB))) return false;
+    auto quantized = [&](uint32_t field, int64_t base, float scale, float& target) {
+        if (!(mask & field)) return true;
+        if (!ReadVarint(reader, value)) return false;
+        const int64_t delta = UnZigZag(value); if (std::abs(delta) > int64_t(1) << 40) return false;
+        target = float(double(base + delta) / scale); return true;
+    };
+    if (!quantized(FieldX, baseX, PositionScale, n.X) || !quantized(FieldY, baseY, PositionScale, n.Y) || !quantized(FieldAngle, baseAngle, AngleScale, n.Angle)) return false;
+    if ((mask & FieldSize) && (!reader.F32(n.Width) || !reader.F32(n.Height))) return false;
+    if ((mask & FieldPivot) && (!reader.F32(n.PivotX) || !reader.F32(n.PivotY))) return false;
+    if ((mask & FieldSource) && (!reader.F32(n.SourceX) || !reader.F32(n.SourceY) || !reader.F32(n.SourceWidth) || !reader.F32(n.SourceHeight))) return false;
+    if ((mask & FieldSpan) && (!reader.F32(n.X2) || !reader.F32(n.Y2))) return false;
+    if ((mask & FieldRatio) && (!reader.F32(n.X3) || !reader.F32(n.Y3))) return false;
+    if ((mask & FieldClip) && (!reader.U16(n.ClipX) || !reader.U16(n.ClipY) || !reader.U16(n.ClipWidth) || !reader.U16(n.ClipHeight))) return false;
+    if (mask & FieldPixels) {
+        if (!ReadVarint(reader, value) || value > 16384 || value > reader.Remaining() / 5) return false;
+        n.Pixels.clear(); n.PixelColors.clear(); n.Pixels.reserve(size_t(value)); n.PixelColors.reserve(size_t(value));
+        for (uint64_t i = 0; i < value; ++i) { uint16_t x, y; uint8_t color; if (!reader.U16(x) || !reader.U16(y) || !reader.U8(color)) return false; n.Pixels.emplace_back(std::bit_cast<int16_t>(x), std::bit_cast<int16_t>(y)); n.PixelColors.push_back(color); }
+    }
+    return Valid(n);
+}
+using NodeIndex = std::unordered_map<uint64_t, const Node*>;
+inline NodeIndex IndexNodes(const Snapshot& s) { NodeIndex index; index.reserve(s.Nodes.size()); for (const auto& n : s.Nodes) index.emplace(n.ID, &n); return index; }
+// A caller encoding the same baseline repeatedly can pass its index once.
+inline void WriteSnapshot(Writer& writer, const Snapshot& s, const Snapshot* baseline = nullptr, const NodeIndex* index = nullptr) {
+    writer.U32(s.ID); writer.U32(baseline ? baseline->ID : 0); writer.U32(s.InputSequence); writer.U64(s.Time); writer.U16(s.Width); writer.U16(s.Height); writer.U16(s.SceneWidth); writer.U16(s.SceneHeight); writer.U8(s.Wrap); writer.U8(s.Phase);
     writer.F32(s.CameraX); writer.F32(s.CameraY); writer.U64(s.ControlledActor); writer.U32(s.MouseX); writer.U32(s.MouseY);
     writer.F32(s.AimX); writer.F32(s.AimY); writer.F32(s.LookX); writer.F32(s.LookY);
     writer.U8(s.Paused); writer.U8(s.ViewMode); writer.F32(s.CameraTargetX); writer.F32(s.CameraTargetY); writer.F32(s.MouseScale); writer.F32(s.ScrollSpeed); writer.U32(uint32_t(s.Nodes.size()));
-    for (const auto& n : s.Nodes) WriteNode(writer, n);
+    NodeIndex local; if (baseline && !index) { local = IndexNodes(*baseline); index = &local; }
+    const NodeIndex empty; const NodeIndex& base = baseline ? *index : empty;
+    const Node none; uint64_t previous = 0;
+    for (const auto& n : s.Nodes) {
+        WriteVarint(writer, ZigZag(int64_t(n.ID - previous))); previous = n.ID;
+        const auto found = base.find(n.ID); const Node& b = found != base.end() ? *found->second : none;
+        WriteNodeDelta(writer, n, b, ChangedFields(n, b));
+    }
 }
-inline bool ReadSnapshot(Reader& reader, Snapshot& s) {
-    uint32_t count;
-    if (!reader.U32(s.ID) || !reader.U32(s.InputSequence) || !reader.U64(s.Time) || !reader.U16(s.Width) || !reader.U16(s.Height) || !reader.U16(s.SceneWidth) || !reader.U16(s.SceneHeight) || !reader.U8(s.Wrap) || !reader.U8(s.Phase) || !reader.F32(s.CameraX) || !reader.F32(s.CameraY) || !reader.U64(s.ControlledActor) || !reader.U32(s.MouseX) || !reader.U32(s.MouseY) || !reader.F32(s.AimX) || !reader.F32(s.AimY) || !reader.F32(s.LookX) || !reader.F32(s.LookY)) return false;
+template <typename Lookup>
+inline bool ReadSnapshot(Reader& reader, Snapshot& s, Lookup&& lookup) {
+    uint32_t count, baselineID;
+    if (!reader.U32(s.ID) || !reader.U32(baselineID) || !reader.U32(s.InputSequence) || !reader.U64(s.Time) || !reader.U16(s.Width) || !reader.U16(s.Height) || !reader.U16(s.SceneWidth) || !reader.U16(s.SceneHeight) || !reader.U8(s.Wrap) || !reader.U8(s.Phase) || !reader.F32(s.CameraX) || !reader.F32(s.CameraY) || !reader.U64(s.ControlledActor) || !reader.U32(s.MouseX) || !reader.U32(s.MouseY) || !reader.F32(s.AimX) || !reader.F32(s.AimY) || !reader.F32(s.LookX) || !reader.F32(s.LookY)) return false;
     uint8_t paused;
     if (!reader.U8(paused) || paused > 1 || !reader.U8(s.ViewMode) || !reader.F32(s.CameraTargetX) || !reader.F32(s.CameraTargetY) || !reader.F32(s.MouseScale) || !reader.F32(s.ScrollSpeed) || !reader.U32(count)) return false;
     s.Paused = paused;
     if (s.ViewMode > 20 || !Coordinate(s.CameraTargetX) || !Coordinate(s.CameraTargetY) || s.MouseScale < 0 || s.MouseScale > 2 || s.ScrollSpeed < 0 || s.ScrollSpeed > 1) return false;
     if (!Coordinate(s.AimX) || !Coordinate(s.AimY) || std::abs(s.AimX) > 1 || std::abs(s.AimY) > 1 || !Coordinate(s.LookX) || !Coordinate(s.LookY)) return false;
     if (s.Phase > 6) return false;
-    if (!s.ID || !s.Time || s.Time > MaxTime || s.Width < 320 || s.Width > 3840 || s.Height < 180 || s.Height > 2160 || !s.SceneWidth || !s.SceneHeight || s.SceneWidth > 16384 || s.SceneHeight > 16384 || s.Wrap > 3 || !Coordinate(s.CameraX) || !Coordinate(s.CameraY) || count > MaxNodes || count > reader.Remaining() / 117) return false;
-    s.Nodes.resize(count); std::unordered_set<uint64_t> ids;
-    for (auto& n : s.Nodes) if (!ReadNode(reader, n) || !ids.insert(n.ID).second) return false;
+    if (!s.ID || !s.Time || s.Time > MaxTime || s.Width < 320 || s.Width > 3840 || s.Height < 180 || s.Height > 2160 || !s.SceneWidth || !s.SceneHeight || s.SceneWidth > 16384 || s.SceneHeight > 16384 || s.Wrap > 3 || !Coordinate(s.CameraX) || !Coordinate(s.CameraY) || count > MaxNodes || count > reader.Remaining() / 2) return false;
+    // A delta needs the exact baseline it was encoded against; without it the
+    // state is undecodable and the host falls back once acknowledgements stop.
+    const Snapshot* baseline = nullptr;
+    if (baselineID) { baseline = lookup(baselineID); if (!baseline || baseline->ID != baselineID) return false; }
+    std::unordered_map<uint64_t, const Node*> base;
+    if (baseline) { base.reserve(baseline->Nodes.size()); for (const auto& n : baseline->Nodes) base.emplace(n.ID, &n); }
+    s.Nodes.resize(count); std::unordered_set<uint64_t> ids; ids.reserve(count); uint64_t previous = 0, value;
+    for (auto& n : s.Nodes) {
+        if (!ReadVarint(reader, value)) return false;
+        const uint64_t id = previous + uint64_t(UnZigZag(value)); previous = id;
+        const auto found = base.find(id); n = found != base.end() ? *found->second : Node(); n.ID = id;
+        if (!ReadNodeDelta(reader, n) || n.Parent == n.ID || !ids.insert(n.ID).second) return false;
+    }
     return reader.Done();
 }
+inline bool ReadSnapshot(Reader& reader, Snapshot& s) { return ReadSnapshot(reader, s, [](uint32_t) -> const Snapshot* { return nullptr; }); }
 inline uint64_t ResourceHash(const Resource& r) {
     Writer metadata(Kind::WorldResource); metadata.U16(r.Width); metadata.U16(r.Height); metadata.U8(r.Depth);
     return Hash(r.Pixels, Hash(metadata.Data));
@@ -241,8 +361,11 @@ public:
     void Update(const Snapshot& snapshot) { for (const auto& n : snapshot.Nodes) Store(n, snapshot.CameraX, snapshot.CameraY); }
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> assets; for (const auto& [id, n] : m_Nodes) if (n.Asset) assets.insert(n.Asset); return assets; }
     // Assets of the retained tiles this view draws, so the first state can wait for its own surroundings.
+    // A tile the state itself carries replaces the retained version, which a
+    // battle may have changed (and the host discarded) since the manifest.
     void VisibleAssets(const Snapshot& snapshot, std::unordered_set<uint64_t>& assets) const {
-        for (const auto& [id, source] : m_Nodes) if (source.Asset && (LayerOrdinal(source) != FogLayer || snapshot.Phase != PhaseEditing)) { Node n = Placed(source, snapshot); if (Visible(n, snapshot)) assets.insert(n.Asset); }
+        std::unordered_set<uint64_t> replaced; for (const auto& n : snapshot.Nodes) if (LayerOrdinal(n)) replaced.insert(n.ID);
+        for (const auto& [id, source] : m_Nodes) if (source.Asset && !replaced.contains(id) && (LayerOrdinal(source) != FogLayer || snapshot.Phase != PhaseEditing)) { Node n = Placed(source, snapshot); if (Visible(n, snapshot)) assets.insert(n.Asset); }
     }
     void Compose(Snapshot& snapshot) const {
         if (m_Nodes.empty()) return;
@@ -377,23 +500,28 @@ private:
 };
 // Limit reliable repair traffic independently of the number of missing tiles.
 // Oldest requests go first so a large map cannot starve its last missing asset.
+// An asset is requested only after it has been missing for the grace period:
+// the host is usually already sending it, and a request resends it first.
+// Assets in `first` (what holds the guest's first view) precede the rest.
 class ResourceRequests {
 public:
-    std::vector<uint64_t> Select(const std::unordered_set<uint64_t>& missing, uint64_t now) {
+    std::vector<uint64_t> Select(const std::unordered_set<uint64_t>& missing, uint64_t now, uint64_t grace = 0, const std::unordered_set<uint64_t>* first = nullptr) {
         std::erase_if(m_Last, [&](const auto& request) { return !missing.contains(request.first); });
-        std::vector<std::pair<uint64_t, uint64_t>> eligible;
+        std::erase_if(m_Seen, [&](const auto& seen) { return !missing.contains(seen.first); });
+        std::vector<std::tuple<bool, uint64_t, uint64_t>> eligible;
         for (auto id : missing) {
+            if (now - m_Seen.try_emplace(id, now).first->second < grace) continue;
             const auto found = m_Last.find(id);
-            if (found == m_Last.end() || now - found->second >= 5000) eligible.emplace_back(found == m_Last.end() ? 0 : found->second, id);
+            if (found == m_Last.end() || now - found->second >= 5000) eligible.emplace_back(!first || !first->contains(id), found == m_Last.end() ? 0 : found->second, id);
         }
         std::sort(eligible.begin(), eligible.end());
         std::vector<uint64_t> selected;
-        for (size_t i = 0; i < std::min<size_t>(64, eligible.size()); ++i) { selected.push_back(eligible[i].second); m_Last[eligible[i].second] = now; }
+        for (size_t i = 0; i < std::min<size_t>(64, eligible.size()); ++i) { selected.push_back(std::get<2>(eligible[i])); m_Last[std::get<2>(eligible[i])] = now; }
         return selected;
     }
-    void Reset() { m_Last.clear(); }
+    void Reset() { m_Last.clear(); m_Seen.clear(); }
 private:
-    std::unordered_map<uint64_t, uint64_t> m_Last;
+    std::unordered_map<uint64_t, uint64_t> m_Last, m_Seen;
 };
 inline void WriteChunk(Writer& writer, const Chunk& c) {
     writer.U32(c.ID); writer.U32(c.Size); writer.U16(c.Index); writer.U8(c.Parity); writer.Data.insert(writer.Data.end(), c.Bytes.begin(), c.Bytes.end());

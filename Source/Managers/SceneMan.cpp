@@ -1,6 +1,7 @@
 #include "SceneMan.h"
 #include "PostProcessMan.h"
 #include "PresetMan.h"
+#include "MultiplayerWorld.h"
 #include "FrameMan.h"
 #include "ActivityMan.h"
 #include "CameraMan.h"
@@ -690,6 +691,7 @@ bool SceneMan::TryPenetrate(int posX,
 							RemoveOrphans(posX + testY % 2 ? -1 : 1, testY, removeOrphansRadius + 5, removeOrphansMaxArea + 10, true);
 						}
 						_putpixel(pFGColor, posX, testY, g_MaskColor);
+						MultiplayerWorld::MarkChanged(pFGColor, posX, testY, 1, 1);
 						_putpixel(pMaterial, posX, testY, g_MaterialAir);
 					} else {
 						break;
@@ -991,6 +993,7 @@ bool SceneMan::RevealUnseen(const int posX, const int posY, const int team) {
 			m_pCurrentScene->GetSeenPixels(team).push_back(Vector(scaledX, scaledY));
 			// Clear to key color that pixel on the map so it won't be detected as unseen again
 			putpixel(pUnseenLayer->GetBitmap(), scaledX, scaledY, g_MaskColor);
+			MultiplayerWorld::MarkChanged(pUnseenLayer->GetBitmap(), scaledX, scaledY, 1, 1);
 			// Play the reveal sound, if there's not too many already revealed this frame
 			if (g_SettingsMan.BlipOnRevealUnseen() && m_pUnseenRevealSound && m_pCurrentScene->GetSeenPixels(team).size() < 5)
 				m_pUnseenRevealSound->Play(Vector(posX, posY));
@@ -1019,6 +1022,7 @@ bool SceneMan::RestoreUnseen(const int posX, const int posY, const int team) {
 		if (pixel != g_BlackColor && pixel != -1) {
 			// Restore that pixel on the map so it won't be detected as seen again
 			putpixel(pUnseenLayer->GetBitmap(), scaledX, scaledY, g_BlackColor);
+			MultiplayerWorld::MarkChanged(pUnseenLayer->GetBitmap(), scaledX, scaledY, 1, 1);
 			// Show that we actually restored a seen pixel
 			return true;
 		}
@@ -1043,6 +1047,7 @@ void SceneMan::RevealUnseenBox(const int posX, const int posY, const int width, 
 
 		// Fill the box
 		rectfill(pUnseenLayer->GetBitmap(), scaledX, scaledY, scaledX + scaledW, scaledY + scaledH, g_MaskColor);
+		MultiplayerWorld::MarkChanged(pUnseenLayer->GetBitmap(), scaledX, scaledY, scaledW + 1, scaledH + 1);
 	}
 }
 
@@ -1062,6 +1067,7 @@ void SceneMan::RestoreUnseenBox(const int posX, const int posY, const int width,
 
 		// Fill the box
 		rectfill(pUnseenLayer->GetBitmap(), scaledX, scaledY, scaledX + scaledW, scaledY + scaledH, g_BlackColor);
+		MultiplayerWorld::MarkChanged(pUnseenLayer->GetBitmap(), scaledX, scaledY, scaledW + 1, scaledH + 1);
 	}
 }
 
