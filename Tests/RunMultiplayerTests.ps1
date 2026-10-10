@@ -78,6 +78,7 @@ SettingsMan
     EnableVSync = 0
     UseMultiDisplays = 0
     SkipIntro = 1
+    MuteMaster = 1
     LaunchIntoActivity = 0
 $disabledMods
 "@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $dedicatedSettings
@@ -104,6 +105,7 @@ SettingsMan
     EnableVSync = 1
     UseMultiDisplays = 0
     SkipIntro = 1
+    MuteMaster = 1
     LaunchIntoActivity = 0
 $disabledMods
 "@ | ForEach-Object { $_ -replace '(?m)^    ', "`t" } | Set-Content -LiteralPath $settings

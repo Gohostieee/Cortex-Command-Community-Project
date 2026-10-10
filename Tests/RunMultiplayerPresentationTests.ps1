@@ -12,7 +12,7 @@ try {
     $previousPresentation = $env:CCCP_MPSMOKE_PRESENTATION
     $settings = Join-Path $taskRoot 'build-mp/presentation-settings.ini'
     $disabledMods = (Get-ChildItem -LiteralPath Mods -Directory -Filter '*.rte' | ForEach-Object { "`tDisableMod = $($_.Name)" }) -join "`n"
-    "SettingsMan`n`tResolutionX = 640`n`tResolutionY = 360`n`tResolutionMultiplier = 1`n`tFullscreen = 0`n`tEnableVSync = 1`n`tSkipIntro = 1`n`tLaunchIntoActivity = 0`n$disabledMods" | Set-Content -LiteralPath $settings
+    "SettingsMan`n`tResolutionX = 640`n`tResolutionY = 360`n`tResolutionMultiplier = 1`n`tFullscreen = 0`n`tEnableVSync = 1`n`tSkipIntro = 1`n`tMuteMaster = 1`n`tLaunchIntoActivity = 0`n$disabledMods" | Set-Content -LiteralPath $settings
     $instance = $null
     try {
         $env:CCCP_SETTINGSPATH = $settings
