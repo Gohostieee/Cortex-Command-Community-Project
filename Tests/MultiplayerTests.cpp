@@ -386,6 +386,22 @@ void Adaptation() {
     const float steady = adapt(0), jittery = adapt(60);
     Check(steady >= 50 && steady <= 60, "steady 20 Hz delivery did not settle near one interval");
     Check(jittery > steady + 30 && jittery <= float(W::MaximumDelayMS), "jittery delivery did not lengthen the presentation delay");
+
+    // The player's own actor (with its attachments) is shown at the present
+    // time while the rest of the world keeps its interpolation buffer.
+    W::Timeline own; W::Snapshot state; state.Width = 640; state.Height = 360; state.SceneWidth = 4096; state.SceneHeight = 1024;
+    W::Node actor, arm, rock; actor.ID = 7 << 8; arm.ID = (7 << 8) | 1; arm.Parent = actor.ID; rock.ID = 9 << 8;
+    for (W::Node* n : {&actor, &arm, &rock}) { n->Type = W::Shape::Rectangle; n->Width = n->Height = 4; }
+    state.ControlledActor = actor.ID;
+    for (uint32_t i = 0; i < 20; ++i) { state.ID = i + 1; state.Time = 1000 + i * 50; actor.X = 100.0f + i * 10; arm.X = actor.X + 3; rock.X = 500.0f + i * 10; state.Nodes = {actor, arm, rock}; own.Push(state, state.Time + 20); }
+    auto find = [](const W::Snapshot& s, uint64_t id) { for (const auto& n : s.Nodes) if (n.ID == id) return n.X; return -1.0f; };
+    auto sampled = own.Sample(1980);
+    Check(std::abs(find(sampled, actor.ID) - 292) < .01f && std::abs(find(sampled, arm.ID) - 295) < .01f, "own actor and attachments are not shown at the present time");
+    Check(std::abs(find(sampled, rock.ID) - 677) < .01f, "own-actor presentation moved the rest of the world");
+    // The actor stopped; the continued position fades back instead of jumping.
+    state.ID = 21; state.Time = 2000; actor.X = 290; arm.X = 293; rock.X = 700; state.Nodes = {actor, arm, rock}; own.Push(state, 2020);
+    sampled = own.Sample(2025); Check(std::abs(find(sampled, actor.ID) - 292) < .01f, "a new state made the own actor jump");
+    sampled = own.Sample(2125); Check(find(sampled, actor.ID) > 290 && find(sampled, actor.ID) < 291, "the own actor did not settle on the host's position");
 }
 }
 int main() {

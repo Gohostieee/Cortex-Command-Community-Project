@@ -158,9 +158,9 @@ struct MultiplayerMan::Impl {
 		if (!Benchmark) return;
 		if (!BenchmarkLog.is_open()) {
 			BenchmarkLog.open(SmokeLogDirectory + "/" + SmokeRole + "-benchmark.csv");
-			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps\n";
+			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps,stale_tiles,black_tiles,black_fog_tiles\n";
 		}
-		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << '\n';
+		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << ',' << World.StaleTiles() << ',' << World.BlackTiles() << ',' << World.BlackFogTiles() << '\n';
 	}
 	// Per-second attribution of the authority's single main loop. Every stage
 	// that competes with simulation time is measured separately.
@@ -461,6 +461,17 @@ struct MultiplayerMan::Impl {
 		const uint32_t edit = ++EditSequence; PendingEdits["Ready"] = {edit, ready}; PendingEdits["Team" + std::to_string(LocalSlot)] = {edit, team};
 		MP::Writer writer(Kind::Ready, Session, Epoch); writer.U8(ready); writer.U8(team); writer.U32(edit); Net.Send(ServerAddress, writer.Data, Delivery::Control);
 	}
+	// Tells the host which resources this guest already holds, many per message.
+	// One reliable message per asset flooded the control lane on lossy links.
+	void ReportResources(const std::vector<uint64_t>& ids) {
+		for (size_t first = 0; first < ids.size(); first += ReportBatch) {
+			const size_t count = std::min(ReportBatch, ids.size() - first);
+			MP::Writer report(Kind::WorldAck, Session, Epoch); report.U8(4); report.U16(uint16_t(count));
+			for (size_t i = first; i < first + count; ++i) report.U64(ids[i]);
+			Net.Send(ServerAddress, report.Data, Delivery::Control);
+		}
+	}
+	static constexpr size_t ReportBatch = 128;
 	// Lobby edits this client sent that the host has not answered yet. The menu
 	// shows them instead of the older confirmed state, so a selection does not
 	// snap back while its request is in flight.
@@ -964,13 +975,15 @@ void MultiplayerMan::Impl::ReceiveWorld(Kind kind, MP::Reader& reader) {
 		std::unordered_set<uint64_t> assets; MP::World::SceneMap map; if (!MP::World::ReadManifest(data, assets, &map)) return;
 		World.InstallSceneMap(map);
 		World.PinScene(assets); SceneReceived = true; SceneReceivedAt = Now(); SceneMissing.clear();
-		if (const auto* scene = dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName))) World.PrimeSceneBackdrops(*scene);
+		const uint64_t primeStart = NowMicros(); if (const auto* scene = dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName))) World.PrimeScene(*scene, assets); const uint64_t primeUs = NowMicros() - primeStart;
 		SceneManifest.assign(assets.begin(), assets.end());
-		if (Smoke) Verify("SCENE: backdrop cache=" + std::to_string(std::count_if(assets.begin(), assets.end(), [&](auto id) { return World.FindResource(id) != nullptr; })) + " / " + std::to_string(assets.size()) + " map=" + SceneName);
+		if (Smoke) Verify("SCENE: local cache=" + std::to_string(std::count_if(assets.begin(), assets.end(), [&](auto id) { return World.FindResource(id) != nullptr; })) + " / " + std::to_string(assets.size()) + " map=" + SceneName + " build_ms=" + std::to_string(primeUs / 1000));
+		std::vector<uint64_t> held;
 		for (auto id : assets) {
             if (!World.FindResource(id)) SceneMissing.insert(id);
-            else { MP::Writer ack(Kind::WorldAck, Session, Epoch); ack.U8(1); ack.U64(id); Net.Send(ServerAddress, ack.Data, Delivery::Control); ReportedResources.insert(id); }
+            else { held.push_back(id); ReportedResources.insert(id); }
         }
+		ReportResources(held);
 		PresentPendingWorlds();
 	} else if (kind == Kind::WorldResource) {
 		MP::World::Resource resource; if (!MP::World::ReadResource(data, resource)) return;
@@ -985,9 +998,7 @@ void MultiplayerMan::Impl::ReceiveWorld(Kind kind, MP::Reader& reader) {
 		const auto missing = World.Missing(snapshot); MissingResources = {missing.begin(), missing.end()};
 		// A content-addressed asset remains valid across rounds and reconnects.
 		// Tell the host which cached assets need no second reliable transfer.
-		for (const auto& node : snapshot.Nodes) if (node.Asset && World.FindResource(node.Asset) && ReportedResources.insert(node.Asset).second) {
-			MP::Writer ack(Kind::WorldAck, Session, Epoch); ack.U8(1); ack.U64(node.Asset); Net.Send(ServerAddress, ack.Data, Delivery::Control);
-		}
+		{ std::vector<uint64_t> held; for (const auto& node : snapshot.Nodes) if (node.Asset && World.FindResource(node.Asset) && ReportedResources.insert(node.Asset).second) held.push_back(node.Asset); ReportResources(held); }
 		// The first state waits for the scene map and every resource it shows,
 		// which includes the terrain around the guest's view. The rest of the map
 		// keeps streaming nearest-first instead of holding the whole match.
@@ -1117,6 +1128,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		else if (header.Type == Kind::WorldAck) {
 			uint8_t type; if (!reader.U8(type)) return;
 			if (type == 1) { uint64_t id; if (reader.U64(id) && reader.Done() && World.FindResource(id)) { player.PendingResources.erase(id); player.WorldResources.insert(id); } }
+			else if (type == 4) { uint16_t count; if (reader.U16(count) && count <= ReportBatch && reader.Remaining() == size_t(count) * 8) for (uint16_t i = 0; i < count; ++i) { uint64_t id; reader.U64(id); if (World.FindResource(id)) { player.PendingResources.erase(id); player.WorldResources.insert(id); } } }
 			else if (type == 3) { uint32_t message; uint16_t index; uint64_t sent = 0; if (reader.U32(message) && reader.U16(index) && reader.Done() && player.ResourceFlight.Receipt(message, index, &sent) && sent) player.Rate.Sample(Now() - sent); }
 			else if (type == 2) { uint64_t id; if (reader.U64(id) && reader.Done() && World.FindResource(id)) {
 				// A guest requests only what its view lacks, so it goes first, unless it is already on its way.
@@ -1186,6 +1198,9 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		// Edits are answered in order, so everything up to the applied one is settled.
 		const uint32_t applied = slots[LocalSlot].AppliedEdit; std::erase_if(PendingEdits, [applied](const auto& edit) { return edit.second.Sequence <= applied; });
 		if (changedMatch) PendingEdits.clear();
+		// Build the scene's pristine terrain while the host is still loading it,
+		// so the manifest finds it ready instead of stalling the loading screen.
+		if (changedMatch && Playing) if (const auto* preset = dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName))) World.PrimeScene(*preset, {});
 		g_UInputMan.TrapMousePos(Playing && !UI); return;
 	}
 	if (header.Epoch != Epoch) return;

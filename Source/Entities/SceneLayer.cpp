@@ -74,7 +74,7 @@ int SceneLayerImpl<TRACK_DRAWINGS, STATIC_TEXTURE>::Create(BITMAP* bitmap, bool 
 	m_BackBitmap = create_bitmap_ex(bitmap_color_depth(m_MainBitmap), m_MainBitmap->w, m_MainBitmap->h);
 	m_LastClearColor = ColorKeys::g_InvalidColor;
 	if constexpr (!STATIC_TEXTURE) {
-		m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
+		if (!g_SceneLayersWithoutTextures) m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
 	}
 
 	m_DrawMasked = drawMasked;
@@ -115,7 +115,7 @@ int SceneLayerImpl<TRACK_DRAWINGS, STATIC_TEXTURE>::Create(const SceneLayerImpl&
 		m_LastClearColor = ColorKeys::g_InvalidColor;
 
 		if constexpr (!STATIC_TEXTURE) {
-			m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
+			if (!g_SceneLayersWithoutTextures) m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
 		}
 
 		InitScrollRatios();
@@ -213,7 +213,7 @@ int SceneLayerImpl<TRACK_DRAWINGS, STATIC_TEXTURE>::LoadData() {
 
 	m_BackBitmap = create_bitmap_ex(bitmap_color_depth(m_MainBitmap), m_MainBitmap->w, m_MainBitmap->h);
 	if constexpr (!STATIC_TEXTURE) {
-		m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
+		if (!g_SceneLayersWithoutTextures) m_MainTexture = std::make_unique<BigTexture>(m_MainBitmap);
 	}
 	m_LastClearColor = ColorKeys::g_InvalidColor;
 

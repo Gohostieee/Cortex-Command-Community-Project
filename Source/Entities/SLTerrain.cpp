@@ -299,6 +299,26 @@ int SLTerrain::LoadData() {
 	return 0;
 }
 
+int SLTerrain::LoadPresentationLayers() {
+	SceneLayer::LoadData();
+	if (m_FGColorLayer->IsLoadedFromDisk() && m_BGColorLayer->IsLoadedFromDisk()) {
+		m_FGColorLayer->LoadData();
+		m_BGColorLayer->LoadData();
+		return 0;
+	}
+	m_FGColorLayer->Destroy();
+	m_FGColorLayer->Create(create_bitmap_ex(8, m_MainBitmap->w, m_MainBitmap->h), true, m_Offset, m_WrapX, m_WrapY, m_ScrollInfo);
+	m_BGColorLayer->Destroy();
+	m_BGColorLayer->Create(create_bitmap_ex(8, m_MainBitmap->w, m_MainBitmap->h), true, m_Offset, m_WrapX, m_WrapY, m_ScrollInfo);
+	TexturizeTerrain();
+	// Debris and frosting draw from the simulation's random numbers, which a guest cannot reproduce.
+	for (TerrainObject* terrainObject: m_TerrainObjects) {
+		terrainObject->DrawToTerrain(this);
+	}
+	CleanAir();
+	return 0;
+}
+
 int SLTerrain::SaveData(const std::string& pathBase) {
 	if (pathBase.empty()) {
 		return -1;

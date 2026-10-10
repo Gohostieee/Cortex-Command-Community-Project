@@ -62,7 +62,14 @@ def analyze(path):
         'stale_samples_over_500ms': sum(r['delta_ms'] >= 500 for r in samples),
         'stale_samples_over_1000ms': sum(r['delta_ms'] >= 1000 for r in samples),
         'ping_ms_p50': percentile([r['ping_ms'] for r in samples], 50),
-        'world_updates_measured': len(worlds), 'frames_measured': len(frames)
+        'world_updates_measured': len(worlds), 'frames_measured': len(frames),
+        # Scene tiles drawn from an older revision, or covered black while missing.
+        'stale_tiles_p95': percentile([r.get('stale_tiles', 0) for r in samples], 95),
+        'black_tiles_p95': percentile([r.get('black_tiles', 0) for r in samples], 95),
+        'black_fog_tiles_p95': percentile([r.get('black_fog_tiles', 0) for r in samples], 95),
+        'samples': len(samples),
+        'samples_with_black_tiles': sum(r.get('black_tiles', 0) > 0 for r in samples),
+        'samples_with_black_fog_tiles': sum(r.get('black_fog_tiles', 0) > 0 for r in samples)
     }
 
 

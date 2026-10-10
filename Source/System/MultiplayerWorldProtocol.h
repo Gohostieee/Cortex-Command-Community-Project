@@ -777,18 +777,13 @@ public:
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> ids; for (const auto& s : m_States) for (const auto& n : s.Nodes) if (n.Asset) ids.insert(n.Asset); return ids; }
     Snapshot Sample(uint64_t now) const {
         if (m_States.empty()) return {};
+        const float elapsed = m_LastSample && now > m_LastSample ? float(std::min<uint64_t>(now - m_LastSample, 100)) : 0;
         // Change the delay gradually (at most 10% of elapsed time) so presentation
         // speeds up or slows down slightly instead of jumping.
-        if (m_LastSample && now > m_LastSample) { const float step = float(std::min<uint64_t>(now - m_LastSample, 100)) * .1f; m_Delay += std::clamp(m_TargetDelay - m_Delay, -step, step); }
+        if (elapsed > 0) { const float step = elapsed * .1f; m_Delay += std::clamp(m_TargetDelay - m_Delay, -step, step); }
         m_LastSample = now;
         const int64_t target = int64_t(now) - m_Offset - int64_t(m_Delay);
-        const Snapshot* before = &m_States.front(); const Snapshot* after = before;
-        for (const auto& state : m_States) { if (int64_t(state.Time) <= target) before = &state; if (int64_t(state.Time) >= target) { after = &state; break; } after = &state; }
-        // After the newest update, a small bounded continuation covers jitter;
-        // we freeze rather than invent unbounded motion on a lost connection.
-        if (before == after && target > int64_t(after->Time) && m_States.size() > 1) before = &m_States[m_States.size() - 2];
-        const float dt = float(after->Time - before->Time);
-        const float alpha = dt > 0 ? std::clamp(float(target - int64_t(before->Time)) / dt, 0.0f, 1.0f + ExtrapolationMS / dt) : 1;
+        const auto [before, after, alpha] = Find(target);
         Snapshot result = alpha < 1 ? *before : *after;
         if (before->ControlledActor == after->ControlledActor) {
             result.AimX = Blend(before->AimX, after->AimX, std::min(alpha, 1.0f)); result.AimY = Blend(before->AimY, after->AimY, std::min(alpha, 1.0f));
@@ -798,50 +793,8 @@ public:
             result.CameraX = Blend(before->CameraX, after->CameraX, alpha, after->SceneWidth, after->Wrap & 1);
             result.CameraY = Blend(before->CameraY, after->CameraY, alpha, after->SceneHeight, after->Wrap & 2);
         }
-        std::unordered_map<uint64_t, const Node*> old, next;
-        for (const auto& n : before->Nodes) old[n.ID] = &n;
-        for (const auto& n : after->Nodes) next[n.ID] = &n;
-        for (auto& n : result.Nodes) {
-            auto a = old.find(n.ID), b = next.find(n.ID);
-            if (a == old.end() || b == next.end()) continue;
-            const Node& from = *a->second; const Node& to = *b->second;
-            if ((to.Flags & Layer) && from.Type == Shape::Sprite && to.Type == Shape::Sprite && from.Flags == to.Flags && from.X2 == to.X2 && from.Y2 == to.Y2) {
-                // Parallax layers wrap at their own bitmap span. Keep each
-                // repeated tile in the coordinate cycle of the selected state.
-                const float dx = Displacement(from.X, to.X, to.X2, to.X2 > 0), dy = Displacement(from.Y, to.Y, to.Y2, to.Y2 > 0);
-                if (std::abs(dx) <= 256 && std::abs(dy) <= 256) {
-                    n.X = alpha < 1 ? from.X + dx * alpha : to.X + dx * (alpha - 1);
-                    n.Y = alpha < 1 ? from.Y + dy * alpha : to.Y + dy * (alpha - 1);
-                }
-                continue;
-            }
-            if ((to.Flags & Discontinuous) || ((to.Flags & ScreenSpace) && !(to.Flags & Layer)) || from.Type != to.Type || from.Parent != to.Parent || ((from.Flags ^ to.Flags) & (FlipX | FlipY)) || std::abs(Displacement(from.X, to.X, after->SceneWidth, after->Wrap & 1)) > 256 || std::abs(Displacement(from.Y, to.Y, after->SceneHeight, after->Wrap & 2)) > 256) continue;
-            n.X = Blend(from.X, to.X, alpha, after->SceneWidth, !(to.Flags & ScreenSpace) && (after->Wrap & 1)); n.Y = Blend(from.Y, to.Y, alpha, after->SceneHeight, !(to.Flags & ScreenSpace) && (after->Wrap & 2));
-            n.Angle = Blend(from.Angle, to.Angle, alpha, 6.28318530718f, true);
-        }
-        // Keep attachments on their native parent transforms while interpolating
-        // changing joint offsets. World-space interpolation alone separates a
-        // limb from a rapidly rotating body between snapshots.
-        std::unordered_map<uint64_t, Node*> sampled;
-        for (auto& n : result.Nodes) sampled[n.ID] = &n;
-        std::unordered_set<uint64_t> resolved, visiting;
-        auto resolve = [&](auto&& self, Node& n, unsigned depth) -> void {
-            if (!n.Parent || depth > 32 || resolved.contains(n.ID) || visiting.contains(n.ID)) return;
-            visiting.insert(n.ID);
-            auto a = old.find(n.ID), b = next.find(n.ID), pa = old.find(n.Parent), pb = next.find(n.Parent); auto parent = sampled.find(n.Parent);
-            if (a != old.end() && b != next.end() && pa != old.end() && pb != next.end() && parent != sampled.end() && a->second->Parent == b->second->Parent && !(n.Flags & (ScreenSpace | Discontinuous)) && ((pa->second->Flags ^ pb->second->Flags) & FlipX) == 0) {
-                self(self, *parent->second, depth + 1);
-                const auto& from = *a->second; const auto& to = *b->second; const auto& p0 = *pa->second; const auto& p1 = *pb->second;
-                if (std::abs(Displacement(p0.X, p1.X, after->SceneWidth, after->Wrap & 1)) <= 256 && std::abs(Displacement(p0.Y, p1.Y, after->SceneHeight, after->Wrap & 2)) <= 256) {
-                    auto local = [&](const Node& child, const Node& p) { const float dx = Displacement(p.X, child.X, after->SceneWidth, after->Wrap & 1), dy = Displacement(p.Y, child.Y, after->SceneHeight, after->Wrap & 2); const float c = std::cos(p.Angle), s = std::sin(p.Angle); return std::pair{dx * c - dy * s, dx * s + dy * c}; };
-                    auto l0 = local(from, p0), l1 = local(to, p1); const float x = Blend(l0.first, l1.first, alpha), y = Blend(l0.second, l1.second, alpha); const auto& p = *parent->second; const float c = std::cos(p.Angle), s = std::sin(p.Angle);
-                    n.X = p.X + x * c + y * s; n.Y = p.Y - x * s + y * c;
-                    n.Angle = p.Angle + Blend(from.Angle - p0.Angle, to.Angle - p1.Angle, alpha, 6.28318530718f, true);
-                }
-            }
-            visiting.erase(n.ID); resolved.insert(n.ID);
-        };
-        for (auto& n : result.Nodes) resolve(resolve, n, 0);
+        Interpolate(*before, *after, alpha, result.Nodes, nullptr);
+        PresentOwnActor(result, now, target, elapsed);
         std::erase_if(result.Nodes, [](const Node& n) { return n.StartTime != 0; });
         std::unordered_set<uint64_t> events;
         std::vector<Node> trails;
@@ -855,8 +808,99 @@ public:
         for (const auto& n : m_States.back().Nodes) if ((n.Flags & ScreenSpace) && !(n.Flags & Layer)) result.Nodes.push_back(n);
         return result;
     }
+    // How far the controlled actor may run ahead of its newest state.
+    static constexpr int64_t OwnLeadMS = 60;
     void Reset() { *this = Timeline(); }
 private:
+    struct Bracket { const Snapshot* Before; const Snapshot* After; float Alpha; };
+    Bracket Find(int64_t target) const {
+        const Snapshot* before = &m_States.front(); const Snapshot* after = before;
+        for (const auto& state : m_States) { if (int64_t(state.Time) <= target) before = &state; if (int64_t(state.Time) >= target) { after = &state; break; } after = &state; }
+        // After the newest update, a small bounded continuation covers jitter;
+        // we freeze rather than invent unbounded motion on a lost connection.
+        if (before == after && target > int64_t(after->Time) && m_States.size() > 1) before = &m_States[m_States.size() - 2];
+        const float dt = float(after->Time - before->Time);
+        return {before, after, dt > 0 ? std::clamp(float(target - int64_t(before->Time)) / dt, 0.0f, 1.0f + ExtrapolationMS / dt) : 1};
+    }
+    // Moves `nodes` (taken from the selected state) between `before` and `after`.
+    // With `only`, just those node IDs are considered.
+    static void Interpolate(const Snapshot& before, const Snapshot& after, float alpha, std::vector<Node>& nodes, const std::unordered_set<uint64_t>* only) {
+        std::unordered_map<uint64_t, const Node*> old, next;
+        for (const auto& n : before.Nodes) if (!only || only->contains(n.ID)) old[n.ID] = &n;
+        for (const auto& n : after.Nodes) if (!only || only->contains(n.ID)) next[n.ID] = &n;
+        for (auto& n : nodes) {
+            auto a = old.find(n.ID), b = next.find(n.ID);
+            if (a == old.end() || b == next.end()) continue;
+            const Node& from = *a->second; const Node& to = *b->second;
+            if ((to.Flags & Layer) && from.Type == Shape::Sprite && to.Type == Shape::Sprite && from.Flags == to.Flags && from.X2 == to.X2 && from.Y2 == to.Y2) {
+                // Parallax layers wrap at their own bitmap span. Keep each
+                // repeated tile in the coordinate cycle of the selected state.
+                const float dx = Displacement(from.X, to.X, to.X2, to.X2 > 0), dy = Displacement(from.Y, to.Y, to.Y2, to.Y2 > 0);
+                if (std::abs(dx) <= 256 && std::abs(dy) <= 256) {
+                    n.X = alpha < 1 ? from.X + dx * alpha : to.X + dx * (alpha - 1);
+                    n.Y = alpha < 1 ? from.Y + dy * alpha : to.Y + dy * (alpha - 1);
+                }
+                continue;
+            }
+            if ((to.Flags & Discontinuous) || ((to.Flags & ScreenSpace) && !(to.Flags & Layer)) || from.Type != to.Type || from.Parent != to.Parent || ((from.Flags ^ to.Flags) & (FlipX | FlipY)) || std::abs(Displacement(from.X, to.X, after.SceneWidth, after.Wrap & 1)) > 256 || std::abs(Displacement(from.Y, to.Y, after.SceneHeight, after.Wrap & 2)) > 256) continue;
+            n.X = Blend(from.X, to.X, alpha, after.SceneWidth, !(to.Flags & ScreenSpace) && (after.Wrap & 1)); n.Y = Blend(from.Y, to.Y, alpha, after.SceneHeight, !(to.Flags & ScreenSpace) && (after.Wrap & 2));
+            n.Angle = Blend(from.Angle, to.Angle, alpha, 6.28318530718f, true);
+        }
+        // Keep attachments on their native parent transforms while interpolating
+        // changing joint offsets. World-space interpolation alone separates a
+        // limb from a rapidly rotating body between snapshots.
+        std::unordered_map<uint64_t, Node*> sampled;
+        for (auto& n : nodes) sampled[n.ID] = &n;
+        std::unordered_set<uint64_t> resolved, visiting;
+        auto resolve = [&](auto&& self, Node& n, unsigned depth) -> void {
+            if (!n.Parent || depth > 32 || resolved.contains(n.ID) || visiting.contains(n.ID)) return;
+            visiting.insert(n.ID);
+            auto a = old.find(n.ID), b = next.find(n.ID), pa = old.find(n.Parent), pb = next.find(n.Parent); auto parent = sampled.find(n.Parent);
+            if (a != old.end() && b != next.end() && pa != old.end() && pb != next.end() && parent != sampled.end() && a->second->Parent == b->second->Parent && !(n.Flags & (ScreenSpace | Discontinuous)) && ((pa->second->Flags ^ pb->second->Flags) & FlipX) == 0) {
+                self(self, *parent->second, depth + 1);
+                const auto& from = *a->second; const auto& to = *b->second; const auto& p0 = *pa->second; const auto& p1 = *pb->second;
+                if (std::abs(Displacement(p0.X, p1.X, after.SceneWidth, after.Wrap & 1)) <= 256 && std::abs(Displacement(p0.Y, p1.Y, after.SceneHeight, after.Wrap & 2)) <= 256) {
+                    auto local = [&](const Node& child, const Node& p) { const float dx = Displacement(p.X, child.X, after.SceneWidth, after.Wrap & 1), dy = Displacement(p.Y, child.Y, after.SceneHeight, after.Wrap & 2); const float c = std::cos(p.Angle), s = std::sin(p.Angle); return std::pair{dx * c - dy * s, dx * s + dy * c}; };
+                    auto l0 = local(from, p0), l1 = local(to, p1); const float x = Blend(l0.first, l1.first, alpha), y = Blend(l0.second, l1.second, alpha); const auto& p = *parent->second; const float c = std::cos(p.Angle), s = std::sin(p.Angle);
+                    n.X = p.X + x * c + y * s; n.Y = p.Y - x * s + y * c;
+                    n.Angle = p.Angle + Blend(from.Angle - p0.Angle, to.Angle - p1.Angle, alpha, 6.28318530718f, true);
+                }
+            }
+            visiting.erase(n.ID); resolved.insert(n.ID);
+        };
+        for (auto& n : nodes) resolve(resolve, n, 0);
+    }
+    // The player's own actor and everything attached to it are presented at
+    // the host's present time, continued from the two newest states, instead
+    // of the world's buffered time. Input then shows on screen one buffer
+    // sooner. When a new state disagrees with that continuation, the
+    // difference fades out instead of jumping.
+    void PresentOwnActor(Snapshot& result, uint64_t now, int64_t target, float elapsed) const {
+        const Snapshot& newest = m_States.back();
+        const int64_t ownTarget = std::min<int64_t>(int64_t(now) - m_Offset, int64_t(newest.Time) + OwnLeadMS);
+        if (!newest.ControlledActor || m_States.size() < 2 || ownTarget <= target) { m_OwnActor = 0; m_OwnShiftX = m_OwnShiftY = 0; return; }
+        std::unordered_map<uint64_t, uint64_t> parents; for (const auto& n : newest.Nodes) if (!(n.Flags & ScreenSpace)) parents[n.ID] = n.Parent;
+        std::unordered_set<uint64_t> own;
+        for (const auto& [id, parent] : parents) {
+            uint64_t node = id; for (unsigned depth = 0; node && depth < 32 && node != newest.ControlledActor; ++depth) { const auto up = parents.find(node); node = up == parents.end() ? 0 : up->second; }
+            if (node == newest.ControlledActor) own.insert(id);
+        }
+        const auto [before, after, alpha] = Find(ownTarget);
+        std::vector<Node> nodes; for (const auto& n : (alpha < 1 ? *before : *after).Nodes) if (own.contains(n.ID)) nodes.push_back(n);
+        Interpolate(*before, *after, alpha, nodes, &own);
+        const auto root = std::find_if(nodes.begin(), nodes.end(), [&](const Node& n) { return n.ID == newest.ControlledActor; });
+        if (root == nodes.end()) { m_OwnActor = 0; m_OwnShiftX = m_OwnShiftY = 0; return; }
+        m_OwnShiftX *= std::exp(-elapsed / 80.0f); m_OwnShiftY *= std::exp(-elapsed / 80.0f);
+        if (m_OwnActor == newest.ControlledActor && m_OwnState != newest.ID) {
+            const float jumpX = Displacement(root->X, m_OwnX, newest.SceneWidth, newest.Wrap & 1), jumpY = Displacement(root->Y, m_OwnY, newest.SceneHeight, newest.Wrap & 2);
+            // A teleport, respawn or long outage is shown as it is.
+            if (std::abs(jumpX) <= 64 && std::abs(jumpY) <= 64) { m_OwnShiftX = jumpX; m_OwnShiftY = jumpY; } else m_OwnShiftX = m_OwnShiftY = 0;
+        }
+        m_OwnActor = newest.ControlledActor; m_OwnState = newest.ID;
+        std::unordered_map<uint64_t, const Node*> byID; for (auto& n : nodes) { Translate(n, m_OwnShiftX, m_OwnShiftY); byID[n.ID] = &n; }
+        m_OwnX = root->X; m_OwnY = root->Y;
+        for (auto& n : result.Nodes) if (const auto found = byID.find(n.ID); found != byID.end()) n = *found->second;
+    }
     std::deque<Snapshot> m_States;
     int64_t m_Offset = 0;
     uint64_t m_LastReceived = 0;
@@ -865,5 +909,9 @@ private:
     float m_TargetDelay = float(InterpolationMS);
     mutable float m_Delay = float(InterpolationMS);
     mutable uint64_t m_LastSample = 0;
+    // The own actor's last presented root position and fading correction.
+    mutable uint64_t m_OwnActor = 0;
+    mutable uint32_t m_OwnState = 0;
+    mutable float m_OwnX = 0, m_OwnY = 0, m_OwnShiftX = 0, m_OwnShiftY = 0;
 };
 } // namespace RTE::MP::World

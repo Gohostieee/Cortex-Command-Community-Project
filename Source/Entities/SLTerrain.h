@@ -62,6 +62,11 @@ namespace RTE {
 		/// @return An error return value signaling success or any particular failure. Anything below 0 is an error signal.
 		int LoadData() override;
 
+		/// Builds only the colour layers from this preset's data, for a multiplayer guest to recognize unchanged scenery locally.
+		/// Randomized debris and frosting are skipped, and terrain objects are drawn without adding their child objects to any scene.
+		/// @return An error return value signaling success or any particular failure. Anything below 0 is an error signal.
+		int LoadPresentationLayers();
+
 		/// Saves bitmap data currently in memory to disk.
 		/// @param pathBase The filepath base to the where to save the Bitmap data. This means everything up to the extension. "FG" and "Mat" etc will be added.
 		/// @param doAsyncSaves Whether or not to save asynchronously.

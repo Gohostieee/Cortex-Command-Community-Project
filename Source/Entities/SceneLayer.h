@@ -16,6 +16,10 @@ namespace RTE {
 		std::unique_ptr<BITMAP> bitmap;
 	};
 
+	/// While set on a thread, scene layers created there get no GPU texture. Used for layer data that is
+	/// only read, such as a multiplayer guest rebuilding a scene's pristine terrain to recognize it locally.
+	inline thread_local bool g_SceneLayersWithoutTextures = false;
+
 	/// A scrolling layer of the Scene.
 	template <bool TRACK_DRAWINGS, bool STATIC_TEXTURE = false>
 	class SceneLayerImpl : public Entity {

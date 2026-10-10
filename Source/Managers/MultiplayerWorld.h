@@ -38,12 +38,19 @@ public:
     std::vector<uint64_t> PrepareScene();
     MP::World::SceneMap PrepareSceneMap(int width, int height);
     void InstallSceneMap(const MP::World::SceneMap& map);
-    void PrimeSceneBackdrops(const Scene& scene);
+    // Builds the scene's backdrops and pristine terrain from local game data
+    // and keeps the tiles whose content matches `wanted` (the host's manifest),
+    // so they need not be downloaded.
+    void PrimeScene(const Scene& scene, const std::unordered_set<uint64_t>& wanted);
     void PinScene(const std::unordered_set<uint64_t>& assets);
     unsigned Render(uint64_t time);
     // Center of the most recently rendered local camera, for the audio listener.
     bool RenderedCenter(Vector& center) const;
     bool Ready() const;
+    // Scene tiles in the last rendered frame shown from an older revision, and covered black while missing.
+    unsigned StaleTiles() const;
+    unsigned BlackTiles() const;
+    unsigned BlackFogTiles() const;
     bool Paused() const;
     bool IsDeploying() const;
     int Width() const;

@@ -341,6 +341,7 @@ namespace RTE {
 		/// Gets the SLTerrain.
 		/// @return A pointer to the SLTerrain. Ownership is NOT transferred!
 		SLTerrain* GetTerrain() { return m_pTerrain; }
+		const SLTerrain* GetTerrain() const { return m_pTerrain; }
 
 		/// Gets access to the background layer list.
 		/// @return A reference to the std::list containing all the background layers.

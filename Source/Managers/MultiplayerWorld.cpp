@@ -101,6 +101,12 @@ struct MultiplayerWorld::Impl {
     uint64_t IntermediateCount = 0;
     Snapshot LastSample;
     std::unordered_map<uint64_t, Node> LastVisuals;
+    // Recent revisions of each visible scene tile. A tile that changes on most
+    // updates (fog around a moving actor) is rarely present in its newest
+    // revision; the newest one that has arrived is shown instead.
+    std::unordered_map<uint64_t, std::deque<Node>> TileRevisions;
+    // Scene tiles in the last frame shown from an older revision, and covered black.
+    unsigned StaleTiles = 0, BlackTiles = 0, BlackFogTiles = 0;
     BITMAP* GUI = nullptr;
     BITMAP* CanvasTarget = nullptr;
     GFX_VTABLE* OriginalVTable = nullptr;
@@ -159,6 +165,16 @@ struct MultiplayerWorld::Impl {
         if (!Store(std::move(resource))) return 0;
         if (!regions.contains(region)) ++BitmapRegionEntries;
         regions[region] = {id, verified}; return id;
+    }
+    // Pristine terrain tiles built from local game data, for the scene named.
+    // Kept between matches and reconnects so the scene is built once.
+    std::string LocalScene;
+    std::unordered_map<uint64_t, Resource> LocalTiles;
+    void LocalTile(BITMAP* bitmap, int sx, int sy, int width, int height) {
+        if (bitmap_color_depth(bitmap) != 8 || width <= 0 || height <= 0) return;
+        Resource resource; resource.Width = uint16_t(width); resource.Height = uint16_t(height); resource.Depth = 8; resource.Pixels.resize(size_t(width) * height);
+        for (int y = 0; y < height; ++y) std::memcpy(resource.Pixels.data() + size_t(y) * width, bitmap->line[sy + y] + sx, width);
+        resource.ID = ResourceHash(resource); const uint64_t id = resource.ID; LocalTiles.try_emplace(id, std::move(resource));
     }
     uint64_t StaticAsset(BITMAP* bitmap) {
         if (auto found = StaticAssets.find(bitmap); found != StaticAssets.end() && Resources.contains(found->second)) { LastUsed[found->second] = WorldNow(); return found->second; }
@@ -375,7 +391,7 @@ void MultiplayerWorld::Reset() {
 }
 void MultiplayerWorld::ResetPresentation() {
     auto& impl = *m_Impl;
-    impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.SceneAssets.clear();
+    impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.TileRevisions.clear(); impl.SceneAssets.clear();
     impl.CameraPrediction.Reset();
     impl.Pointer.Reset(); impl.SceneLayers.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
@@ -595,14 +611,32 @@ void MultiplayerWorld::InstallSceneMap(const SceneMap& map) {
     m_Impl->SceneLayers.Install(map);
     for (const auto& n : map.Nodes) if (n.Type == Shape::Sprite) m_Impl->LastVisuals[n.ID] = n;
 }
-void MultiplayerWorld::PrimeSceneBackdrops(const Scene& scene) {
+void MultiplayerWorld::PrimeScene(const Scene& scene, const std::unordered_set<uint64_t>& wanted) {
     // Preset backdrops already contain passive, installed bitmap resources.
-    // Only matching content hashes are reused; terrain and gameplay stay on
-    // the host, and this never constructs actors or runs activity scripts.
+    // Only matching content hashes are reused; gameplay stays on the host, and
+    // this never constructs actors or runs activity scripts.
     for (const auto* layer : scene.GetBackLayers()) if (auto* bitmap = layer->GetBitmap()) {
         for (int y = 0; y < bitmap->h; y += TileSize) for (int x = 0; x < bitmap->w; x += TileSize)
             m_Impl->Asset(bitmap, x, y, std::min<int>(TileSize, bitmap->w - x), std::min<int>(TileSize, bitmap->h - y));
     }
+    // Most terrain is unchanged from the scene's own data. Rebuilding it here
+    // replaces downloading thousands of tiles; tiles that differ (damage,
+    // placed bunkers, random debris) do not match and still stream.
+    auto& impl = *m_Impl;
+    if (impl.LocalScene != scene.GetPresetName()) {
+        impl.LocalScene = scene.GetPresetName(); impl.LocalTiles.clear();
+        if (const auto* preset = scene.GetTerrain()) {
+            // Never drawn, so no GPU textures are created for these layers.
+            g_SceneLayersWithoutTextures = true;
+            std::unique_ptr<SLTerrain> terrain(dynamic_cast<SLTerrain*>(preset->Clone()));
+            if (terrain && terrain->LoadPresentationLayers() >= 0) for (BITMAP* bitmap : {terrain->GetBGColorBitmap(), terrain->GetFGColorBitmap()}) if (bitmap) {
+                for (int y = 0; y < bitmap->h; y += TileSize) for (int x = 0; x < bitmap->w; x += TileSize)
+                    impl.LocalTile(bitmap, x, y, std::min<int>(TileSize, bitmap->w - x), std::min<int>(TileSize, bitmap->h - y));
+            }
+            terrain.reset(); g_SceneLayersWithoutTextures = false;
+        }
+    }
+    for (const auto id : wanted) if (const auto tile = impl.LocalTiles.find(id); tile != impl.LocalTiles.end() && !impl.Resources.contains(id)) impl.Store(tile->second);
 }
 bool MultiplayerWorld::Install(Resource resource) {
     auto& impl = *m_Impl; if (resource.ID != ResourceHash(resource)) return false;
@@ -631,6 +665,9 @@ std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const 
 }
 bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !SceneryReady(snapshot)) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
+unsigned MultiplayerWorld::StaleTiles() const { return m_Impl->StaleTiles; }
+unsigned MultiplayerWorld::BlackTiles() const { return m_Impl->BlackTiles; }
+unsigned MultiplayerWorld::BlackFogTiles() const { return m_Impl->BlackFogTiles; }
 bool MultiplayerWorld::RenderedCenter(Vector& center) const {
     const auto& sample = m_Impl->LastSample; if (!sample.ID) return false;
     center.SetXY(sample.CameraX + sample.Width / 2.0f, sample.CameraY + sample.Height / 2.0f); return true;
@@ -722,7 +759,7 @@ bool MultiplayerWorld::VerifyPresentation(std::ostream& log) {
         input.MouseX -= 1300; SetLocalInput(input, true);
         for (uint64_t i = 1; i <= 90; ++i) Render(4020 + i * 16);
         image = static_cast<unsigned char*>(rlReadTexturePixels(Render(5476), 640, 360, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8));
-        check(image && !image[center] && !image[center + 1] && !image[center + 2], "a missing fog revision covers the world instead of exposing a previously clear region");
+        check(image && (image[center] || image[center + 1] || image[center + 2]), "a missing fog revision blacks out its tile instead of keeping the team's last fog");
         MemFree(image); Reset();
     }
     BeginTrails();
@@ -765,25 +802,42 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     impl.LastSample = scene;
     // An animation frame or changed terrain tile can arrive after its pose.
     // Retain its last complete visual while still presenting fresh movement.
-    std::unordered_set<uint64_t> visible;
+    std::unordered_set<uint64_t> visible; impl.StaleTiles = impl.BlackTiles = impl.BlackFogTiles = 0;
     for (auto& n : scene.Nodes) if (n.Type == Shape::Sprite) {
         visible.insert(n.ID);
         const bool fog = LayerOrdinal(n) == 102;
         // Terrain that is still streaming in is covered rather than shown as a
         // hole through to the sky or background.
         const bool terrain = LayerOrdinal(n) == 100 || LayerOrdinal(n) == 101;
-        const bool retained = !fog && !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
+        // A fog tile changes whenever an actor reveals more of it, so the tile
+        // around the player's own actor is usually one revision behind. Its last
+        // version shows only what this team has already seen; covering the whole
+        // tile instead hid the player's own surroundings for a round trip.
+        const bool retained = !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
+        const Node* arrived = nullptr;
+        if (LayerOrdinal(n)) {
+            auto& revisions = impl.TileRevisions[n.ID];
+            if (revisions.empty() || revisions.back().Asset != n.Asset) { revisions.push_back(n); if (revisions.size() > 6) revisions.pop_front(); }
+            if (retained && !impl.Resources.contains(n.Asset)) for (auto revision = revisions.rbegin(); revision != revisions.rend() && !arrived; ++revision) if (impl.Resources.contains(revision->Asset)) arrived = &*revision;
+        }
         if (impl.Resources.contains(n.Asset)) { if (retained) impl.LastVisuals[n.ID] = n; }
+        else if (arrived) {
+            impl.LastVisuals[n.ID] = *arrived; ++impl.StaleTiles;
+            n.Asset = arrived->Asset; n.SourceX = arrived->SourceX; n.SourceY = arrived->SourceY; n.SourceWidth = arrived->SourceWidth; n.SourceHeight = arrived->SourceHeight;
+            n.Width = arrived->Width; n.Height = arrived->Height; n.PivotX = arrived->PivotX; n.PivotY = arrived->PivotY;
+        }
         // The scene map seeds these visuals before every tile has streamed in,
         // so a previous visual is only usable once its own resource is present.
         else if (auto previous = impl.LastVisuals.find(n.ID); retained && previous != impl.LastVisuals.end() && impl.Resources.contains(previous->second.Asset)) {
             const auto& old = previous->second;
             n.Asset = old.Asset; n.SourceX = old.SourceX; n.SourceY = old.SourceY; n.SourceWidth = old.SourceWidth; n.SourceHeight = old.SourceHeight;
             n.Width = old.Width; n.Height = old.Height; n.PivotX = old.PivotX; n.PivotY = old.PivotY;
-        } else if (fog || terrain) { n.Type = Shape::Rectangle; n.Asset = 0; n.Color = g_BlackColor; n.Flags &= ~Masked; }
+            if (LayerOrdinal(n)) ++impl.StaleTiles;
+        } else if (fog || terrain) { n.Type = Shape::Rectangle; n.Asset = 0; n.Color = g_BlackColor; n.Flags &= ~Masked; ++(fog ? impl.BlackFogTiles : impl.BlackTiles); }
         else n.Asset = 0;
     }
     std::erase_if(impl.LastVisuals, [&](const auto& entry) { return !visible.contains(entry.first) && !LayerOrdinal(entry.second); });
+    std::erase_if(impl.TileRevisions, [&](const auto& entry) { return !visible.contains(entry.first); });
     if (!impl.Target || impl.Target->GetSize().w != scene.Width || impl.Target->GetSize().h != scene.Height) impl.Target = std::make_unique<RenderTarget>(FloatRect(0, 0, scene.Width, scene.Height), FloatRect(0, 0, scene.Width, scene.Height));
     impl.Target->Begin(); rlDisableDepthTest(); rlEnableColorBlend(); rlSetBlendMode(RL_BLEND_ALPHA);
     if (!impl.SceneShader) impl.SceneShader = std::make_unique<Shader>("Base.rte/Shaders/Blit8.vert", "Base.rte/Shaders/Replica.frag");
