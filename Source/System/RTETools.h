@@ -77,6 +77,7 @@ namespace RTE {
 	};
 
 	extern RandomGenerator g_RandomGenerator; //!< The global random number generator used in our simulation thread.
+	extern RandomGenerator g_PresentationRandomGenerator; //!< Random numbers for purely visual HUD effects, so drawing views never changes the simulation's random sequence.
 
 	/// Seed global the global random number generators.
 	void SeedRNG();

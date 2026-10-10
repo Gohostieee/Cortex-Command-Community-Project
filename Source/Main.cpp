@@ -348,11 +348,14 @@ void RunGameLoop() {
 
 		g_TimerMan.Update();
 		g_MultiplayerMan.Update();
+		const long long networkEndTime = g_TimerMan.GetAbsoluteTime();
+		int simulationSteps = 0;
 
 		// Simulation update, as many times as the fixed update step allows in the span since last frame draw.
 		while (g_TimerMan.TimeForSimUpdate()) {
 			ZoneScopedN("Simulation Update");
 
+			const bool catchingUp = simulationSteps++ > 0 && g_WindowMan.IsHeadless();
 			simulationUpdated = true;
 
 			g_PerformanceMan.NewPerformanceSample();
@@ -362,6 +365,14 @@ void RunGameLoop() {
 			g_PerformanceMan.StartPerformanceMeasurement(PerformanceMan::SimTotal);
 
 			g_LuaMan.Update();
+
+			// A dedicated server catching up after a slow loop still receives
+			// input and sends queued state between its simulation updates. This
+			// follows the Lua update, which waits for the previous update's
+			// asynchronous garbage collection to release every script state.
+			if (catchingUp) {
+				g_MultiplayerMan.Update();
+			}
 
 			g_UInputMan.Update();
 			g_MultiplayerMan.ApplyInputs();
@@ -392,6 +403,7 @@ void RunGameLoop() {
 			g_PresetMan.ClearReloadEntityPresetCalledThisUpdate();
 
 			g_PerformanceMan.StopPerformanceMeasurement(PerformanceMan::SimTotal);
+			g_MultiplayerMan.RecordSimulationUpdate();
 			g_UInputMan.EndFrame();
 
 			if (!g_ActivityMan.IsInActivity()) {
@@ -423,9 +435,12 @@ void RunGameLoop() {
 
 		if (g_WindowMan.IsHeadless()) {
 			if (simulationUpdated) { g_FrameMan.Draw(); }
+			const long long drawEndTime = g_TimerMan.GetAbsoluteTime();
 			// SDL's window/vsync pacing does not exist in the dedicated runtime.
-			// A short idle wait allows input/network processing between fixed ticks.
-			SDL_Delay(1);
+			// A short idle wait allows input/network processing between fixed
+			// ticks, but never while an overloaded server already owes an update.
+			if (!g_TimerMan.SimUpdateDue()) { SDL_Delay(1); }
+			g_MultiplayerMan.RecordServerLoop(networkEndTime - updateStartTime, updateEndAndDrawStartTime - networkEndTime, simulationSteps, drawEndTime - updateEndAndDrawStartTime, g_TimerMan.GetAbsoluteTime() - drawEndTime);
 		} else {
 			g_FrameMan.Draw();
 			g_WindowMan.DrawPostProcessBuffer();
@@ -513,6 +528,12 @@ int main(int argc, char** argv) {
 		allegro_exit();
 		SDL_Quit();
 		return EXIT_FAILURE;
+	}
+	if (headless) {
+		// A dedicated match should not slow for every player because one loop
+		// spent extra time capturing or sending; only a simulation that cannot
+		// keep up with real time dilates the match.
+		g_TimerMan.SetCatchUpSteps(3);
 	}
 	for (int i = 1; i + 1 < argc; ++i) {
 		const std::string argument = argv[i];

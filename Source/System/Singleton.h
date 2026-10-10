@@ -21,6 +21,10 @@ namespace RTE {
 		/// @return A reference to the sole instance of this Singleton.
 		inline static Type& Instance() { return *s_Instance; }
 
+		/// Tells whether this Singleton has been constructed, for code such as error handling that can run before startup completes.
+		/// @return Whether the sole instance exists.
+		inline static bool Exists() { return s_Instance != nullptr; }
+
 		/// Constructs this Singleton.
 		inline static void Construct() { s_Instance = new Type(); }
 

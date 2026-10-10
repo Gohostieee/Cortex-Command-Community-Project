@@ -24,6 +24,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <array>
 #include <filesystem>
@@ -154,10 +155,22 @@ bool System::PathExistsCaseSensitive(const std::string& pathToCheck) {
 		return std::filesystem::exists(pathToCheck);
 	}
 	// Use Hash for compiler independent hashing.
-	if (s_CaseSensitive) {
+	static bool workingTreeUnavailable = false;
+	if (s_CaseSensitive && !workingTreeUnavailable) {
 		if (s_WorkingTree.empty()) {
-			for (const std::filesystem::directory_entry& directoryEntry: std::filesystem::recursive_directory_iterator(s_WorkingDirectory, std::filesystem::directory_options::follow_directory_symlink)) {
-				s_WorkingTree.emplace_back(Hash(directoryEntry.path().generic_string().substr(s_WorkingDirectory.length())));
+			// An unreadable entry, a dangling link or a junction cycle anywhere in the
+			// install folder must not stop the game from starting. If the scan
+			// fails, fall back to the platform's own (case-insensitive) checks.
+			std::error_code error;
+			const auto options = std::filesystem::directory_options::follow_directory_symlink | std::filesystem::directory_options::skip_permission_denied;
+			for (std::filesystem::recursive_directory_iterator entry(s_WorkingDirectory, options, error), end; !error && entry != end; entry.increment(error)) {
+				s_WorkingTree.emplace_back(Hash(entry->path().generic_string().substr(s_WorkingDirectory.length())));
+			}
+			if (error) {
+				std::fprintf(stderr, "Case-sensitive path checks disabled; scanning %s failed: %s\n", s_WorkingDirectory.c_str(), error.message().c_str());
+				s_WorkingTree.clear();
+				workingTreeUnavailable = true;
+				return std::filesystem::exists(pathToCheck);
 			}
 		}
 		if (std::find(s_WorkingTree.begin(), s_WorkingTree.end(), Hash(pathToCheck)) != s_WorkingTree.end()) {

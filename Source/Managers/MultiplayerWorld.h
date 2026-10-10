@@ -30,12 +30,15 @@ public:
     bool Install(MP::World::Resource resource);
     bool Install(MP::World::Snapshot snapshot, uint64_t time);
     std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
+    bool SceneryReady(const MP::World::Snapshot& snapshot) const;
     std::vector<uint64_t> PrepareScene();
     MP::World::SceneMap PrepareSceneMap(int width, int height);
     void InstallSceneMap(const MP::World::SceneMap& map);
     void PrimeSceneBackdrops(const Scene& scene);
     void PinScene(const std::unordered_set<uint64_t>& assets);
     unsigned Render(uint64_t time);
+    // Center of the most recently rendered local camera, for the audio listener.
+    bool RenderedCenter(Vector& center) const;
     bool Ready() const;
     bool Paused() const;
     bool IsDeploying() const;

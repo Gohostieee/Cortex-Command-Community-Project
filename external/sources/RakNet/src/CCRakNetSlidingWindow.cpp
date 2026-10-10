@@ -29,6 +29,11 @@ static const CCTimeType SYN=10000;
 
 using namespace RakNet;
 
+static uint32_t s_MinimumWindowBytes = 0;
+
+void CCRakNetSlidingWindow::SetMinimumWindow(uint32_t bytes) { s_MinimumWindowBytes = bytes; }
+uint32_t CCRakNetSlidingWindow::GetMinimumWindow(void) { return s_MinimumWindowBytes; }
+
 // ****************************************************** PUBLIC METHODS ******************************************************
 
 CCRakNetSlidingWindow::CCRakNetSlidingWindow()
@@ -79,8 +84,11 @@ int CCRakNetSlidingWindow::GetTransmissionBandwidth(CCTimeType curTime, CCTimeTy
 
 	_isContinuousSend=isContinuousSend;
 
-	if (unacknowledgedBytes<=cwnd)
-		return (int) (cwnd-unacknowledgedBytes);
+	// The window still grows and backs off normally; the floor only bounds how
+	// far a random loss can shrink it below the application's own paced rate.
+	const double window = cwnd < (double) s_MinimumWindowBytes ? (double) s_MinimumWindowBytes : cwnd;
+	if (unacknowledgedBytes<=window)
+		return (int) (window-unacknowledgedBytes);
 	else
 		return 0;
 }

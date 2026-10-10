@@ -9,6 +9,7 @@
 namespace RTE {
 
 	RandomGenerator g_RandomGenerator;
+	RandomGenerator g_PresentationRandomGenerator;
 
 	void SeedRNG() {
 		// Use a constant seed for determinism.

@@ -203,48 +203,81 @@ inline std::vector<uint64_t> ManifestResources(std::span<const uint64_t> baselin
     for (const auto& node : map.Nodes) if (node.Asset && known.insert(node.Asset).second) assets.push_back(node.Asset);
     return assets;
 }
+// Reorders a manifest so tiles nearest the guest's first view stream first.
+// Map nodes are screen-relative for their own parallax layer; wrapped layers
+// measure the shorter way around their span.
+inline std::vector<uint64_t> NearestResources(std::span<const uint64_t> assets, const SceneMap& map, int width, int height) {
+    std::unordered_map<uint64_t, float> distance;
+    auto axis = [](float position, float extent, float span, int viewport) {
+        float d = std::abs(position + extent / 2 - viewport / 2.0f);
+        if (span > 0) { d = std::fmod(d, span); d = std::min(d, span - d); }
+        return std::max(0.0f, d - extent / 2 - viewport / 2.0f);
+    };
+    for (const auto& node : map.Nodes) if (node.Asset) {
+        const float d = std::max(axis(node.X, node.Width, node.X2, width), axis(node.Y, node.Height, node.Y2, height));
+        if (auto found = distance.find(node.Asset); found == distance.end() || d < found->second) distance[node.Asset] = d;
+    }
+    std::vector<uint64_t> ordered(assets.begin(), assets.end());
+    std::stable_sort(ordered.begin(), ordered.end(), [&](uint64_t a, uint64_t b) {
+        const auto da = distance.find(a), db = distance.find(b);
+        return (da == distance.end() ? std::numeric_limits<float>::max() : da->second) < (db == distance.end() ? std::numeric_limits<float>::max() : db->second);
+    });
+    return ordered;
+}
 inline unsigned LayerOrdinal(const Node& node) {
     if (!(node.Flags & Layer)) return 0;
     return node.ID & (uint64_t(1) << 62) ? unsigned((node.ID >> 48) & 0x3fff) :
         node.ID & (uint64_t(1) << 61) ? unsigned((node.ID >> 32) & 0xffff) : 0;
 }
-// The baseline supplies the entire passive map. Pose snapshots update only
-// nearby mutable tiles; travelling farther never discards already known tiles.
+inline constexpr unsigned ForegroundLayer = 101, FogLayer = 102;
+inline constexpr uint8_t PhaseEditing = 2;
+// The baseline supplies the entire passive map. Snapshots carry only tiles
+// that changed since the guest's acknowledged state, including team fog;
+// travelling farther never discards already known tiles.
 class RetainedLayers {
 public:
     void Reset() { m_Nodes.clear(); }
     void Install(const SceneMap& map) { Reset(); for (const auto& n : map.Nodes) Store(n, map.CameraX, map.CameraY); }
     void Update(const Snapshot& snapshot) { for (const auto& n : snapshot.Nodes) Store(n, snapshot.CameraX, snapshot.CameraY); }
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> assets; for (const auto& [id, n] : m_Nodes) if (n.Asset) assets.insert(n.Asset); return assets; }
+    // Assets of the retained tiles this view draws, so the first state can wait for its own surroundings.
+    void VisibleAssets(const Snapshot& snapshot, std::unordered_set<uint64_t>& assets) const {
+        for (const auto& [id, source] : m_Nodes) if (source.Asset && (LayerOrdinal(source) != FogLayer || snapshot.Phase != PhaseEditing)) { Node n = Placed(source, snapshot); if (Visible(n, snapshot)) assets.insert(n.Asset); }
+    }
     void Compose(Snapshot& snapshot) const {
         if (m_Nodes.empty()) return;
         std::vector<Node> nodes; nodes.reserve(m_Nodes.size() + snapshot.Nodes.size());
-        auto append = [&](bool foreground) {
-            for (const auto& [id, source] : m_Nodes) if ((LayerOrdinal(source) == 101) == foreground) {
-                auto n = source; n.X -= snapshot.CameraX * n.X3; n.Y -= snapshot.CameraY * n.Y3;
-                if (n.Type == Shape::Sprite) {
-                    const auto near = [](float value, float extent, float span, int viewport) {
-                        if (span > 0) { float d = std::fmod(value + extent / 2 - viewport / 2, span); if (d > span / 2) d -= span; if (d < -span / 2) d += span; value = viewport / 2 + d - extent / 2; }
-                        return value <= viewport && value + extent >= 0;
-                    };
-                    if (!near(n.X, n.Width, n.X2, snapshot.Width) || !near(n.Y, n.Height, n.Y2, snapshot.Height)) continue;
-                }
-                nodes.push_back(std::move(n));
+        // Backdrops and background terrain draw first, then objects, then the
+        // foreground terrain and the team's fog before any screen overlay.
+        auto group = [](unsigned ordinal) { return ordinal == FogLayer ? 2 : ordinal == ForegroundLayer ? 1 : 0; };
+        auto append = [&](int which) {
+            if (which == 2 && snapshot.Phase == PhaseEditing) return;
+            for (const auto& [id, source] : m_Nodes) if (group(LayerOrdinal(source)) == which) {
+                auto n = Placed(source, snapshot);
+                if (Visible(n, snapshot)) nodes.push_back(std::move(n));
             }
         };
-        append(false); bool foreground = false;
+        append(0); bool foreground = false;
         for (auto& n : snapshot.Nodes) {
-            const unsigned ordinal = LayerOrdinal(n);
-            if (ordinal && ordinal <= 101) continue;
-            if (!foreground && ((n.Flags & ScreenSpace) || (n.Flags & Additive))) { append(true); foreground = true; }
+            if (LayerOrdinal(n)) continue;
+            if (!foreground && ((n.Flags & ScreenSpace) || (n.Flags & Additive))) { append(1); append(2); foreground = true; }
             nodes.push_back(std::move(n));
         }
-        if (!foreground) append(true);
+        if (!foreground) { append(1); append(2); }
         snapshot.Nodes = std::move(nodes);
     }
 private:
+    static Node Placed(const Node& source, const Snapshot& snapshot) { Node n = source; n.X -= snapshot.CameraX * n.X3; n.Y -= snapshot.CameraY * n.Y3; return n; }
+    static bool Visible(const Node& n, const Snapshot& snapshot) {
+        if (n.Type != Shape::Sprite) return true;
+        const auto near = [](float value, float extent, float span, int viewport) {
+            if (span > 0) { float d = std::fmod(value + extent / 2 - viewport / 2, span); if (d > span / 2) d -= span; if (d < -span / 2) d += span; value = viewport / 2 + d - extent / 2; }
+            return value <= viewport && value + extent >= 0;
+        };
+        return near(n.X, n.Width, n.X2, snapshot.Width) && near(n.Y, n.Height, n.Y2, snapshot.Height);
+    }
     void Store(Node n, float cameraX, float cameraY) {
-        const unsigned ordinal = LayerOrdinal(n); if (!ordinal || ordinal > 101) return;
+        const unsigned ordinal = LayerOrdinal(n); if (!ordinal || ordinal > FogLayer) return;
         n.X += cameraX * n.X3; n.Y += cameraY * n.Y3;
         m_Nodes[n.ID] = std::move(n);
     }
@@ -282,20 +315,65 @@ class ResourceWindow {
 public:
     static constexpr size_t Limit = 128 * 1024;
     bool CanSend(size_t bytes) const { return bytes && bytes <= 1400 && m_Bytes + bytes <= Limit; }
-    void Sent(uint32_t message, uint16_t index, size_t bytes) {
-        if (CanSend(bytes) && m_Packets.try_emplace(Key(message, index), bytes).second) m_Bytes += bytes;
+    void Sent(uint32_t message, uint16_t index, size_t bytes, uint64_t now = 0) {
+        if (CanSend(bytes) && m_Packets.try_emplace(Key(message, index), Packet{bytes, now}).second) m_Bytes += bytes;
     }
-    bool Receipt(uint32_t message, uint16_t index) {
+    // A receipt also reports when its fragment left, for round-trip samples.
+    bool Receipt(uint32_t message, uint16_t index, uint64_t* sentAt = nullptr) {
         auto packet = m_Packets.find(Key(message, index)); if (packet == m_Packets.end()) return false;
-        m_Bytes -= packet->second; m_Packets.erase(packet); return true;
+        if (sentAt) *sentAt = packet->second.Time;
+        m_Bytes -= packet->second.Bytes; m_Packets.erase(packet); return true;
     }
     bool Contains(uint32_t message) const { return std::any_of(m_Packets.begin(), m_Packets.end(), [message](const auto& p) { return p.first >> 16 == message; }); }
     size_t Bytes() const { return m_Bytes; }
     void Reset() { m_Packets.clear(); m_Bytes = 0; }
 private:
+    struct Packet { size_t Bytes = 0; uint64_t Time = 0; };
     static uint64_t Key(uint32_t message, uint16_t index) { return (uint64_t(message) << 16) | index; }
-    std::unordered_map<uint64_t, size_t> m_Packets;
+    std::unordered_map<uint64_t, Packet> m_Packets;
     size_t m_Bytes = 0;
+};
+// Per-guest world send rate. Random WAN loss is not congestion, so loss alone
+// barely matters; queueing delay is. Like LEDBAT (RFC 6817) the uncongested
+// baseline is the minimum round trip over a few seconds, and each 500 ms window
+// compares its own fastest sample with it: jitter raises the median but rarely
+// the window minimum, while a standing queue raises every sample. The target
+// leaves room for one paced burst, client frame timing and WAN jitter; a link
+// that is really overfilled shows hundreds of milliseconds and loss together.
+class SendRate {
+public:
+    static constexpr double Floor = 32000, StartRate = 125000;
+    static constexpr uint64_t WindowMS = 500, BaselineMS = 5000, TargetQueueMS = 90, HeavyQueueMS = 180;
+    void Reset(double cap, uint64_t now) { *this = SendRate(); m_Cap = std::max(Floor, cap); m_Rate = std::min(m_Cap, StartRate); m_WindowStart = now; m_BaselineStart = now; }
+    void SetCap(double cap) { m_Cap = std::max(Floor, cap); m_Rate = std::min(m_Rate, m_Cap); }
+    double Rate() const { return m_Rate; }
+    double Cap() const { return m_Cap; }
+    uint64_t BaseRtt() const { return std::min(m_BaseCurrent, m_BasePrevious); }
+    uint64_t QueueDelay() const { return m_QueueDelay; }
+    void Sample(uint64_t rtt) { m_WindowMin = std::min(m_WindowMin, rtt); m_BaseCurrent = std::min(m_BaseCurrent, rtt); ++m_Samples; }
+    // Called when queued world data had to wait for rate credit.
+    void Limited() { m_Limited = true; }
+    void Update(uint64_t now, double lossFraction = 0) {
+        if (!m_Cap) return;
+        if (now - m_BaselineStart >= BaselineMS) { m_BasePrevious = m_BaseCurrent; m_BaseCurrent = UINT64_MAX; m_BaselineStart = now; }
+        if (now - m_WindowStart < WindowMS) return;
+        if (m_Samples) {
+            const uint64_t base = BaseRtt();
+            m_QueueDelay = m_WindowMin > base ? m_WindowMin - base : 0;
+            // One noisy window is not a queue: back off when the delay persists.
+            const bool queued = m_QueueDelay > TargetQueueMS, heavy = m_QueueDelay > HeavyQueueMS;
+            if ((heavy && m_Queued) || lossFraction > .25) { m_Rate = std::max(Floor, m_Rate * .7); m_SlowStart = false; }
+            else if ((queued && m_Queued) || lossFraction > .15) { m_Rate = std::max(Floor, m_Rate * .9); m_SlowStart = false; }
+            else if (m_Limited && !queued) m_Rate = std::min(m_Cap, m_SlowStart ? m_Rate * 1.5 : m_Rate + std::max(8000.0, m_Cap * .05));
+            m_Queued = queued;
+        }
+        m_WindowStart = now; m_WindowMin = UINT64_MAX; m_Samples = 0; m_Limited = false;
+    }
+private:
+    double m_Cap = 0, m_Rate = 0;
+    uint64_t m_WindowStart = 0, m_BaselineStart = 0, m_WindowMin = UINT64_MAX, m_BaseCurrent = UINT64_MAX, m_BasePrevious = UINT64_MAX, m_QueueDelay = 0;
+    unsigned m_Samples = 0;
+    bool m_Limited = false, m_SlowStart = true, m_Queued = false;
 };
 // Limit reliable repair traffic independently of the number of missing tiles.
 // Oldest requests go first so a large map cannot starve its last missing asset.
@@ -331,15 +409,19 @@ inline bool ReadChunk(Reader& reader, Chunk& c) {
     if (!reader.U32(c.ID) || !reader.U32(c.Size) || !reader.U16(c.Index) || !reader.U8(parity) || parity > 1) return false;
     c.Parity = parity != 0; c.Bytes = reader.Rest(); return ValidChunk(c);
 }
+// Snapshots keep only a few partial states. Reliable resources arrive
+// unordered, so many tiles' fragments interleave under loss; evicting a
+// partial tile would discard fragments the transport will never resend.
 class Assembler {
 public:
-    explicit Assembler(uint64_t expiryMS = 5000) : m_ExpiryMS(expiryMS) {}
+    explicit Assembler(uint64_t expiryMS = 5000, size_t maxPending = 4, size_t maxBytes = MaxPackedPayload * 4) : m_ExpiryMS(expiryMS), m_MaxPending(maxPending), m_MaxBytes(maxBytes) {}
     std::optional<std::vector<uint8_t>> Push(const Chunk& c, uint64_t now) {
         if (!ValidChunk(c)) return {};
         std::erase_if(m_Pending, [this, now](const Pending& p) { return now - p.Start > m_ExpiryMS; });
         auto found = std::find_if(m_Pending.begin(), m_Pending.end(), [&](const Pending& p) { return p.ID == c.ID; });
         if (found == m_Pending.end()) {
-            if (m_Pending.size() >= 4) m_Pending.pop_front();
+            size_t bytes = c.Size; for (const auto& p : m_Pending) bytes += p.Bytes.size();
+            while (!m_Pending.empty() && (m_Pending.size() >= m_MaxPending || bytes > m_MaxBytes)) { bytes -= m_Pending.front().Bytes.size(); m_Pending.pop_front(); }
             m_Pending.push_back({c.ID, now, std::vector<uint8_t>(c.Size), std::vector<bool>((c.Size + ChunkBytes - 1) / ChunkBytes), {}, 0}); found = std::prev(m_Pending.end());
         }
         if (found->Bytes.size() != c.Size) return {};
@@ -363,6 +445,7 @@ private:
     struct Pending { uint32_t ID; uint64_t Start; std::vector<uint8_t> Bytes; std::vector<bool> Have; std::unordered_map<uint16_t, std::vector<uint8_t>> Parity; size_t Received; };
     std::deque<Pending> m_Pending;
     uint64_t m_ExpiryMS;
+    size_t m_MaxPending, m_MaxBytes;
 };
 inline float Displacement(float from, float to, float span, bool wrap) {
     float d = to - from;
@@ -511,22 +594,47 @@ private:
     uint32_t m_MouseX = 0, m_MouseY = 0;
     float m_X = 0, m_Y = 0, m_TargetX = 0, m_TargetY = 0, m_CursorX = 0, m_CursorY = 0;
 };
+// The presentation delay follows measured delivery instead of a fixed 75 ms:
+// it must cover one update interval plus the arrival jitter, or presentation
+// runs past the newest state and extrapolates or freezes. Source's default
+// interpolation is likewise two 20 Hz intervals (100 ms).
+inline constexpr uint32_t MinimumDelayMS = 40, MaximumDelayMS = 250;
 class Timeline {
 public:
     bool Push(Snapshot snapshot, uint64_t received) {
         if (!snapshot.ID || !snapshot.Time || snapshot.Time > MaxTime || received > MaxTime) return false;
         if (!m_States.empty() && (!Newer(snapshot.ID, m_States.back().ID) || snapshot.Time <= m_States.back().Time)) return false;
         // Minimum arrival offset avoids translating packet jitter into animation.
+        // It may rise slowly (8 ms/s), so a lasting route change does not leave
+        // every later state late against an old, faster path.
         const int64_t offset = int64_t(received) - int64_t(snapshot.Time);
-        m_Offset = m_States.empty() ? offset : std::min(m_Offset, offset);
+        if (m_States.empty()) m_Offset = offset;
+        else m_Offset = std::min(offset, m_Offset + int64_t(received - std::min(received, m_LastReceived)) / 128);
+        // Each state must arrive before presentation passes its predecessor.
+        // Loading cadence and outages (200 ms or more) are excluded; a stalled
+        // stream freezes rather than buffering every later state that long.
+        if (!m_States.empty() && snapshot.Time - m_States.back().Time < 200) {
+            m_Required[m_RequiredNext++ % m_Required.size()] = uint32_t(std::clamp<int64_t>(int64_t(snapshot.Time - m_States.back().Time) + offset - m_Offset, 0, MaximumDelayMS));
+            const size_t count = std::min<size_t>(m_RequiredNext, m_Required.size());
+            if (count >= 16) {
+                std::array<uint32_t, 64> sorted{}; std::copy_n(m_Required.begin(), count, sorted.begin()); std::sort(sorted.begin(), sorted.begin() + count);
+                m_TargetDelay = float(std::clamp<uint32_t>(sorted[count * 9 / 10] + 5, MinimumDelayMS, MaximumDelayMS));
+            }
+        }
+        m_LastReceived = received;
         m_States.push_back(std::move(snapshot)); while (m_States.size() > 8) m_States.pop_front(); return true;
     }
     bool Empty() const { return m_States.empty(); }
     const Snapshot& Latest() const { return m_States.back(); }
+    float Delay() const { return m_Delay; }
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> ids; for (const auto& s : m_States) for (const auto& n : s.Nodes) if (n.Asset) ids.insert(n.Asset); return ids; }
     Snapshot Sample(uint64_t now) const {
         if (m_States.empty()) return {};
-        const int64_t target = int64_t(now) - m_Offset - InterpolationMS;
+        // Change the delay gradually (at most 10% of elapsed time) so presentation
+        // speeds up or slows down slightly instead of jumping.
+        if (m_LastSample && now > m_LastSample) { const float step = float(std::min<uint64_t>(now - m_LastSample, 100)) * .1f; m_Delay += std::clamp(m_TargetDelay - m_Delay, -step, step); }
+        m_LastSample = now;
+        const int64_t target = int64_t(now) - m_Offset - int64_t(m_Delay);
         const Snapshot* before = &m_States.front(); const Snapshot* after = before;
         for (const auto& state : m_States) { if (int64_t(state.Time) <= target) before = &state; if (int64_t(state.Time) >= target) { after = &state; break; } after = &state; }
         // After the newest update, a small bounded continuation covers jitter;
@@ -600,9 +708,15 @@ public:
         for (const auto& n : m_States.back().Nodes) if ((n.Flags & ScreenSpace) && !(n.Flags & Layer)) result.Nodes.push_back(n);
         return result;
     }
-    void Reset() { m_States.clear(); m_Offset = 0; }
+    void Reset() { *this = Timeline(); }
 private:
     std::deque<Snapshot> m_States;
     int64_t m_Offset = 0;
+    uint64_t m_LastReceived = 0;
+    std::array<uint32_t, 64> m_Required{};
+    size_t m_RequiredNext = 0;
+    float m_TargetDelay = float(InterpolationMS);
+    mutable float m_Delay = float(InterpolationMS);
+    mutable uint64_t m_LastSample = 0;
 };
 } // namespace RTE::MP::World

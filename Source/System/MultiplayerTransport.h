@@ -7,7 +7,11 @@
 #include <vector>
 
 namespace RTE::MP {
-enum class Delivery { Control, Input, State, Audio, WorldResource };
+// Enough in-flight data for a 12 Mbps guest across a 160 ms round trip.
+inline constexpr uint32_t MinimumWindowBytes = 256 * 1024;
+// Receipt is reliable but unordered: one lost acknowledgement must not hold
+// every later receipt (and so the resource window) behind it.
+enum class Delivery { Control, Input, State, Audio, WorldResource, Receipt };
 struct TransportEvent {
 	enum class Type { Connected, Disconnected, Failed, Data, Discovered, RoomCode, ServiceStatus, HostedRoom };
 	Type Kind{};
@@ -38,6 +42,8 @@ public:
 	int Ping(const std::string& address) const;
 	std::vector<std::string> LocalAddresses(uint16_t port) const;
 	uint64_t QueuedBytes(const std::string& address) const;
+	// Fraction of datagrams to this peer that needed retransmission in the last second.
+	double PacketLoss(const std::string& address) const;
 	std::string Diagnostics(const std::string& address) const;
 private:
 	struct Impl;

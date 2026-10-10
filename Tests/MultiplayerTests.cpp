@@ -14,7 +14,7 @@ void Check(bool pass, const char* message) { if (!pass) throw std::runtime_error
 uint64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 void Wire() {
 	Writer writer(Kind::Input, 0x0102030405060708ull, 0x090a0b0c);
-    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 7, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::vector<uint8_t> fixture{220, 0x43, 0x43, 0x4d, 0x50, 0, 8, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 	Check(writer.Data == fixture, "wire header fixture differs");
 	Input input; input.Sequence = 7; input.Held = (uint64_t(1) << 33) | (uint64_t(1) << 63); input.Presses[33] = 8; input.Presses[63] = 9; input.MouseX = 0xffffffff; input.AimY = -0.75f;
 	input.ViewValid = input.CursorValid = input.PointerValid = true; input.ViewX = 2500; input.CursorMode = 3; input.CursorX = 2820; input.PointerX = 100;
@@ -308,8 +308,44 @@ void TransportLoopback() {
 	Check(disconnected, "disconnect not delivered");
 	for (int cycle = 0; cycle < 20; ++cycle) { Check(client.Start(false, 0, "", error), "transport restart failed"); client.Stop(); }
 }
+void Adaptation() {
+    namespace W = World;
+    // Random loss and jitter alone keep the full configured rate.
+    W::SendRate rate; rate.Reset(375000, 0); std::mt19937 random(7);
+    for (uint64_t t = 0; t < 20000; t += 10) { rate.Sample(120 + random() % 40); rate.Limited(); rate.Update(t, .03); }
+    Check(rate.Rate() == rate.Cap(), "random loss and jitter reduced the send rate");
+    // A standing queue (rising round trip) backs off to a fraction of the cap.
+    for (uint64_t t = 20000, queue = 0; t < 26000; t += 10) { queue = std::min<uint64_t>(250, queue + 1); rate.Sample(120 + queue); rate.Limited(); rate.Update(t); }
+    Check(rate.Rate() < rate.Cap() * .5, "a growing queue did not reduce the send rate");
+    const double reduced = rate.Rate();
+    for (uint64_t t = 26000; t < 36000; t += 10) { rate.Sample(120); rate.Limited(); rate.Update(t); }
+    Check(rate.Rate() > reduced * 2, "the send rate did not recover once the queue drained");
+    W::SendRate idle; idle.Reset(375000, 0); for (uint64_t t = 0; t < 5000; t += 10) { idle.Sample(80); idle.Update(t); }
+    Check(idle.Rate() == W::SendRate::StartRate, "an idle connection grew its rate without demand");
+
+    // Nearest tiles stream first; wrapped layers measure the short way around.
+    W::SceneMap map; W::Node near, far, wrapped;
+    near.ID = 1; near.Asset = 11; near.X = 300; near.Y = 160; near.Width = near.Height = 64;
+    far.ID = 2; far.Asset = 12; far.X = 3000; far.Y = 160; far.Width = far.Height = 64;
+    wrapped.ID = 3; wrapped.Asset = 13; wrapped.X = 3900; wrapped.Y = 160; wrapped.Width = wrapped.Height = 64; wrapped.X2 = 4000;
+    map.Nodes = {far, wrapped, near};
+    const std::vector<uint64_t> assets{12, 13, 99, 11};
+    const auto ordered = W::NearestResources(assets, map, 640, 360);
+    Check(ordered.size() == 4 && ordered[0] == 11 && ordered[1] == 13 && ordered[2] == 12 && ordered[3] == 99, "scene resources did not stream nearest-first");
+
+    // The presentation delay follows the measured interval and jitter.
+    auto adapt = [](unsigned jitter) {
+        W::Timeline timeline; std::mt19937 random(3); W::Snapshot state; state.Width = state.SceneWidth = 640; state.Height = state.SceneHeight = 360;
+        for (uint32_t i = 1; i <= 80; ++i) { state.ID = i; state.Time = 1000 + i * 50; timeline.Push(state, state.Time + 30 + (jitter ? random() % jitter : 0)); timeline.Sample(state.Time + 30); }
+        for (uint64_t t = 5100; t < 9000; t += 16) timeline.Sample(t);
+        return timeline.Delay();
+    };
+    const float steady = adapt(0), jittery = adapt(60);
+    Check(steady >= 50 && steady <= 60, "steady 20 Hz delivery did not settle near one interval");
+    Check(jittery > steady + 30 && jittery <= float(W::MaximumDelayMS), "jittery delivery did not lengthen the presentation delay");
+}
 }
 int main() {
-	try { Wire(); Inputs(); Worlds(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
+	try { Wire(); Inputs(); Worlds(); Adaptation(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }
 	catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

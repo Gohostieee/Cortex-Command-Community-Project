@@ -22,6 +22,7 @@
 #include "SettingsMan.h"
 #include "LuaMan.h"
 #include "ThreadMan.h"
+#include "WindowMan.h"
 
 #include "tracy/Tracy.hpp"
 
@@ -1281,8 +1282,9 @@ void MovableMan::Update() {
 
 	// ---TEMP ---
 	// These are here for multithreaded AI, but will be unnecessary when multithreaded-sim-and-render is in!
-	// Clear the MO color layer only if this is a drawn update
-	if (g_TimerMan.DrawnSimUpdate()) {
+	// Clear the MO color layer only if this is a drawn update. A dedicated
+	// server never presents that layer; guests receive captured object state.
+	if (g_TimerMan.DrawnSimUpdate() && !g_WindowMan.IsHeadless()) {
 		g_SceneMan.ClearMOColorLayer();
 	}
 
@@ -1687,9 +1689,11 @@ void MovableMan::Update() {
 	});
 
 	////////////////////////////////////////////////////////////////////
-	// Draw the MO colors ONLY if this is a drawn update!
+	// Draw the MO colors ONLY if this is a drawn update! The headless server
+	// skips this scene-wide draw: nothing displays it, and its capture hooks
+	// would collect every object a second time each loop.
 
-	if (g_TimerMan.DrawnSimUpdate()) {
+	if (g_TimerMan.DrawnSimUpdate() && !g_WindowMan.IsHeadless()) {
 		Draw(g_SceneMan.GetMOColorBitmap());
 	}
 

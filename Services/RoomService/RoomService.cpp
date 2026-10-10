@@ -1,8 +1,11 @@
 // Standalone invitation-code broker and bounded room relay. No game assets or GPU.
 #include "MultiplayerRelay.h"
 #include "HostedWorkers.h"
+#include "MultiplayerTransport.h"
 #include "RakPeerInterface.h"
 #include "RakNetStatistics.h"
+#include "RakNetDefines.h"
+#include "CCRakNetSlidingWindow.h"
 #include "MessageIdentifiers.h"
 #include <chrono>
 #include <csignal>
@@ -165,6 +168,9 @@ public:
  bool Start(uint16_t port, const std::string& bind, size_t maxRooms, double mbps, const std::string& metrics, const HostedWorkers::Settings& hosted) {
   Workers.Config = hosted;
   MaxRooms = maxRooms; BytesPerSecond = mbps * 125000; MetricsPath = metrics;
+  // The relay paces each room with BytesPerSecond; random WAN loss must not
+  // collapse a relayed game stream to one datagram per round trip.
+  RakNet::CCRakNetSlidingWindow::SetMinimumWindow(RTE::MP::MinimumWindowBytes);
   RakNet::SocketDescriptor socket(port, bind.c_str()); socket.socketFamily = AF_INET;
   const auto maxConnections = static_cast<unsigned>(std::min<size_t>(4096, MaxRooms * 4 + 32));
   if (Peer->Startup(maxConnections, &socket, 1) != RakNet::RAKNET_STARTED) return false;

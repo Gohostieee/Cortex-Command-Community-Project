@@ -44,6 +44,9 @@ public:
 	void EndWorldCapture();
 	void BeginGuestView(BITMAP* gui, float cameraX, float cameraY);
 	void EndGuestView(int player);
+	// Opt-in server profiling (CCCP_MPBENCHMARK): per-stage loop and capture timing.
+	void RecordSimulationUpdate();
+	void RecordServerLoop(long long networkUs, long long simulationUs, int simulationUpdates, long long drawUs, long long idleUs);
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_Impl;

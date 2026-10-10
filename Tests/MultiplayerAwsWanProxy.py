@@ -21,6 +21,9 @@ def main():
     parser.add_argument('--mbps', type=float, default=3)
     parser.add_argument('--duration', type=int, default=600)
     parser.add_argument('--stop-file')
+    # Jitter from router queues keeps datagrams in order. Independent per-packet
+    # delays reorder them, which reliable UDP mistakes for loss and resends.
+    parser.add_argument('--reorder', action='store_true', help='delay each datagram independently, allowing reordering')
     args = parser.parse_args()
     rng = random.Random(20261009)
     listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -52,7 +55,7 @@ def main():
                             upstream.ioctl(socket.SIO_UDP_CONNRESET, False)
                         upstream.bind(('0.0.0.0', 0))
                         upstream.setblocking(False)
-                        clients[address] = upstreams[upstream] = {'socket': upstream, 'address': address, 'up': now, 'down': now}
+                        clients[address] = upstreams[upstream] = {'socket': upstream, 'address': address, 'up': now, 'down': now, 'up_arrival': now, 'down_arrival': now}
                     client, direction = clients[address], 'up'
                     target_socket, target = client['socket'], (args.server, args.server_port)
                 else:
@@ -68,7 +71,11 @@ def main():
                 duration = (len(data) + 28) / (args.mbps * 125000)
                 client[direction] = start + duration
                 delay = max(0, args.delay_ms + rng.uniform(-args.jitter_ms, args.jitter_ms)) / 1000
-                heapq.heappush(queue, (start + duration + delay, next(serial), target_socket, data, target))
+                arrival = start + duration + delay
+                if not args.reorder:
+                    arrival = max(arrival, client[direction + '_arrival'])
+                    client[direction + '_arrival'] = arrival
+                heapq.heappush(queue, (arrival, next(serial), target_socket, data, target))
         now = time.monotonic()
         while queue and queue[0][0] <= now:
             _, _, sock, data, target = heapq.heappop(queue)

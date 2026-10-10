@@ -40,6 +40,14 @@ long long TimerMan::GetAbsoluteTime() const {
 	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+bool TimerMan::SimUpdateDue() const {
+	if (m_SimPaused) {
+		return false;
+	}
+	const long long realTicks = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - m_StartTime).count();
+	return m_SimAccumulator + static_cast<long long>(static_cast<float>(realTicks - m_RealTimeTicks) * m_TimeScale) >= m_DeltaTime;
+}
+
 float TimerMan::GetRealToSimCap() const {
 	return c_RealToSimCap;
 }
@@ -80,8 +88,8 @@ void TimerMan::Update() {
 	long long prevTime = m_RealTimeTicks;
 	m_RealTimeTicks = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - m_StartTime).count();
 
-	// Cap timeIncrease if too long (as when the app went out of focus), to c_RealToSimCap.
-	long long timeIncrease = std::min(m_RealTimeTicks - prevTime, static_cast<long long>(c_RealToSimCap * m_TicksPerSecond));
+	// Cap timeIncrease if too long (as when the app went out of focus), to c_RealToSimCap per permitted catch-up step.
+	long long timeIncrease = std::min(m_RealTimeTicks - prevTime, static_cast<long long>(c_RealToSimCap * m_TicksPerSecond) * m_CatchUpSteps);
 
 	RTEAssert(timeIncrease > 0, "It seems your CPU is giving bad timing data to the game, this is known to happen on some multi-core processors. This may be fixed by downloading the latest CPU drivers from AMD or Intel.");
 
@@ -93,7 +101,14 @@ void TimerMan::Update() {
 	float maxPossibleSimSpeed = GetDeltaTimeMS() / std::max(g_PerformanceMan.GetMSPSUAverage(), std::numeric_limits<float>::epsilon());
 
 	// Make sure we don't get runaway behind schedule
-	m_SimAccumulator = std::min(m_SimAccumulator, m_DeltaTime + static_cast<long long>(m_DeltaTime * maxPossibleSimSpeed));
+	long long accumulatorCap = m_DeltaTime + static_cast<long long>(m_DeltaTime * maxPossibleSimSpeed);
+	// Catch up only while one update costs clearly less than the real time it represents.
+	// A simulation that cannot keep up still dilates time rather than spiralling.
+	const float simulationCost = g_PerformanceMan.GetSimTotalAverageMS();
+	if (m_CatchUpSteps > 1 && simulationCost > 0 && simulationCost < GetDeltaTimeMS() * 0.85F) {
+		accumulatorCap = std::max(accumulatorCap, m_DeltaTime * m_CatchUpSteps);
+	}
+	m_SimAccumulator = std::min(m_SimAccumulator, accumulatorCap);
 
 	RTEAssert(m_SimAccumulator >= 0, "Negative sim time accumulator?!");
 

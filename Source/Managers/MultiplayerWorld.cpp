@@ -503,11 +503,27 @@ bool MultiplayerWorld::Install(Resource resource) {
     auto& impl = *m_Impl; if (resource.ID != ResourceHash(resource)) return false;
     return impl.Store(std::move(resource));
 }
-std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const {
-    std::unordered_set<uint64_t> ids; for (const auto& node : snapshot.Nodes) if (node.Asset && !m_Impl->Resources.contains(node.Asset)) ids.insert(node.Asset); return {ids.begin(), ids.end()};
+bool MultiplayerWorld::SceneryReady(const Snapshot& snapshot) const {
+    // The first view waits for the terrain and scenery it shows. Objects,
+    // effects and HUD images appear as they arrive, as they do afterwards;
+    // combat keeps introducing new ones, so waiting for all could never end.
+    for (const auto& node : snapshot.Nodes) if (node.Asset && LayerOrdinal(node) && !m_Impl->Resources.contains(node.Asset)) return false;
+    std::unordered_set<uint64_t> visible; m_Impl->SceneLayers.VisibleAssets(snapshot, visible);
+    return std::all_of(visible.begin(), visible.end(), [&](uint64_t id) { return m_Impl->Resources.contains(id); });
 }
-bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !Missing(snapshot).empty()) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
+std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const {
+    std::unordered_set<uint64_t> ids; for (const auto& node : snapshot.Nodes) if (node.Asset && !m_Impl->Resources.contains(node.Asset)) ids.insert(node.Asset);
+    // Snapshots carry only changed tiles; the retained map supplies the rest of this view.
+    std::unordered_set<uint64_t> visible; m_Impl->SceneLayers.VisibleAssets(snapshot, visible);
+    for (auto id : visible) if (!m_Impl->Resources.contains(id)) ids.insert(id);
+    return {ids.begin(), ids.end()};
+}
+bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !SceneryReady(snapshot)) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
+bool MultiplayerWorld::RenderedCenter(Vector& center) const {
+    const auto& sample = m_Impl->LastSample; if (!sample.ID) return false;
+    center.SetXY(sample.CameraX + sample.Width / 2.0f, sample.CameraY + sample.Height / 2.0f); return true;
+}
 bool MultiplayerWorld::Paused() const { return Ready() && m_Impl->States.Latest().Paused; }
 bool MultiplayerWorld::IsDeploying() const { return Ready() && m_Impl->LastSample.Phase == Activity::Editing; }
 int MultiplayerWorld::Width() const { return Ready() ? m_Impl->States.Latest().Width : 0; }
@@ -642,13 +658,18 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     for (auto& n : scene.Nodes) if (n.Type == Shape::Sprite) {
         visible.insert(n.ID);
         const bool fog = LayerOrdinal(n) == 102;
+        // Terrain that is still streaming in is covered rather than shown as a
+        // hole through to the sky or background.
+        const bool terrain = LayerOrdinal(n) == 100 || LayerOrdinal(n) == 101;
         const bool retained = !fog && !(n.Flags & Discontinuous) && (!(n.Flags & ScreenSpace) || (n.Flags & MP::World::Layer));
         if (impl.Resources.contains(n.Asset)) { if (retained) impl.LastVisuals[n.ID] = n; }
-        else if (auto previous = impl.LastVisuals.find(n.ID); retained && previous != impl.LastVisuals.end()) {
+        // The scene map seeds these visuals before every tile has streamed in,
+        // so a previous visual is only usable once its own resource is present.
+        else if (auto previous = impl.LastVisuals.find(n.ID); retained && previous != impl.LastVisuals.end() && impl.Resources.contains(previous->second.Asset)) {
             const auto& old = previous->second;
             n.Asset = old.Asset; n.SourceX = old.SourceX; n.SourceY = old.SourceY; n.SourceWidth = old.SourceWidth; n.SourceHeight = old.SourceHeight;
             n.Width = old.Width; n.Height = old.Height; n.PivotX = old.PivotX; n.PivotY = old.PivotY;
-        } else if (fog) { n.Type = Shape::Rectangle; n.Asset = 0; n.Color = g_BlackColor; n.Flags &= ~Masked; }
+        } else if (fog || terrain) { n.Type = Shape::Rectangle; n.Asset = 0; n.Color = g_BlackColor; n.Flags &= ~Masked; }
         else n.Asset = 0;
     }
     std::erase_if(impl.LastVisuals, [&](const auto& entry) { return !visible.contains(entry.first) && !LayerOrdinal(entry.second); });
@@ -665,7 +686,9 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
             (std::abs(Displacement(scene.CameraX + scene.Width / 2, n.X, scene.SceneWidth, scene.Wrap & 1)) > scene.Width / 2 + n.Width + n.Height ||
              std::abs(Displacement(scene.CameraY + scene.Height / 2, n.Y, scene.SceneHeight, scene.Wrap & 2)) > scene.Height / 2 + n.Width + n.Height)) continue;
         Texture2D texture{};
-        const bool trueColor = n.Type == Shape::Sprite && impl.Resources.at(n.Asset).Depth == 32;
+        const auto resource = n.Type == Shape::Sprite ? impl.Resources.find(n.Asset) : impl.Resources.end();
+        if (n.Type == Shape::Sprite && resource == impl.Resources.end()) continue;
+        const bool trueColor = n.Type == Shape::Sprite && resource->second.Depth == 32;
         if (n.Asset) impl.LastUsed[n.Asset] = time;
         if (n.Type == Shape::Sprite) { if (!impl.Textures.contains(n.Asset)) rlDrawRenderBatchActive(); texture = impl.Texture(n.Asset); if (!texture.id) continue; }
         float x = n.X, y = n.Y;
@@ -707,7 +730,7 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
             }
             else if (n.Type == Shape::Pixel) DrawRectangle(int(x), int(y), 1, 1, color);
             else if (n.Type == Shape::Rectangle) {
-                const float spanX = LayerOrdinal(n) == 102 ? n.X2 : 0, spanY = LayerOrdinal(n) == 102 ? n.Y2 : 0;
+                const float spanX = LayerOrdinal(n) >= 100 ? n.X2 : 0, spanY = LayerOrdinal(n) >= 100 ? n.Y2 : 0;
                 const int firstX = spanX > 0 ? int(std::ceil((-x - n.Width) / spanX)) : 0, lastX = spanX > 0 ? int(std::floor((scene.Width - x) / spanX)) : 0;
                 const int firstY = spanY > 0 ? int(std::ceil((-y - n.Height) / spanY)) : 0, lastY = spanY > 0 ? int(std::floor((scene.Height - y) / spanY)) : 0;
                 for (int ry = firstY; ry <= lastY; ++ry) for (int rx = firstX; rx <= lastX; ++rx)
@@ -730,7 +753,8 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
             }
         }
     }
-    rlDrawRenderBatchActive(); glDisable(GL_SCISSOR_TEST); rlSetBlendMode(RL_BLEND_ALPHA); shader.End(); impl.Target->End(); ++impl.RenderCount; return impl.Target->GetColorTexture().id;
+    rlDrawRenderBatchActive(); glDisable(GL_SCISSOR_TEST); rlSetBlendMode(RL_BLEND_ALPHA); shader.End(); impl.Target->End(); ++impl.RenderCount;
+    return impl.Target->GetColorTexture().id;
 }
 bool MultiplayerWorld::CanvasSprite(BITMAP* bitmap, Rectangle source, Rectangle dest, Vector2 pivot, float angle, RLColor tint, BITMAP* target) {
     if (!canvasCollector || !Impl::CanvasFor(target ? target : canvasCollector->m_Impl->GUI)) return false;

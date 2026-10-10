@@ -182,7 +182,12 @@ class CCRakNetSlidingWindow
 	static bool LessThan(DatagramSequenceNumberType a, DatagramSequenceNumberType b);
 //	void SetTimeBetweenSendsLimit(unsigned int bitsPerSecond);
 	uint64_t GetBytesPerSecondLimitByCongestionControl(void) const;
-	  
+
+	/// Applications that pace their own sends can stop random, non-congestive
+	/// loss from collapsing the window to one datagram. Zero keeps the stock behavior.
+	static void SetMinimumWindow(uint32_t bytes);
+	static uint32_t GetMinimumWindow(void);
+
 	protected:
 
 	// Maximum amount of bytes that the user can send, e.g. the size of one full datagram

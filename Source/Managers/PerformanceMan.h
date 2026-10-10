@@ -111,6 +111,15 @@ namespace RTE {
 		/// Resets the sim update timer.
 		void ResetSimUpdateTimer() const { m_SimUpdateTimer->Reset(); }
 
+		/// Gets the average cost of one complete simulation update over recent samples, excluding drawing and networking between updates.
+		/// @return The average simulation update cost in milliseconds, or 0 before any update was measured.
+		float GetSimTotalAverageMS() const { return static_cast<float>(GetPerformanceCounterAverage(PerformanceCounters::SimTotal)) / 1000.0F; }
+
+		/// Gets the time recorded so far in the current sample of a performance counter.
+		/// @param counter The counter to read.
+		/// @return The accumulated time for the current simulation update in microseconds.
+		uint64_t GetCurrentSample(PerformanceCounters counter) const { return m_PerfData[counter][m_Sample]; }
+
 		/// Updates the frame time measurements and recalculates the averages. Supposed to be done every game loop iteration.
 		/// @param measuredUpdateTime The total sim update time measured in the game loop iteration.
 		/// @param measuredDrawTime The total draw time measured in the game loop iteration.

@@ -2,6 +2,8 @@
 
 #include "RakPeerInterface.h"
 #include "RakNetStatistics.h"
+#include "RakNetDefines.h"
+#include "CCRakNetSlidingWindow.h"
 #include "MessageIdentifiers.h"
 #include "MultiplayerProtocol.h"
 #include "MultiplayerRelay.h"
@@ -29,6 +31,10 @@ Transport::Transport(): m_Impl(std::make_unique<Impl>()) {}
 Transport::~Transport() { Stop(); }
 
 bool Transport::Start(bool host, uint16_t port, const std::string& password, std::string& error) {
+	// The game paces every guest to its configured upload rate. RakNet's TCP-like
+	// window otherwise treats random WAN loss as congestion and collapses to one
+	// datagram per round trip, which stalled battlefield loading at 3% loss.
+	RakNet::CCRakNetSlidingWindow::SetMinimumWindow(MinimumWindowBytes);
 	Stop(); m_Impl->Peer = RakNet::RakPeerInterface::GetInstance();
 	RakNet::SocketDescriptor socket(host ? port : 0, nullptr); socket.socketFamily = AF_INET;
 	if (m_Impl->Peer->Startup(8, &socket, 1) != RakNet::RAKNET_STARTED) { error = "Unable to open the UDP port. Another host may already be using it."; Stop(); return false; }
@@ -142,13 +148,17 @@ bool Transport::Send(const std::string& address, std::span<const uint8_t> data, 
 		// The v1 service exposes four lanes. Resources share its reliable audio
 		// lane while direct peers retain a separate resource lane.
 		if (delivery == Delivery::WorldResource) delivery = Delivery::Audio;
+		if (delivery == Delivery::Receipt) delivery = Delivery::Control;
 		Relay::Writer w(Relay::Kind::Route); w.U8(static_cast<uint8_t>(slot)); w.U8(static_cast<uint8_t>(delivery)); w.Bytes(payload); routed = std::move(w.Data); data = routed;
 	}
 	PacketReliability reliability = RELIABLE_ORDERED; PacketPriority priority = HIGH_PRIORITY; char channel = 0;
 	if (delivery == Delivery::Input) { reliability = UNRELIABLE_SEQUENCED; priority = IMMEDIATE_PRIORITY; channel = 2; }
 	else if (delivery == Delivery::State) { reliability = UNRELIABLE; priority = MEDIUM_PRIORITY; channel = 1; }
 	else if (delivery == Delivery::Audio) { priority = MEDIUM_PRIORITY; channel = 3; }
-	else if (delivery == Delivery::WorldResource) { priority = MEDIUM_PRIORITY; channel = 4; }
+	// Resource chunks carry their own message and index, so they need no
+	// ordering: one lost datagram must not hold every later tile behind it.
+	else if (delivery == Delivery::WorldResource) { reliability = RELIABLE; priority = MEDIUM_PRIORITY; channel = 4; }
+	else if (delivery == Delivery::Receipt) { reliability = RELIABLE; channel = 5; }
 	if (slot >= 0) channel = delivery == Delivery::Control ? 0 : static_cast<char>(static_cast<int>(delivery) * 4 + slot);
 	return m_Impl->Peer->Send(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size()), priority, reliability, channel, ParseAddress(slot >= 0 ? m_Impl->Central : address), false) != 0;
 }
@@ -174,6 +184,11 @@ uint64_t Transport::QueuedBytes(const std::string& address) const {
 	// each stream's share, while the service bounds each guest's actual queue.
 	if (m_Impl->Relay && m_Impl->HostRoom && Relay::PeerSlot(address) >= 0) { const auto peers = std::count(m_Impl->Peers.begin() + 1, m_Impl->Peers.end(), true); if (peers > 0) bytes /= static_cast<uint64_t>(peers); }
 	return bytes;
+}
+double Transport::PacketLoss(const std::string& address) const {
+	RakNet::RakNetStatistics stats{};
+	if (!m_Impl->Peer || !m_Impl->Peer->GetStatistics(ParseAddress(Relay::PeerSlot(address) >= 0 ? m_Impl->Central : address), &stats)) return 0;
+	return std::clamp(double(stats.packetlossLastSecond), 0.0, 1.0);
 }
 std::string Transport::Diagnostics(const std::string& address) const {
 	RakNet::RakNetStatistics stats{}; if (!m_Impl->Peer || !m_Impl->Peer->GetStatistics(ParseAddress(Relay::PeerSlot(address) >= 0 ? m_Impl->Central : address), &stats)) return "no statistics";

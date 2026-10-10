@@ -14,6 +14,7 @@
 
 #include <array>
 #include <exception>
+#include <fstream>
 #include <cstdlib>
 #include <regex>
 #include <utility>
@@ -316,6 +317,14 @@ void RTEError::UnhandledExceptionFunc(const std::string& description, const std:
 		}
 	}
 
+	// A failure during startup can arrive before the window and console exist;
+	// record it directly instead of crashing inside this handler.
+	if (!ConsoleMan::Exists() || !WindowMan::Exists()) {
+		std::ofstream("AbortLog.txt") << exceptionMessage << '\n' << callstack << std::endl;
+		System::PrintToCLI(exceptionMessage + "\n" + callstack);
+		AbortAction;
+	}
+
 	if (DumpAbortSave()) {
 		exceptionMessage += "\nThe game has saved to 'AbortSave'.";
 	}
@@ -609,7 +618,8 @@ bool RTEError::DumpAbortScreen() {
 
 bool RTEError::DumpAbortSave() {
 	bool success = false;
-	if (g_ActivityMan.GetActivity() && g_ActivityMan.GetActivity()->CanBeUserSaved()) {
+	// An error during startup can arrive before the activity manager exists.
+	if (ActivityMan::Exists() && g_ActivityMan.GetActivity() && g_ActivityMan.GetActivity()->CanBeUserSaved()) {
 		success = g_ActivityMan.SaveCurrentGame("AbortSave");
 		g_ActivityMan.WaitForSaveGameTask(); // Ensure the save is complete before the user potentially aborts or restarts the game.
 	}

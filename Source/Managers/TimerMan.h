@@ -2,6 +2,7 @@
 
 #include "Singleton.h"
 
+#include <algorithm>
 #include <deque>
 #include <chrono>
 
@@ -47,6 +48,15 @@ namespace RTE {
 		/// Tells whether there is enough sim time accumulated to do at least one physics update.
 		/// @return Whether there is enough sim time to do a physics update.
 		bool TimeForSimUpdate() const { return m_SimAccumulator >= m_DeltaTime; }
+
+		/// Tells whether a simulation update is already due at the current real time, including time elapsed since the last Update.
+		/// @return Whether waiting before the next loop would delay a due simulation update.
+		bool SimUpdateDue() const;
+
+		/// Sets how many simulation updates one loop may run to catch up after a slow loop. One keeps the native behavior, where any slow loop dilates time.
+		/// A dedicated server uses more, so brief networking or capture work does not slow the match while the simulation itself keeps up with real time.
+		/// @param steps The maximum number of simulation updates per loop.
+		void SetCatchUpSteps(int steps) { m_CatchUpSteps = std::max(1, steps); }
 
 		/// Tells whether the current simulation update will be drawn in a frame. Use this to check if it is necessary to draw purely graphical things during the sim update.
 		/// @return Whether this is the last sim update before a frame with its results will appear.
@@ -164,6 +174,7 @@ namespace RTE {
 		float m_TimeScale; //!< The relationship between the real world actual time and the simulation time. A value of 2.0 means simulation runs twice as fast as normal, as perceived by a player.
 
 		bool m_SimPaused; //!< Simulation paused; no real time ticks will go to the sim accumulator.
+		int m_CatchUpSteps = 1; //!< Maximum simulation updates per loop while the simulation itself keeps up with real time.
 
 	private:
 		/// Clears all the member variables of this TimerMan, effectively resetting the members of this abstraction level only.
