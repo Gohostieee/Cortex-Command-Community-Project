@@ -87,6 +87,9 @@ struct MultiplayerMan::Impl {
 		uint64_t LastAudioBudget = 0, LastAudioChanges = 0;
 		float SentGlobalPitch = -1;
 		uint8_t Team = 0;
+		// The newest lobby edit from this player's client the host has applied
+		// or rejected; it lets the client retire exactly the edits answered.
+		uint32_t AppliedEdit = 0;
 		uint16_t ViewWidth = 960, ViewHeight = 540;
 		InputReceiver Inputs;
 		uint32_t FrameID = 0, AckID = 0;
@@ -341,6 +344,8 @@ struct MultiplayerMan::Impl {
 	std::array<bool, 4> SmokeActorSeen{}, SmokeActorMoved{}, SmokeFireSeen{};
 	std::array<bool, 4> SmokeGUIKeySeen{};
 	bool SmokeChatSent = false;
+	// Owner lobby edit: 0 not sent, 1 pending, 2 confirmed.
+	int SmokeLobbyEdit = 0, SmokeLobbyEditTarget = 0;
 	bool SmokeTextSent = false;
 	std::unique_ptr<SoundContainer> SmokeLoop;
 	int SmokeLoopPlays = 0;
@@ -390,12 +395,13 @@ struct MultiplayerMan::Impl {
 		MP::Writer writer(Kind::Lobby, Session, Epoch); writer.U8(Playing); writer.U8(Dedicated); writer.U8(uint8_t(OwnerSlot)); writer.Text(RoomName, 63); writer.Text(ActivityName); writer.Text(SceneName);
 		writer.U8(static_cast<uint8_t>(Difficulty)); writer.U32(static_cast<uint32_t>(Gold)); writer.U8(Fog); writer.U8(Deploy); writer.U8(ClearOrbit); writer.U8(AvailableTeams); writer.U8(CPUTeam);
 		for (const auto& tech: Tech) writer.Text(tech);
-		for (const auto& player: Players) { writer.U8(player.Token != 0); writer.U8(player.Connected); writer.U8(player.Ready); writer.U8(player.Team); writer.Text(player.Name, 31); }
+		for (const auto& player: Players) { writer.U8(player.Token != 0); writer.U8(player.Connected); writer.U8(player.Ready); writer.U8(player.Team); writer.Text(player.Name, 31); writer.U32(player.AppliedEdit); }
 		for (size_t i = FirstRemote(); i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, writer.Data, Delivery::Control);
 		Advertise();
 	}
 	void Reject(const std::string& address, const std::string& message) { MP::Writer writer(Kind::Reject); writer.Text(message); Net.Send(address, writer.Data, Delivery::Control); Pending[address] = Now() - 4500; }
 	void Welcome(int slot) {
+		Players[slot].AppliedEdit = 0;
 		MP::Writer writer(Kind::Welcome, Session, Epoch); writer.U8(static_cast<uint8_t>(slot)); writer.U64(Players[slot].Token); writer.Text(c_GameVersion.str()); writer.U8(Dedicated);
 		Net.Send(Players[slot].Address, writer.Data, Delivery::Control); Lobby();
 	}
@@ -451,7 +457,20 @@ struct MultiplayerMan::Impl {
 		for (size_t i = 0; i < Players.size(); ++i) if (!humanTeams.empty()) Players[i].Team = humanTeams[CPUTeam ? 0 : i % humanTeams.size()];
 	}
 	void SettingsChanged() { for (size_t i = FirstRemote(); i < Players.size(); ++i) Players[i].Ready = Dedicated && int(i) == OwnerSlot; Lobby(); }
-	void SendReady(bool ready, uint8_t team) { MP::Writer writer(Kind::Ready, Session, Epoch); writer.U8(ready); writer.U8(team); Net.Send(ServerAddress, writer.Data, Delivery::Control); }
+	void SendReady(bool ready, uint8_t team) {
+		const uint32_t edit = ++EditSequence; PendingEdits["Ready"] = {edit, ready}; PendingEdits["Team" + std::to_string(LocalSlot)] = {edit, team};
+		MP::Writer writer(Kind::Ready, Session, Epoch); writer.U8(ready); writer.U8(team); writer.U32(edit); Net.Send(ServerAddress, writer.Data, Delivery::Control);
+	}
+	// Lobby edits this client sent that the host has not answered yet. The menu
+	// shows them instead of the older confirmed state, so a selection does not
+	// snap back while its request is in flight.
+	struct PendingEdit { uint32_t Sequence = 0; int Value = 0; std::string Text; };
+	std::map<std::string, PendingEdit> PendingEdits;
+	uint32_t EditSequence = 0;
+	const PendingEdit* FindEdit(const std::string& control) const { const auto found = PendingEdits.find(control); return found == PendingEdits.end() ? nullptr : &found->second; }
+	// Typed numbers are committed on Enter or after a pause, not per digit.
+	struct NumberDraft { std::string Control, Text; uint64_t Changed = 0; } Draft;
+	void CommitDraft();
 	void AddChat(int player, const std::string& message) {
 		Chat.push_back(Players[player].Name + ": " + message); if (Chat.size() > 64) Chat.erase(Chat.begin());
 		Verify("CHAT: " + message);
@@ -560,7 +579,8 @@ bool MultiplayerMan::StartDedicated(const std::string& configPath) {
 }
 
 void MultiplayerMan::Impl::SendControl(const std::string& control, int value, const std::string& text) {
-	MP::Writer writer(Kind::RoomControl, Session, Epoch); writer.Text(control, 32); writer.U32(uint32_t(value)); writer.Text(text, 192); Net.Send(ServerAddress, writer.Data, Delivery::Control);
+	const uint32_t edit = ++EditSequence; PendingEdits[control] = {edit, value, text};
+	MP::Writer writer(Kind::RoomControl, Session, Epoch); writer.Text(control, 32); writer.U32(uint32_t(value)); writer.Text(text, 192); writer.U32(edit); Net.Send(ServerAddress, writer.Data, Delivery::Control);
 }
 
 void MultiplayerMan::Impl::ControlRoom(int slot, const std::string& control, int value, const std::string& text) {
@@ -1085,7 +1105,14 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		if (slot < 0 || header.Session != Session || (header.Epoch != Epoch && header.Type != Kind::Chat)) return;
 		auto& player = Players[slot];
 		if (header.Type == Kind::Input && Playing) { Input input; if (ReadInput(reader, input)) player.Inputs.Push(input, Now()); }
-		else if (header.Type == Kind::Ready && !Playing) { uint8_t ready, team; if (reader.U8(ready) && ready <= 1 && reader.U8(team) && team < 4 && (AvailableTeams & (1 << team)) && reader.Done()) { player.Ready = ready != 0; player.Team = team; Lobby(); } }
+		else if (header.Type == Kind::Ready && !Playing) {
+			uint8_t ready, team; uint32_t edit;
+			if (reader.U8(ready) && ready <= 1 && reader.U8(team) && team < 4 && reader.U32(edit) && reader.Done()) {
+				// A rejected team still answers the edit, so the guest stops showing it.
+				if (AvailableTeams & (1 << team)) { player.Ready = ready != 0; player.Team = team; }
+				player.AppliedEdit = edit; Lobby();
+			}
+		}
 		else if (header.Type == Kind::Chat) { std::string message; if (reader.Text(message, 192) && !message.empty() && reader.Done() && Now() - player.LastChat > 250) { player.LastChat = Now(); AddChat(slot, message); } }
 		else if (header.Type == Kind::WorldAck) {
 			uint8_t type; if (!reader.U8(type)) return;
@@ -1102,7 +1129,14 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 				player.AckID = id; player.LastAck = Now(); if (!player.AudioReady) g_MultiplayerMan.SetTextInputActive(slot, player.TextActive); player.AudioReady = true; } }
 		}
 		else if (header.Type == Kind::TextInput && Playing) { uint8_t direction; std::string text; if (reader.U8(direction) && direction == 0 && reader.Text(text, 64) && reader.Done() && player.TextActive && player.Text.size() + text.size() <= 256) { player.Text += text; if (Smoke && text == "Shop text test") { player.SmokeTextSeen = true; Verify("GUI TEXT: player " + std::to_string(slot + 1)); } } }
-		else if (header.Type == Kind::RoomControl && Dedicated && slot == OwnerSlot) { std::string control, text; uint32_t value; if (reader.Text(control, 32) && reader.U32(value) && reader.Text(text, 192) && reader.Done()) ControlRoom(slot, control, std::bit_cast<int32_t>(value), text); }
+		else if (header.Type == Kind::RoomControl && Dedicated && slot == OwnerSlot) {
+			std::string control, text; uint32_t value, edit;
+			if (reader.Text(control, 32) && reader.U32(value) && reader.Text(text, 192) && reader.U32(edit) && reader.Done()) {
+				player.AppliedEdit = edit; ControlRoom(slot, control, std::bit_cast<int32_t>(value), text);
+				// Every answered edit is confirmed, including rejected and unchanged ones.
+				if (control != "Close" && Players[slot].Connected) Lobby();
+			}
+		}
 		else if (header.Type == Kind::Leave && reader.Done()) { if (Smoke && Dedicated && slot == 0 && SmokeStage == 3) SmokeHostedLeaveSequence = player.Inputs.LastSequence(); Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Dedicated || Playing ? Now() + 60000 : 0; player.Inputs.ReleaseControls(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
 		return;
 	}
@@ -1118,7 +1152,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			for (size_t i = 0; i < 3; ++i) if (LocalInput.MouseHeld & (1 << i)) ++LocalInput.MouseReleases[i];
 			LocalInput.Held = 0; LocalInput.MouseHeld = 0; LocalInput.AimX = LocalInput.AimY = LocalInput.MoveX = LocalInput.MoveY = 0;
 		} else LocalInput = {};
-		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
+		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; PendingEdits.clear(); EditSequence = 0; Draft = {}; World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
 	}
 	if (State != Mode::Client || header.Session != Session) return;
 	if (header.Type == Kind::Chat) { uint8_t player; std::string message; if (reader.U8(player) && player < 4 && reader.Text(message, 192) && reader.Done()) AddChat(player, message); return; }
@@ -1130,8 +1164,8 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		uint8_t difficulty, fog, deploy, clearOrbit, teams, cpu; uint32_t gold; std::array<std::string, 4> tech;
 		if (!reader.U8(difficulty) || difficulty > 100 || !reader.U32(gold) || gold > 1000000 || !reader.U8(fog) || fog > 1 || !reader.U8(deploy) || deploy > 1 || !reader.U8(clearOrbit) || clearOrbit > 1 || !reader.U8(teams) || teams > 15 || !reader.U8(cpu) || cpu > 4) return;
 		for (auto& faction: tech) if (!reader.Text(faction)) return;
-		struct Slot { uint8_t Occupied, Connected, Ready, Team; std::string Name; }; std::array<Slot, 4> slots;
-		for (auto& slot: slots) if (!reader.U8(slot.Occupied) || slot.Occupied > 1 || !reader.U8(slot.Connected) || slot.Connected > 1 || !reader.U8(slot.Ready) || slot.Ready > 1 || !reader.U8(slot.Team) || slot.Team > 3 || !reader.Text(slot.Name, 31)) return;
+		struct Slot { uint8_t Occupied, Connected, Ready, Team; std::string Name; uint32_t AppliedEdit; }; std::array<Slot, 4> slots;
+		for (auto& slot: slots) if (!reader.U8(slot.Occupied) || slot.Occupied > 1 || !reader.U8(slot.Connected) || slot.Connected > 1 || !reader.U8(slot.Ready) || slot.Ready > 1 || !reader.U8(slot.Team) || slot.Team > 3 || !reader.Text(slot.Name, 31) || !reader.U32(slot.AppliedEdit)) return;
 		if (!reader.Done()) return;
 		const bool changedMatch = Epoch != header.Epoch || Playing != (playing != 0);
 		if (Epoch != header.Epoch) { Epoch = header.Epoch; LocalInput = {}; ClearSounds(); TextActive = false; LastFrameReceived = Now(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; TextureWidth = TextureHeight = 0; }
@@ -1149,6 +1183,9 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		if (changedMatch && !Playing) { ClearSounds(); TextActive = false; SDL_StopTextInput(g_WindowMan.GetWindow()); }
 		if (Smoke) Verify("LOBBY UPDATE: epoch=" + std::to_string(Epoch) + " playing=" + std::to_string(Playing));
 		for (size_t i = 0; i < slots.size(); ++i) { Players[i].Token = slots[i].Occupied; Players[i].Connected = slots[i].Connected; Players[i].Ready = slots[i].Ready; Players[i].Team = slots[i].Team; Players[i].Name = slots[i].Name; }
+		// Edits are answered in order, so everything up to the applied one is settled.
+		const uint32_t applied = slots[LocalSlot].AppliedEdit; std::erase_if(PendingEdits, [applied](const auto& edit) { return edit.second.Sequence <= applied; });
+		if (changedMatch) PendingEdits.clear();
 		g_UInputMan.TrapMousePos(Playing && !UI); return;
 	}
 	if (header.Epoch != Epoch) return;
@@ -1552,6 +1589,16 @@ void MultiplayerMan::Impl::HostedSmokeTick() {
 				if (!BenchmarkUploadRequested) { BenchmarkUploadRequested = true; BandwidthMbps = target; SendControl("Bandwidth", target); SmokeReadySent = now; Verify("BENCHMARK: requested upload Mbps=" + std::to_string(target)); return; }
 			}
 			if (!Menu) UpdateMenu();
+			// The owner's typed setting shows at once and stays until the server answers it.
+			if (Admin() && SmokeStage == 0 && SmokeLobbyEdit == 0) {
+				SmokeLobbyEditTarget = Difficulty == 100 ? 99 : Difficulty + 1; Draft = {"Difficulty", std::to_string(SmokeLobbyEditTarget), now}; CommitDraft();
+				if (MenuView().Difficulty != SmokeLobbyEditTarget) { Verify("FAIL: owner lobby edit is not shown while pending"); System::SetQuit(); return; }
+				SmokeLobbyEdit = 1; SmokeReadySent = now; return;
+			}
+			if (SmokeLobbyEdit == 1) {
+				if (!PendingEdits.empty() || Difficulty != SmokeLobbyEditTarget) { SmokeReadySent = now; return; }
+				SmokeLobbyEdit = 2; Verify("LOBBY EDIT: owner setting shown while pending and confirmed by the server");
+			}
 			if (Admin()) { if (std::count_if(Players.begin(), Players.end(), [](const auto& peer) { return peer.Connected && peer.Ready; }) == SmokeGuests + 1) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted owner start button"); } }
 			else if (!Players[LocalSlot].Ready) { Menu->QueueVerificationClick("Primary"); UpdateMenu(); Verify("MENU: native hosted player ready button"); }
 			SmokeReadySent = now;
@@ -1567,7 +1614,7 @@ void MultiplayerMan::Impl::HostedSmokeTick() {
 		}
 		if (SmokeHostedLeft && !SmokeHostedReturned && Playing && World.Ready() && !World.Paused()) { SmokeHostedReturned = true; SmokeCapture = true; SmokeStageTime = now; SmokeHostedCombatCaptured = false; SmokeRadialKeyboardCaptured = SmokeRadialMouseCaptured = SmokeQCameraCaptured = false; SmokeAutoHeld = 0; Verify(LocalSlot == 0 ? "PASS: native leave and room-code join restores creator's original slot during combat" : "FAIL: native leave and join lost player slot"); }
 		if (SmokeStage == 3 && !Playing) {
-			const bool passed = Played && Presented > SmokeSecondStart + 20 && SmokeHostedIndependent && (SmokeRole != "host" || SmokeHostedReturned);
+			const bool passed = Played && Presented > SmokeSecondStart + 20 && SmokeHostedIndependent && (SmokeRole != "host" || (SmokeHostedReturned && SmokeLobbyEdit == 2));
 			Verify(passed ? "PASS: hosted client received two matches, combat updates and persistent lobby" : "FAIL: hosted client world updates or rematch");
 			SmokeStage = 4; SmokeStageTime = now; SmokeCapture = true;
 		}
@@ -1982,6 +2029,22 @@ MultiplayerMenuGUI::View MultiplayerMan::Impl::MenuView() const {
 		slot.Status = !player.Token ? "Invite a friend" : !player.Connected ? "Reconnecting..." : Playing ? "In match" : player.Ready ? "READY" : "Not ready";
 	}
 	for (const auto& [address, room]: Discovered) view.LANRooms.push_back(room);
+	if (State == Mode::Client && !Playing) {
+		auto index = [](const std::vector<std::string>& items, const std::string& name, int& target) { if (const auto found = std::find(items.begin(), items.end(), name); found != items.end()) target = int(found - items.begin()); };
+		auto number = [](const std::string& text, int& target) { int value; const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value); if (parsed.ec == std::errc() && parsed.ptr == text.data() + text.size()) target = value; };
+		for (const auto& [control, edit] : PendingEdits) {
+			if (control == "Activity") index(view.Activities, edit.Text, view.ActivityIndex);
+			else if (control == "Scene") index(view.Scenes, edit.Text, view.SceneIndex);
+			else if (control == "Gold") number(edit.Text, view.Gold);
+			else if (control == "Difficulty") number(edit.Text, view.Difficulty);
+			else if (control == "Fog") view.Fog = edit.Value != 0;
+			else if (control == "Deploy") view.Deploy = edit.Value != 0;
+			else if (control == "Orbit") view.ClearOrbit = edit.Value != 0;
+			else if (control.starts_with("Faction") && control.size() == 8 && edit.Value >= 0 && edit.Value < int(view.Factions.size())) { const int team = control.back() - '0'; if (team >= 0 && team < 4) view.Tech[team] = view.Factions[edit.Value]; }
+			else if (control.starts_with("Team") && control.size() == 5 && edit.Value >= 0 && edit.Value < 4) { const int slot = control.back() - '0'; if (slot >= 0 && slot < 4) { view.Players[slot].Team = edit.Value; view.Players[slot].TeamName = view.TeamNames[edit.Value]; } }
+			else if (control == "Ready") { view.Ready = edit.Value != 0; auto& slot = view.Players[LocalSlot]; slot.Ready = view.Ready; if (slot.Occupied && slot.Connected) slot.Status = view.Ready ? "READY" : "Not ready"; }
+		}
+	}
 	return view;
 }
 
@@ -2020,7 +2083,7 @@ void MultiplayerMan::Impl::UpdateMenu() {
 		else if (control == "EntryBack") { Stop(); UI = false; g_MenuMan.SetMultiplayerMenuBackground(false); }
 		else if (control == "Cancel") { Stop(); UI = true; }
 		else if (control == "Copy") { SDL_SetClipboardText((Online ? Relay::DisplayCode(Net.RoomCode()) : view.Address).c_str()); Notice = "Invitation copied."; }
-		else if (control == "Primary") { if (State == Mode::Host) StartGame(); else if (Admin()) SendControl("Start"); else if (State == Mode::Client && !Playing) SendReady(!Players[LocalSlot].Ready, Players[LocalSlot].Team); }
+		else if (control == "Primary") { CommitDraft(); if (State == Mode::Host) StartGame(); else if (Admin()) SendControl("Start"); else if (State == Mode::Client && !Playing) SendReady(!view.Ready, uint8_t(view.Players[LocalSlot].Team)); }
 		else if (control == "Resume") { UI = false; Menu->Hide(); g_UInputMan.TrapMousePos(true); }
 		else if (control == "Session") { UI = true; g_UInputMan.TrapMousePos(false); }
 		else if (control == "Return") { if (State == Mode::Host) ReturnToLobby(); else if (Admin()) SendControl("Return"); }
@@ -2039,6 +2102,9 @@ void MultiplayerMan::Impl::UpdateMenu() {
 			if (State == Mode::Host) { Players[slot].Team = team; Players[slot].Ready = slot == 0; Error.clear(); Lobby(); }
 			else if (Admin()) SendControl(control, team);
 			else if (slot == LocalSlot) SendReady(false, team);
+		} else if (Admin() && !Playing && (control == "Gold" || control == "Difficulty")) {
+			if (Draft.Control != control) CommitDraft();
+			Draft = {control, event.Text, Now()}; if (event.Value) CommitDraft();
 		} else if (Admin() && !Playing) {
 			if (State != Mode::Host) { std::string selection = event.Text;
 				if (control == "Activity" && event.Value >= 0 && event.Value < view.Activities.size()) selection = view.Activities[event.Value];
@@ -2047,8 +2113,6 @@ void MultiplayerMan::Impl::UpdateMenu() {
 			bool changed = false;
 			if (control == "Activity" && event.Value >= 0 && event.Value < Activities.size()) { ActivityIndex = event.Value; LoadScenes(); changed = true; }
 			else if (control == "Scene" && event.Value >= 0 && event.Value < Scenes.size()) { SceneIndex = event.Value; SceneName = Scenes[SceneIndex]->GetPresetName(); changed = true; }
-			else if (control == "Gold") { const int old = Gold; number(Gold, 0, 1000000); changed = old != Gold; }
-			else if (control == "Difficulty") { const int old = Difficulty; number(Difficulty, 0, 100); changed = old != Difficulty; }
 			else if (control == "Fog") { Fog = event.Value != 0; changed = true; }
 			else if (control == "Deploy") { Deploy = event.Value != 0; changed = true; }
 			else if (control == "Orbit") { ClearOrbit = event.Value != 0; changed = true; }
@@ -2057,6 +2121,19 @@ void MultiplayerMan::Impl::UpdateMenu() {
 			if (changed) { Error.clear(); Notice = "Match settings changed. Everyone must ready up again."; SettingsChanged(); }
 		}
 	}
+	if (!Draft.Control.empty() && Now() - Draft.Changed >= 700) CommitDraft();
+}
+
+void MultiplayerMan::Impl::CommitDraft() {
+	if (Draft.Control.empty()) return;
+	const auto draft = std::exchange(Draft, {});
+	if (!Admin() || Playing) return;
+	if (State != Mode::Host) { SendControl(draft.Control, 0, draft.Text); return; }
+	int value; const auto parsed = std::from_chars(draft.Text.data(), draft.Text.data() + draft.Text.size(), value);
+	if (parsed.ec != std::errc() || parsed.ptr != draft.Text.data() + draft.Text.size()) return;
+	int& target = draft.Control == "Gold" ? Gold : Difficulty; const int old = target;
+	target = std::clamp(value, 0, draft.Control == "Gold" ? 1000000 : 100);
+	if (target != old) { Error.clear(); Notice = "Match settings changed. Everyone must ready up again."; SettingsChanged(); }
 }
 
 void MultiplayerMan::Impl::Draw() {

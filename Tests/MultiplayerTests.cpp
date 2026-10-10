@@ -235,6 +235,19 @@ void Worlds() {
       Check(local.ViewMode == 0, "releasing Q waits for the host to leave free flight");
       local = view; camera.Apply(local, view, mouse, 4315); Check(local.ViewMode == 0, "late selection-mode snapshots reopen the local Q camera");
     }
+    { W::Snapshot lz; lz.ID = 50; lz.Width = 640; lz.Height = 360; lz.SceneWidth = 4096; lz.SceneHeight = 1024; lz.ViewMode = W::LocalCamera::LandingZoneMode; lz.MouseScale = 1;
+      lz.CameraX = lz.CameraTargetX = 1000; lz.CameraY = lz.CameraTargetY = 100;
+      W::Node anchor; anchor.ID = (uint64_t(1) << 63) | 1; anchor.Type = W::Shape::Rectangle; anchor.Flags = W::ScreenSpace; anchor.Control = W::Interaction::WorldCursor; anchor.X = 320; anchor.Y = 200; lz.Nodes = {anchor};
+      W::LocalCamera camera; Input mouse; auto local = lz; camera.Apply(local, lz, mouse, 1000);
+      mouse.MouseX = 50; mouse.MouseY = 40; local = lz; camera.Apply(local, lz, mouse, 1016);
+      Input sent; camera.Export(sent, true);
+      Check(sent.CursorValid && sent.CursorMode == W::LocalCamera::LandingZoneMode && sent.CursorX == 1370 && sent.CursorY == 300, "landing zone does not move sideways locally or leaves the host's terrain height");
+      camera.RecordSent(7); mouse.MouseX = 60; local = lz; camera.Apply(local, lz, mouse, 1032); camera.RecordSent(8);
+      // The host limits the zone to an area ending at 1350, answering input 7 and then input 8.
+      lz.ID = 51; lz.InputSequence = 7; lz.Nodes[0].X = 350; local = lz; camera.Apply(local, lz, mouse, 1048); camera.Export(sent, true);
+      Check(sent.CursorX == 1360, "landing zone ignores the host's landing-area limit or discards motion made since");
+      lz.ID = 52; lz.InputSequence = 8; local = lz; camera.Apply(local, lz, mouse, 1064); local = lz; camera.Apply(local, lz, mouse, 1080); camera.Export(sent, true);
+      Check(sent.CursorX == 1350, "landing-zone correction is applied twice or not at all"); }
     auto third = second; third.ID = 3; third.Time = 1100; third.Nodes.clear();
     Check(timeline.Push(third, 1120), "despawn state rejected"); Check(timeline.Sample(1170).Nodes.size() == 1 && timeline.Sample(1195).Nodes.empty(), "lifecycle changed before its presentation time");
     timeline.Reset(); first.Nodes[0].X = 995; first.Nodes[0].Angle = 3.1f; second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 5; second.Nodes[0].Angle = -3.1f;

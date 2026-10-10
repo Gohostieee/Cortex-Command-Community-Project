@@ -446,9 +446,20 @@ void MultiplayerWorld::BeginRadialCursor() { if (canvasCollector) canvasCollecto
 void MultiplayerWorld::BeginRadialBackground() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::RadialBackground; }
 void MultiplayerWorld::BeginPointer(float x, float y) { if (canvasCollector) { canvasCollector->m_Impl->HUDControl = Interaction::Pointer; canvasCollector->m_Impl->PointerPosition.SetXY(x, y); } }
 void MultiplayerWorld::BeginWorldCursor() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::WorldCursor; }
+void MultiplayerWorld::BeginWorldCursor(float x, float y) {
+    if (!canvasCollector) return;
+    // An invisible first node marks the exact cursor point for drawings, such
+    // as the landing-zone marker, that do not start at the cursor.
+    auto& impl = *canvasCollector->m_Impl; impl.HUDControl = Interaction::WorldCursor;
+    Node anchor; anchor.Type = Shape::Rectangle; anchor.X = x; anchor.Y = y; anchor.Alpha = 0; impl.AppendCanvas(anchor);
+}
 void MultiplayerWorld::EndInteraction() { if (canvasCollector) canvasCollector->m_Impl->HUDControl = Interaction::None; }
 void MultiplayerWorld::SetLocalInput(const MP::Input& input, bool enabled) { m_Impl->LocalInput = input; m_Impl->LocalInputEnabled = enabled; }
-void MultiplayerWorld::ExportLocalView(MP::Input& input, bool enabled) const { m_Impl->CameraPrediction.Export(input, enabled); m_Impl->Pointer.Export(input, enabled && input.Device == DEVICE_MOUSE_KEYB); }
+void MultiplayerWorld::ExportLocalView(MP::Input& input, bool enabled) const {
+    m_Impl->CameraPrediction.Export(input, enabled); m_Impl->Pointer.Export(input, enabled && input.Device == DEVICE_MOUSE_KEYB);
+    // The caller sends this input under the next sequence number.
+    m_Impl->CameraPrediction.RecordSent(input.Sequence + 1);
+}
 void MultiplayerWorld::EndObjects() { if (objectCollector == this) objectCollector = nullptr; }
 void MultiplayerWorld::Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& pos, const Vector& pivot, float angle, float scale, bool flip, bool white, uint8_t alpha) {
     if (!objectCollector || !bitmap) return;
@@ -478,7 +489,7 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         const Vector target = g_CameraMan.GetScrollTarget(screen) - Vector(snapshot.Width / 2, snapshot.Height / 2) - g_CameraMan.GetScreenOcclusion(screen) / 2;
         snapshot.CameraTargetX = target.GetX(); snapshot.CameraTargetY = target.GetY();
         if (active->GetViewState(player) == Activity::Observe) snapshot.MouseScale = 1.2f;
-        else if (active->GetViewState(player) == Activity::ActorSelect || active->GetViewState(player) == Activity::AIGoToPoint) snapshot.MouseScale = 1;
+        else if (active->GetViewState(player) == Activity::ActorSelect || active->GetViewState(player) == Activity::AIGoToPoint || active->GetViewState(player) == Activity::LandingZoneSelect) snapshot.MouseScale = 1;
         if (active->GetActivityState() == Activity::Editing) if (auto* game = dynamic_cast<GameActivity*>(active); game && game->GetEditorGUI(player)) {
             const auto mode = game->GetEditorGUI(player)->GetEditorGUIMode();
             snapshot.ViewMode = uint8_t(10 + mode); snapshot.ScrollSpeed = .3f;

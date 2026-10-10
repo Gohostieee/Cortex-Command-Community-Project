@@ -342,7 +342,8 @@ std::vector<MultiplayerMenuGUI::Event> MultiplayerMenuGUI::Update(const View& vi
 			else if (name == "KeepRoom") { m_ConfirmLeave = m_ConfirmCloseRoom = false; m_Rebuild = true; }
 			else { std::string text; if (name == "Send") if (auto* chat = dynamic_cast<GUITextBox*>(m_Manager->GetControl("Chat"))) { text = chat->GetText(); chat->SetText(""); } result.push_back({name, text}); }
 		} else if (auto* field = dynamic_cast<GUITextBox*>(control); field && (event.GetMsg() == GUITextBox::Changed || event.GetMsg() == GUITextBox::Enter)) {
-			result.push_back({name == "Chat" && event.GetMsg() == GUITextBox::Enter ? "Send" : name, field->GetText()});
+			// Value marks Enter, which commits a typed setting immediately.
+			result.push_back({name == "Chat" && event.GetMsg() == GUITextBox::Enter ? "Send" : name, field->GetText(), event.GetMsg() == GUITextBox::Enter});
 			if (name == "Chat" && event.GetMsg() == GUITextBox::Enter) field->SetText("");
 		} else if (auto* combo = dynamic_cast<GUIComboBox*>(control); combo && event.GetMsg() == GUIComboBox::Closed && combo->GetSelectedIndex() != combo->GetOldSelectionIndex()) {
 			g_GUISound.SelectionChangeSound()->Play(); result.push_back({name, "", combo->GetSelectedIndex()});

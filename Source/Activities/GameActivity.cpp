@@ -1440,8 +1440,12 @@ void GameActivity::Update() {
 			// Save the x pos so we can see which direction the user is moving it
 			float prevLZX = m_LandingZone[player].m_X;
 
+			// A remote guest moves its landing zone locally and reports where it is.
+			float guestX, guestY;
+			if (g_MultiplayerMan.GuestCursor(player, ViewState::LandingZoneSelect, guestX, guestY))
+				m_LandingZone[player].m_X = guestX;
 			// See if there's analog input
-			if (m_PlayerController[player].GetAnalogMove().m_X > 0.1)
+			else if (m_PlayerController[player].GetAnalogMove().m_X > 0.1)
 				m_LandingZone[player].m_X += m_PlayerController[player].GetAnalogMove().m_X * 8;
 			// Try the mouse
 			else if (!m_PlayerController[player].GetMouseMovement().IsZero())
@@ -1874,12 +1878,15 @@ void GameActivity::DrawGUI(BITMAP* pTargetBitmap, const Vector& targetPos, int w
 			cursor = team;
 			landZone = m_LandingZone[player] - targetPos;
 			// Cursor
+			// A guest draws its own marker at its local landing-zone cursor.
+			if (player == PoS) MultiplayerWorld::BeginWorldCursor(landZone.m_X, landZone.m_Y);
 			draw_sprite(pTargetBitmap, m_aLZCursor[cursor][frame], landZone.m_X - halfWidth, landZone.m_Y - 48);
 			draw_sprite_h_flip(pTargetBitmap, m_aLZCursor[cursor][frame], landZone.m_X + halfWidth - m_aLZCursor[cursor][frame]->w, landZone.m_Y - 48);
 			// Text
 			pSmallFont->DrawAligned(&pBitmapInt, landZone.m_X, landZone.m_Y - 42, m_AIReturnCraft[player] ? "Deliver here" : "Travel here", GUIFont::Centre);
 			pSmallFont->DrawAligned(&pBitmapInt, landZone.m_X, landZone.m_Y - 36, "and then", GUIFont::Centre);
 			pLargeFont->DrawAligned(&pBitmapInt, landZone.m_X, landZone.m_Y - 30, m_AIReturnCraft[player] ? "RETURN" : "STAY", GUIFont::Centre);
+			if (player == PoS) MultiplayerWorld::EndInteraction();
 			// Draw wrap around the world if necessary, and only if this is being drawn directly to a scenewide target bitmap
 			if (targetPos.IsZero() && (landZone.m_X < halfWidth || landZone.m_X > g_SceneMan.GetSceneWidth() - halfWidth)) {
 				// Wrap shit around and draw dupe on the other side

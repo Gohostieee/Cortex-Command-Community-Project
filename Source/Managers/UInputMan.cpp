@@ -1115,6 +1115,9 @@ void UInputMan::SetRemoteInput(int player, const MP::InputState& input) {
 	if (!remote.Active) remote.Position = Vector(width / 2, height / 2);
 	remote.Active = true; remote.State = input;
 	remote.Position.SetXY(std::clamp(remote.Position.GetX() + input.MouseDX * multiplier, 0.0f, std::max(0.0f, width - 1)), std::clamp(remote.Position.GetY() + input.MouseDY * multiplier, 0.0f, std::max(0.0f, height - 1)));
+	// While the guest shows a menu pointer, its exported hotspot is where the
+	// player sees the cursor; native hit testing uses that same position.
+	if (input.Snapshot.PointerValid) remote.Position.SetXY(std::max(0.0f, input.Snapshot.PointerX * multiplier), std::max(0.0f, input.Snapshot.PointerY * multiplier));
 	for (int i = 0; i < 3; ++i) { const bool held = (input.Snapshot.MouseHeld & (1 << i)) || (input.MousePressed & (1 << i)); remote.Changes[i + 1] = held != remote.Buttons[i + 1] || ((input.MousePressed | input.MouseReleased) & (1 << i)); remote.Buttons[i + 1] = held; }
 }
 

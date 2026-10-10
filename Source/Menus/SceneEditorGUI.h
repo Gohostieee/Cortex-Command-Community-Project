@@ -241,6 +241,7 @@ namespace RTE {
 		static BITMAP* s_pInvalidPathDot;
 		// The current pathfinding request
 		std::shared_ptr<volatile PathRequest> m_PathRequest;
+		bool m_BrainPlacementPending = false; //!< A brain placement waiting for its path to orbit.
 		
 		struct BitmapDeleter {
 			void operator() (BITMAP* bitmap) {

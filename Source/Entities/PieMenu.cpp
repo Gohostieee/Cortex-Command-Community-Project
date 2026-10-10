@@ -21,6 +21,15 @@
 
 using namespace RTE;
 
+namespace {
+	// Menu feedback belongs to the player using the menu. Play() without a player
+	// registers the sound for every multiplayer guest.
+	int MenuSoundPlayer(Controller* menuController, Actor* owner) {
+		const Controller* controller = menuController ? menuController : owner ? owner->GetController() : nullptr;
+		return controller ? controller->GetPlayer() : -1;
+	}
+} // namespace
+
 ConcreteClassInfo(PieMenu, Entity, 20);
 
 const std::unordered_map<std::string, PieMenu::IconSeparatorMode> PieMenu::c_IconSeparatorModeMap = {
@@ -282,7 +291,7 @@ void PieMenu::SetEnabled(bool enable, bool playSounds) {
 
 		if (playSounds) {
 			SoundContainer* soundToPlay = enable ? g_GUISound.PieMenuEnterSound() : g_GUISound.PieMenuExitSound();
-			soundToPlay->Play();
+			soundToPlay->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 		}
 
 		if (!enable) {
@@ -805,12 +814,12 @@ bool PieMenu::HandleDigitalInput() {
 					} else if (pieQuadrantAtControlStateDirection.m_Enabled) {
 						MoveToPieQuadrant(pieQuadrantAtControlStateDirection);
 					} else {
-						g_GUISound.HoverDisabledSound()->Play();
+						g_GUISound.HoverDisabledSound()->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 					}
 				} else if (hoveredPieSlicePieQuadrant->m_Direction == controlStateDirection) {
 					if (m_HoveredPieSlice == pieQuadrantAtControlStateDirection.m_MiddlePieSlice.get()) {
 						if (IsSubPieMenu()) {
-							g_GUISound.HoverDisabledSound()->Play();
+							g_GUISound.HoverDisabledSound()->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 						} else {
 							SetHoveredPieSlice(nullptr);
 						}
@@ -846,10 +855,10 @@ void PieMenu::UpdateSliceActivation() {
 		m_AlreadyActivatedPieSlice = m_ActivatedPieSlice;
 
 		if (m_HoveredPieSlice->GetSubPieMenu() && controller->IsState(ControlState::RELEASE_SECONDARY)) {
-			g_GUISound.UserErrorSound()->Play();
+			g_GUISound.UserErrorSound()->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 		} else {
 			SoundContainer* soundToPlay = m_HoveredPieSlice->IsEnabled() ? g_GUISound.SlicePickedSound() : g_GUISound.DisabledPickedSound();
-			soundToPlay->Play();
+			soundToPlay->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 		}
 	}
 
@@ -1237,7 +1246,7 @@ bool PieMenu::SetHoveredPieSlice(const PieSlice* pieSliceToSelect, bool moveCurs
 		}
 
 		SoundContainer* soundToPlay = pieSliceToSelect->IsEnabled() ? g_GUISound.HoverChangeSound() : g_GUISound.HoverDisabledSound();
-		soundToPlay->Play();
+		soundToPlay->Play(MenuSoundPlayer(m_MenuController, m_Owner));
 	} else {
 		m_CursorInVisiblePosition = false;
 	}

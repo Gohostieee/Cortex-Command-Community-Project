@@ -659,18 +659,32 @@ public:
         m_MouseX = input.MouseX; m_MouseY = input.MouseY;
         const float elapsed = first ? 16.0f : float(std::min<uint64_t>(now - m_Time, 50)); m_Time = now;
         const float mouseScale = mode == 3 ? 1.0f : latest.MouseScale;
+        const Node* cursor = nullptr; for (const auto& n : latest.Nodes) if (n.Control == Interaction::WorldCursor) { cursor = &n; break; }
+        const bool landing = mode == LandingZoneMode;
+        if (landing && cursor && latest.ID != m_Reconciled) {
+            // The host keeps the zone inside its landing areas. Apply its correction
+            // to the position this state answered, once, keeping the motion since.
+            m_Reconciled = latest.ID;
+            for (const auto& [sequence, sentX] : m_SentCursor) if (sequence && sequence == latest.InputSequence) {
+                const float correction = Displacement(sentX, latest.CameraX + cursor->X, latest.SceneWidth, latest.Wrap & 1);
+                if (std::abs(correction) > 1) { m_CursorX += correction; for (auto& sent : m_SentCursor) if (Newer(sent.first, sequence)) sent.second += correction; }
+                break;
+            }
+        }
         if (enabled && mouseScale > 0 && mode != 0) {
-            float dx = dxInput * mouseScale, dy = dyInput * mouseScale;
+            float dx = dxInput * mouseScale, dy = landing ? 0 : dyInput * mouseScale;
             if (!dx && !dy) {
                 const auto held = [&](unsigned bit) { return bool(input.Held & (uint64_t(1) << bit)); };
                 const float vx = input.Device == DEVICE_MOUSE_KEYB ? float(held(INPUT_L_RIGHT)) - float(held(INPUT_L_LEFT)) : input.MoveX;
                 const float vy = input.Device == DEVICE_MOUSE_KEYB ? float(held(INPUT_L_DOWN)) - float(held(INPUT_L_UP)) : input.MoveY;
-                dx = vx * elapsed * .6f * mouseScale; dy = vy * elapsed * .6f * mouseScale;
+                dx = vx * elapsed * .6f * mouseScale; dy = landing ? 0 : vy * elapsed * .6f * mouseScale;
             }
             m_CursorX += dx; m_CursorY += dy; m_TargetX += dx; m_TargetY += dy;
             Bound(m_CursorX, sampled.SceneWidth, sampled.Wrap & 1, 0); Bound(m_CursorY, sampled.SceneHeight, sampled.Wrap & 2, 0);
             // Preserve the native cursor-to-camera offset at world edges.
             m_TargetX = m_CursorX - sampled.Width / 2; m_TargetY = m_CursorY - sampled.Height / 2;
+            // A landing zone moves sideways; its height follows the host's terrain.
+            if (landing) { if (cursor) m_CursorY = latest.CameraY + cursor->Y; m_TargetY = latest.CameraTargetY; }
         } else if (mode == 0 && latest.ControlledActor) {
             for (const auto& n : sampled.Nodes) if (n.ID == latest.ControlledActor) {
                 float lx = latest.LookX, ly = latest.LookY;
@@ -694,7 +708,6 @@ public:
         sampled.CameraX = m_X; sampled.CameraY = m_Y;
         sampled.ViewMode = mode;
         const float dx = Displacement(oldX, m_X, sampled.SceneWidth, sampled.Wrap & 1), dy = Displacement(oldY, m_Y, sampled.SceneHeight, sampled.Wrap & 2);
-        const Node* cursor = nullptr; for (const auto& n : latest.Nodes) if (n.Control == Interaction::WorldCursor) { cursor = &n; break; }
         for (auto& n : sampled.Nodes) {
             if ((n.Flags & Layer) && (n.Flags & ScreenSpace)) { n.X -= dx * n.X3; n.Y -= dy * n.Y3; }
             if (n.Control == Interaction::WorldOverlay && (n.Flags & ScreenSpace)) Translate(n,
@@ -707,9 +720,13 @@ public:
     }
     void Export(Input& input, bool enabled) const {
         input.ViewValid = m_Time && enabled; input.ViewX = m_X; input.ViewY = m_Y;
-        input.CursorValid = input.ViewValid && (m_Mode == 1 || m_Mode == 3 || m_Mode == 7 || (m_Mode >= 12 && m_Mode <= 18));
+        input.CursorValid = input.ViewValid && (m_Mode == 1 || m_Mode == 3 || m_Mode == 7 || m_Mode == LandingZoneMode || (m_Mode >= 12 && m_Mode <= 18));
         input.CursorMode = m_Mode; input.CursorX = m_CursorX; input.CursorY = m_CursorY;
     }
+    // Remembers the cursor carried by the input with this sequence, so a host
+    // correction can be matched to the position it answered.
+    void RecordSent(uint32_t sequence) { auto& slot = m_SentCursor[sequence % m_SentCursor.size()]; slot = {sequence, m_CursorX}; }
+    static constexpr uint8_t LandingZoneMode = 8;
 private:
     static void Bound(float& value, float span, bool wrap, int viewport) {
         if (wrap) { value = std::fmod(value, span); if (value < 0) value += span; }
@@ -721,6 +738,8 @@ private:
     uint8_t m_Mode = 0;
     uint32_t m_MouseX = 0, m_MouseY = 0;
     float m_X = 0, m_Y = 0, m_TargetX = 0, m_TargetY = 0, m_CursorX = 0, m_CursorY = 0;
+    std::array<std::pair<uint32_t, float>, 64> m_SentCursor{};
+    uint32_t m_Reconciled = 0;
 };
 // The presentation delay follows measured delivery instead of a fixed 75 ms:
 // it must cover one update interval plus the arrival jitter, or presentation

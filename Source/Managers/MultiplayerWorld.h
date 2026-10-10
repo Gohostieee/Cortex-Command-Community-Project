@@ -63,6 +63,7 @@ public:
     static void BeginRadialBackground();
     static void BeginPointer(float x, float y);
     static void BeginWorldCursor();
+    static void BeginWorldCursor(float x, float y);
     static void EndInteraction();
     static void Sprite(const MovableObject& owner, BITMAP* bitmap, const Vector& position, const Vector& pivot, float angle, float scale, bool flip, bool white = false, uint8_t alpha = 255);
     static void Pixel(const MovableObject& owner, const Vector& position, uint8_t color);

@@ -83,6 +83,7 @@ void SceneEditorGUI::Clear() {
 	m_BrainSkyPathCost = 0;
 	m_RequireClearPathToOrbit = false;
 	m_PathRequest.reset();
+	m_BrainPlacementPending = false;
 }
 
 int SceneEditorGUI::Create(Controller* pController, FeatureSets featureSet, int whichModuleSpace, int nativeTechModule, float foreignCostMult) {
@@ -753,21 +754,26 @@ void SceneEditorGUI::Update() {
 		if (m_pController->IsState(PRESS_SECONDARY) || m_pController->IsState(PIE_MENU_ACTIVE)) {
 			m_EditorGUIMode = m_PreviousMode;
 			m_ModeChanged = true;
+			m_BrainPlacementPending = false;
 		}
 		// If previous mode was moving, tear the gib loose if the button is released to soo
 		else if (m_PreviousMode == MOVINGOBJECT && m_pController->IsState(RELEASE_PRIMARY) && !m_BlinkTimer.IsPastRealMS(150)) {
 			m_EditorGUIMode = ADDINGOBJECT;
 			m_ModeChanged = true;
 		}
+		// A brain is placed once its path to orbit is known. The path is found on
+		// worker threads; waiting for it here stalled the whole simulation, which on
+		// a multiplayer server is every player's game. The brain stays in hand.
+		else if (m_pCurrentObject && m_PreviousMode == INSTALLINGBRAIN && (m_pController->IsState(RELEASE_PRIMARY) || m_BrainPlacementPending) && !m_pPicker->IsVisible() && m_PathRequest && !m_PathRequest->complete) {
+			m_BrainPlacementPending = true;
+		}
 		// Only place if the picker and pie menus are completely out of view, to avoid immediate placing after picking
-		else if (m_pCurrentObject && m_pController->IsState(RELEASE_PRIMARY) && !m_pPicker->IsVisible()) {
+		else if (m_pCurrentObject && (m_pController->IsState(RELEASE_PRIMARY) || m_BrainPlacementPending) && !m_pPicker->IsVisible()) {
+			m_BrainPlacementPending = false;
 			m_pCurrentObject->FullUpdate();
 
 			// Placing governor brain, which actually just puts it back into the resident brain roster
 			if (m_PreviousMode == INSTALLINGBRAIN) {
-				// Force our path request to complete so we know whether we can place or not
-				while (m_PathRequest && !m_PathRequest->complete) {};
-
 				// Only place if the brain has a clear path to the sky!
 				if (m_BrainSkyPathCost <= MAXBRAINPATHCOST || !m_RequireClearPathToOrbit) {
 					bool placeBrain = true;

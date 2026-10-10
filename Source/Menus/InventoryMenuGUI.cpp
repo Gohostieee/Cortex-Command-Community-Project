@@ -6,6 +6,7 @@
 #include "MovableMan.h"
 #include "PresetMan.h"
 #include "GLResourceMan.h"
+#include "MultiplayerWorld.h"
 
 #include "Controller.h"
 #include "AHuman.h"
@@ -1439,11 +1440,14 @@ void InventoryMenuGUI::DrawFullMode(BITMAP* targetBitmap, const Vector& drawPos)
 	AllegroScreen guiScreen(targetBitmap);
 	m_GUIControlManager->Draw(&guiScreen);
 	if (IsEnabled() && !m_GUIDisplayOnly && m_MenuController->IsMouseControlled()) {
+		// Guests move the tagged cursor and dragged item locally between updates.
+		MultiplayerWorld::BeginPointer(m_GUICursorPos.GetX(), m_GUICursorPos.GetY());
 		if (m_GUISelectedItem && m_GUISelectedItem->DragWasHeldForLongEnough()) {
 			BITMAP* selectedObjectIcon = m_GUISelectedItem->Object->GetGraphicalIcon();
 			draw_sprite(targetBitmap, selectedObjectIcon, m_GUICursorPos.GetFloorIntX() - (selectedObjectIcon->w / 2), m_GUICursorPos.GetFloorIntY() - (selectedObjectIcon->h / 2));
 		} else {
 			draw_sprite(targetBitmap, s_CursorBitmap, m_GUICursorPos.GetFloorIntX(), m_GUICursorPos.GetFloorIntY());
 		}
+		MultiplayerWorld::EndInteraction();
 	}
 }
