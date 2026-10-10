@@ -105,6 +105,10 @@ void BuyMenuGUI::Clear() {
 	m_Loadouts.clear();
 	m_SelectedLoadoutIndex = -1;
 	m_PurchaseMade = false;
+	m_MultiplayerRole = MultiplayerRole::Native;
+	m_GuestFunds = 0;
+	m_GuestOrderPending = false;
+	m_PressBuyForVerification = false;
 
 	m_EnforceMaxPassengersConstraint = true;
 	m_EnforceMaxMassConstraint = true;
@@ -461,7 +465,7 @@ bool BuyMenuGUI::SaveAllLoadoutsToFile() {
 void BuyMenuGUI::SetEnabled(bool enable) {
 	if (enable && m_MenuEnabled != ENABLED && m_MenuEnabled != ENABLING) {
 		// If we're not split screen horizontally, then stretch out the layout for all the relevant controls
-		int stretchAmount = g_FrameMan.GetPlayerFrameBufferHeight(g_ActivityMan.GetActivity()->ScreenOfPlayer(m_pController->GetPlayer())) - m_pParentBox->GetHeight();
+		int stretchAmount = g_FrameMan.GetPlayerFrameBufferHeight(MenuScreen()) - m_pParentBox->GetHeight();
 		if (stretchAmount != 0) {
 			m_pParentBox->SetSize(m_pParentBox->GetWidth(), m_pParentBox->GetHeight() + stretchAmount);
 			m_pShopList->SetSize(m_pShopList->GetWidth(), m_pShopList->GetHeight() + stretchAmount);
@@ -479,13 +483,16 @@ void BuyMenuGUI::SetEnabled(bool enable) {
 		// Reset repeat timers
 		m_RepeatStartTimer.Reset();
 		m_RepeatTimer.Reset();
-		// Set the mouse cursor free
-		g_UInputMan.TrapMousePos(false, m_pController->GetPlayer());
-		// Move the mouse cursor to the middle of the player's screen
-		int mouseOffX, mouseOffY;
-		m_pGUIInput->GetMouseOffset(mouseOffX, mouseOffY);
-		Vector mousePos(-mouseOffX + (g_FrameMan.GetPlayerFrameBufferWidth(m_pController->GetPlayer()) / 2), -mouseOffY + (g_FrameMan.GetPlayerFrameBufferHeight(m_pController->GetPlayer()) / 2));
-		g_UInputMan.SetMousePos(mousePos, m_pController->GetPlayer());
+		// A guest's own menu frees and centers its own cursor.
+		if (m_MultiplayerRole != MultiplayerRole::Host) {
+			// Set the mouse cursor free
+			g_UInputMan.TrapMousePos(false, m_pController->GetPlayer());
+			// Move the mouse cursor to the middle of the player's screen
+			int mouseOffX, mouseOffY;
+			m_pGUIInput->GetMouseOffset(mouseOffX, mouseOffY);
+			Vector mousePos(-mouseOffX + (g_FrameMan.GetPlayerFrameBufferWidth(MenuScreen()) / 2), -mouseOffY + (g_FrameMan.GetPlayerFrameBufferHeight(MenuScreen()) / 2));
+			g_UInputMan.SetMousePos(mousePos, m_pController->GetPlayer());
+		}
 
 		// Default focus to the menu button
 		m_LastHoveredMouseIndex = 0;
@@ -496,15 +503,19 @@ void BuyMenuGUI::SetEnabled(bool enable) {
 		UpdateTotalPassengersLabel(dynamic_cast<const ACraft*>(m_pSelectedCraft), m_pCraftPassengersLabel);
 		UpdateTotalMassLabel(dynamic_cast<const ACraft*>(m_pSelectedCraft), m_pCraftMassLabel);
 
-		g_GUISound.EnterMenuSound()->Play(m_pController->GetPlayer());
+		if (m_MultiplayerRole != MultiplayerRole::Host) {
+			g_GUISound.EnterMenuSound()->Play(m_pController->GetPlayer());
+		}
 	} else if (!enable && m_MenuEnabled != DISABLED && m_MenuEnabled != DISABLING) {
 		EnableEquipmentSelection(false);
 		m_MenuEnabled = DISABLING;
-		// Trap the mouse cursor again
-		g_UInputMan.TrapMousePos(true, m_pController->GetPlayer());
-		// Only play switching away sound
-		//        if (!m_PurchaseMade)
-		g_GUISound.ExitMenuSound()->Play(m_pController->GetPlayer());
+		if (m_MultiplayerRole != MultiplayerRole::Host) {
+			// Trap the mouse cursor again
+			g_UInputMan.TrapMousePos(true, m_pController->GetPlayer());
+			// Only play switching away sound
+			//        if (!m_PurchaseMade)
+			g_GUISound.ExitMenuSound()->Play(m_pController->GetPlayer());
+		}
 	}
 }
 
@@ -738,6 +749,23 @@ void BuyMenuGUI::Update() {
 	// Reset the purchasing indicator
 	m_PurchaseMade = false;
 
+	if (m_MultiplayerRole == MultiplayerRole::Host) {
+		// The guest animates, shows and operates the menu. Only its open state and the order it submits are handled here.
+		m_pParentBox->SetVisible(false);
+		if (m_MenuEnabled == ENABLING) {
+			m_MenuEnabled = ENABLED;
+		} else if (m_MenuEnabled == DISABLING) {
+			m_MenuEnabled = DISABLED;
+		}
+		if (m_GuestOrderPending) {
+			m_GuestOrderPending = false;
+			if (m_MenuEnabled == ENABLED) {
+				TryPurchase();
+			}
+		}
+		return;
+	}
+
 	// Popup box is hidden by default
 	m_pPopupBox->SetVisible(false);
 
@@ -770,7 +798,9 @@ void BuyMenuGUI::Update() {
 		}
 
 		m_pParentBox->SetPositionAbs(position.m_X, position.m_Y);
-		g_CameraMan.SetScreenOcclusion(occlusion, g_ActivityMan.GetActivity()->ScreenOfPlayer(m_pController->GetPlayer()));
+		if (m_MultiplayerRole == MultiplayerRole::Native) {
+			g_CameraMan.SetScreenOcclusion(occlusion, MenuScreen());
+		}
 
 		if (m_pParentBox->GetXPos() >= 0) {
 			m_MenuEnabled = ENABLED;
@@ -784,7 +814,9 @@ void BuyMenuGUI::Update() {
 		if (goProgress > 1.0)
 			goProgress = 1.0;
 		m_pParentBox->SetPositionAbs(m_pParentBox->GetXPos() + std::floor(toGo * goProgress), 0);
-		g_CameraMan.SetScreenOcclusion(Vector(m_pParentBox->GetWidth() + m_pParentBox->GetXPos(), 0), g_ActivityMan.GetActivity()->ScreenOfPlayer(m_pController->GetPlayer()));
+		if (m_MultiplayerRole == MultiplayerRole::Native) {
+			g_CameraMan.SetScreenOcclusion(Vector(m_pParentBox->GetWidth() + m_pParentBox->GetXPos(), 0), MenuScreen());
+		}
 		m_pPopupBox->SetVisible(false);
 
 		if (m_pParentBox->GetXPos() <= -m_pParentBox->GetWidth()) {
@@ -1582,6 +1614,13 @@ void BuyMenuGUI::Update() {
 	// Update the ControlManager
 
 	m_pGUIController->Update();
+	if (m_PressBuyForVerification) {
+		m_PressBuyForVerification = false;
+		int x, y, width, height;
+		m_pBuyButton->GetControlRect(&x, &y, &width, &height);
+		m_pBuyButton->OnMouseDown(x + width / 2, y + height / 2, GUIPanel::MOUSE_LEFT, 0);
+		m_pBuyButton->OnMouseUp(x + width / 2, y + height / 2, GUIPanel::MOUSE_LEFT, 0);
+	}
 
 	///////////////////////////////////////
 	// Handle events
@@ -1916,6 +1955,9 @@ void BuyMenuGUI::Update() {
 }
 
 void BuyMenuGUI::Draw(BITMAP* drawBitmap) const {
+	if (m_MultiplayerRole == MultiplayerRole::Host) {
+		return;
+	}
 	AllegroScreen drawScreen(drawBitmap);
 	m_pGUIController->Draw(&drawScreen);
 	if (IsEnabled() && m_pController->IsMouseControlled()) {
@@ -2365,7 +2407,7 @@ void BuyMenuGUI::AddPresetsToItemList() {
 }
 
 void BuyMenuGUI::UpdateTotalCostLabel(int whichTeam) {
-	std::string display = "Cost: " + RoundFloatToPrecision(GetTotalOrderCost(), 0, 2) + "/" + RoundFloatToPrecision(g_ActivityMan.GetActivity()->GetTeamFunds(whichTeam), 0);
+	std::string display = "Cost: " + RoundFloatToPrecision(GetTotalOrderCost(), 0, 2) + "/" + RoundFloatToPrecision(TeamFunds(whichTeam), 0);
 	m_pCostLabel->SetText(display);
 }
 
@@ -2406,22 +2448,23 @@ void BuyMenuGUI::UpdateTotalPassengersLabel(const ACraft* pCraft, GUILabel* pLab
 }
 
 void BuyMenuGUI::TryPurchase() {
-	int player = m_pController->GetPlayer();
+	// A guest's menu plays its own feedback; the host's copy stays silent.
+	auto PlayMenuSound = [this](SoundContainer* sound) { if (m_MultiplayerRole != MultiplayerRole::Host) { sound->Play(m_pController->GetPlayer()); } };
 	// Switch to the Craft category to give the user a hint
 	if (!m_pSelectedCraft) {
 		m_MenuCategory = CRAFT;
 		CategoryChange();
 		m_FocusChange = -2;
 		m_MenuFocus = ITEMS;
-		g_GUISound.UserErrorSound()->Play(player);
+		PlayMenuSound(g_GUISound.UserErrorSound());
 		// Set the notification blinker
 		m_BlinkMode = NOCRAFT;
 		m_BlinkTimer.Reset();
 		return;
 	}
 	// Can't afford it :(
-	else if (GetTotalOrderCost() > g_ActivityMan.GetActivity()->GetTeamFunds(m_pController->GetTeam())) {
-		g_GUISound.UserErrorSound()->Play(player);
+	else if (GetTotalOrderCost() > TeamFunds(m_pController->GetTeam())) {
+		PlayMenuSound(g_GUISound.UserErrorSound());
 		// Set the notification blinker
 		m_BlinkMode = NOFUNDS;
 		m_BlinkTimer.Reset();
@@ -2434,7 +2477,7 @@ void BuyMenuGUI::TryPurchase() {
 		if (pCraft) {
 			// Enforce max mass
 			if (m_EnforceMaxMassConstraint && pCraft->GetMaxInventoryMass() >= 0 && GetTotalOrderMass() > pCraft->GetMaxInventoryMass()) {
-				g_GUISound.UserErrorSound()->Play(player);
+				PlayMenuSound(g_GUISound.UserErrorSound());
 				// Set the notification blinker
 				m_BlinkMode = MAXMASS;
 				m_BlinkTimer.Reset();
@@ -2443,7 +2486,7 @@ void BuyMenuGUI::TryPurchase() {
 
 			// Enforce max passengers
 			if (pCraft->GetMaxPassengers() >= 0 && GetTotalOrderPassengers() > pCraft->GetMaxPassengers() && m_EnforceMaxPassengersConstraint) {
-				g_GUISound.UserErrorSound()->Play(player);
+				PlayMenuSound(g_GUISound.UserErrorSound());
 				// Set the notification blinker
 				m_BlinkMode = MAXPASSENGERS;
 				m_BlinkTimer.Reset();
@@ -2453,10 +2496,50 @@ void BuyMenuGUI::TryPurchase() {
 	}
 
 	// Only allow purchase if there is a delivery craft and enough funds
-	if (m_pSelectedCraft && std::floor(GetTotalOrderCost()) <= std::floor(g_ActivityMan.GetActivity()->GetTeamFunds(m_pController->GetTeam()))) {
+	if (m_pSelectedCraft && std::floor(GetTotalOrderCost()) <= std::floor(TeamFunds(m_pController->GetTeam()))) {
 		m_PurchaseMade = true;
 		m_DeliveryWidth = static_cast<const MOSprite*>(m_pSelectedCraft)->GetSpriteWidth();
 
-		g_GUISound.PurchaseMadeSound()->Play(player);
+		PlayMenuSound(g_GUISound.PurchaseMadeSound());
 	}
+}
+
+float BuyMenuGUI::TeamFunds(int team) const {
+	if (m_MultiplayerRole == MultiplayerRole::Guest) {
+		return m_GuestFunds;
+	}
+	const Activity* activity = g_ActivityMan.GetActivity();
+	return activity ? activity->GetTeamFunds(team) : 0;
+}
+
+int BuyMenuGUI::MenuScreen() const {
+	const Activity* activity = g_ActivityMan.GetActivity();
+	return m_MultiplayerRole == MultiplayerRole::Guest || !activity ? 0 : activity->ScreenOfPlayer(m_pController->GetPlayer());
+}
+
+void BuyMenuGUI::SetGuestOrder(const SceneObject* craft, const std::vector<const SceneObject*>& items) {
+	auto allowed = [this](const SceneObject* object) {
+		const std::string name = object->GetModuleAndPresetName();
+		if (IsAlwaysAllowedItem(name)) {
+			return true;
+		}
+		// As for loadouts, the allowed list limits only what the catalog offers.
+		if (IsProhibitedItem(name)) {
+			return false;
+		}
+		return !m_OnlyShowOwnedItems || GetOwnedItemsAmount(name) > 0;
+	};
+	ClearCartList();
+	m_pSelectedCraft = craft && allowed(craft) ? craft : nullptr;
+	for (const SceneObject* item: items) {
+		if (allowed(item)) {
+			AddCartItem(item->GetPresetName(), item->GetGoldValueString(m_NativeTechModule, m_ForeignCostMult), nullptr, item);
+		}
+	}
+	m_GuestOrderPending = true;
+}
+
+void BuyMenuGUI::PressBuyButtonForVerification() {
+	// Pressed during the next Update, after the GUI clears its event queue.
+	m_PressBuyForVerification = true;
 }

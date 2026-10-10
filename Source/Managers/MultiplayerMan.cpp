@@ -10,6 +10,8 @@
 #include "ConsoleMan.h"
 #include "FrameMan.h"
 #include "GameActivity.h"
+#include "BuyMenuGUI.h"
+#include "ACraft.h"
 #include "LuaMan.h"
 #include "PresetMan.h"
 #include "Scene.h"
@@ -129,6 +131,11 @@ struct MultiplayerMan::Impl {
 		// Resources the latest state shows that the guest lacks, rebuilt each
 		// capture. They follow view tiles and precede the rest of the map.
 		std::deque<uint64_t> StateQueue;
+		// The buy menu state last sent to this guest, which shows its own copy.
+		std::vector<uint8_t> ShopState;
+		uint64_t ShopStateAt = 0;
+		uint32_t ShopOpenCount = 0;
+		bool ShopOpen = false;
 	};
 	Mode State = Mode::Idle;
 	Transport Net;
@@ -251,6 +258,36 @@ struct MultiplayerMan::Impl {
 	MultiplayerWorld World;
 	MP::World::Assembler SnapshotAssembly, ResourceAssembly{30000, 1024, 32 * 1024 * 1024};
 	std::deque<MP::World::Snapshot> PendingWorlds;
+	// The guest's own buy menu. The host opens it and supplies the team's funds
+	// and item rules; browsing, the cart and loadouts stay on this computer, and
+	// only a purchase or closing it goes to the host.
+	std::unique_ptr<BuyMenuGUI> Shop;
+	Controller ShopController{Controller::CIM_PLAYER, Players::PlayerOne};
+	uint32_t ShopOpenCount = 0;
+	bool ShopEnabled = false;
+	float ShopFunds = 0;
+	std::string ShopRules;
+	BITMAP* ShopBitmap = nullptr;
+	unsigned int ShopTexture = 0;
+	std::vector<uint32_t> ShopPixels;
+	static constexpr size_t ShopListLimit = 256, ShopOrderLimit = 128;
+	bool ShopOpenNow() const { return Shop && Shop->IsEnabled(); }
+	void SendShopState(int slot, uint64_t now);
+	void SmokeShopTick(GameActivity& game);
+	void ReceiveGuestShop(int slot, MP::Reader& reader);
+	void ReceiveShop(MP::Reader& reader);
+	void UpdateShop();
+	void DrawShop(ImVec2 position, ImVec2 size);
+	void ResetShop() {
+		Shop.reset(); ShopOpenCount = 0; ShopEnabled = false; ShopRules.clear(); ShopPixels.clear();
+		if (ShopBitmap) { destroy_bitmap(ShopBitmap); ShopBitmap = nullptr; }
+		if (ShopTexture) { rlUnloadTexture(ShopTexture); ShopTexture = 0; }
+	}
+	// Guest buy menu verification: the host opens every guest's menu, the guest
+	// buys from it and confirms a landing zone, and the delivery must follow.
+	bool SmokeShopBought = false, SmokeShopCaptured = false, SmokeLandingConfirmed = false; uint64_t SmokeShopOpenedAt = 0, SmokeLandingAt = 0;
+	std::array<bool, 4> SmokeShopRequested{}, SmokeShopOrdered{}, SmokeShopDelivered{};
+	std::array<int, 4> SmokeShopDeliveries{};
 	// Recently decoded states by ID; the host encodes deltas against one this guest acknowledged.
 	std::array<MP::World::Snapshot, 32> DecodedStates;
 	std::unordered_set<uint64_t> MissingResources, ReportedResources;
@@ -366,7 +403,7 @@ struct MultiplayerMan::Impl {
 		player.SceneSent = false; player.SceneQueue.clear(); player.UrgentQueue.clear(); player.Urgent.clear(); player.StateQueue.clear();
 	}
 	void Stop() {
-		Menu.reset();
+		Menu.reset(); ResetShop();
 		if (TextActive && State != Mode::Host && !Dedicated) SDL_StopTextInput(g_WindowMan.GetWindow()); TextActive = false;
 		if (SmokeLoop) { SmokeLoop->Stop(); SmokeLoop.reset(); }
 		if (State == Mode::Host) { MP::Writer leave(Kind::Leave, Session, Epoch); for (size_t i = FirstRemote(); i < Players.size(); ++i) if (Players[i].Connected) Net.Send(Players[i].Address, leave.Data, Delivery::Control); }
@@ -1141,6 +1178,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 				player.AckID = id; player.LastAck = Now(); if (!player.AudioReady) g_MultiplayerMan.SetTextInputActive(slot, player.TextActive); player.AudioReady = true; } }
 		}
 		else if (header.Type == Kind::TextInput && Playing) { uint8_t direction; std::string text; if (reader.U8(direction) && direction == 0 && reader.Text(text, 64) && reader.Done() && player.TextActive && player.Text.size() + text.size() <= 256) { player.Text += text; if (Smoke && text == "Shop text test") { player.SmokeTextSeen = true; Verify("GUI TEXT: player " + std::to_string(slot + 1)); } } }
+		else if (header.Type == Kind::Shop && Playing) ReceiveGuestShop(slot, reader);
 		else if (header.Type == Kind::RoomControl && Dedicated && slot == OwnerSlot) {
 			std::string control, text; uint32_t value, edit;
 			if (reader.Text(control, 32) && reader.U32(value) && reader.Text(text, 192) && reader.U32(edit) && reader.Done()) {
@@ -1164,7 +1202,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			for (size_t i = 0; i < 3; ++i) if (LocalInput.MouseHeld & (1 << i)) ++LocalInput.MouseReleases[i];
 			LocalInput.Held = 0; LocalInput.MouseHeld = 0; LocalInput.AimX = LocalInput.AimY = LocalInput.MoveX = LocalInput.MoveY = 0;
 		} else LocalInput = {};
-		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; PendingEdits.clear(); EditSequence = 0; Draft = {}; World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
+		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; PendingEdits.clear(); EditSequence = 0; Draft = {}; ResetShop(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
 	}
 	if (State != Mode::Client || header.Session != Session) return;
 	if (header.Type == Kind::Chat) { uint8_t player; std::string message; if (reader.U8(player) && player < 4 && reader.Text(message, 192) && reader.Done()) AddChat(player, message); return; }
@@ -1180,7 +1218,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		for (auto& slot: slots) if (!reader.U8(slot.Occupied) || slot.Occupied > 1 || !reader.U8(slot.Connected) || slot.Connected > 1 || !reader.U8(slot.Ready) || slot.Ready > 1 || !reader.U8(slot.Team) || slot.Team > 3 || !reader.Text(slot.Name, 31) || !reader.U32(slot.AppliedEdit)) return;
 		if (!reader.Done()) return;
 		const bool changedMatch = Epoch != header.Epoch || Playing != (playing != 0);
-		if (Epoch != header.Epoch) { Epoch = header.Epoch; LocalInput = {}; ClearSounds(); TextActive = false; LastFrameReceived = Now(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; TextureWidth = TextureHeight = 0; }
+		if (Epoch != header.Epoch) { Epoch = header.Epoch; LocalInput = {}; ClearSounds(); TextActive = false; ResetShop(); LastFrameReceived = Now(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; TextureWidth = TextureHeight = 0; }
 		if (changedMatch && !playing && Playing) { Played = true; Notice = "Round complete. Ready up for the next match."; }
 		if (changedMatch && playing) Notice.clear();
 		Hosted = dedicated != 0; OwnerSlot = ownerSlot; Playing = playing != 0; RoomName = room; ActivityName = activity; SceneName = scene; if (!Playing || changedMatch) UI = !Playing;
@@ -1206,13 +1244,147 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 	if (header.Epoch != Epoch) return;
 	if (header.Type == Kind::TextInput && Playing) { uint8_t direction, active; if (reader.U8(direction) && direction == 1 && reader.U8(active) && active <= 1 && reader.Done()) TextActive = active != 0; return; }
 	if ((header.Type == Kind::WorldSnapshot || header.Type == Kind::WorldResource || header.Type == Kind::WorldManifest) && Playing) { ReceiveWorld(header.Type, reader); return; }
+	if (header.Type == Kind::Shop && Playing) { ReceiveShop(reader); return; }
 	if (header.Type == Kind::Sound && Playing) HandleAudio(reader);
+}
+
+void MultiplayerMan::Impl::SmokeShopTick(GameActivity& game) {
+	for (int player = FirstRemote(); player <= SmokeGuests; ++player) {
+		const int team = game.GetTeamOfPlayer(player);
+		if (!SmokeShopRequested[player] && Players[player].Connected && game.GetControlledActor(player) && game.GetBuyGUI(player)) {
+			SmokeShopRequested[player] = true; game.SetTeamFunds(game.GetTeamFunds(team) + 20000, team); game.GetBuyGUI(player)->SetEnabled(true);
+		}
+		if (SmokeShopOrdered[player] && !SmokeShopDelivered[player] && game.GetDeliveryCount(team) > SmokeShopDeliveries[player]) { SmokeShopDelivered[player] = true; Verify("SHOP: player " + std::to_string(player) + " delivery ordered from the guest's own buy menu"); }
+	}
+}
+void MultiplayerMan::Impl::SendShopState(int slot, uint64_t now) {
+	auto& player = Players[slot];
+	auto* game = dynamic_cast<GameActivity*>(g_ActivityMan.GetActivity());
+	const BuyMenuGUI* menu = game ? game->GetBuyGUI(slot) : nullptr;
+	if (!menu || menu->GetMultiplayerRole() != BuyMenuGUI::MultiplayerRole::Host) return;
+	const bool open = menu->IsEnabled();
+	if (open && !player.ShopOpen) ++player.ShopOpenCount;
+	const bool changed = open != player.ShopOpen; player.ShopOpen = open;
+	const int team = game->GetTeamOfPlayer(slot);
+	MP::Writer state(Kind::Shop, Session, Epoch); state.U8(0); state.U8(open); state.U32(player.ShopOpenCount); state.U8(uint8_t(std::clamp(team, 0, 3)));
+	// Funds matter only while the menu is open; otherwise every payout would resend the state.
+	state.F32(open ? game->GetTeamFunds(team) : 0);
+	const int module = menu->GetNativeTechModule(); state.Text(module > 0 ? g_PresetMan.GetDataModuleName(module) : "", 128); state.F32(menu->GetForeignCostMultiplier());
+	state.U8(uint8_t(menu->GetOnlyShowOwnedItems()) | uint8_t(menu->EnforceMaxPassengersConstraint()) << 1 | uint8_t(menu->EnforceMaxMassConstraint()) << 2);
+	for (const auto* items : {&menu->GetAllowedItems(), &menu->GetAlwaysAllowedItems(), &menu->GetProhibitedItems()}) {
+		const size_t count = std::min(items->size(), ShopListLimit); state.U16(uint16_t(count));
+		auto item = items->begin(); for (size_t i = 0; i < count; ++i, ++item) state.Text(item->first, 192);
+	}
+	const auto& owned = menu->GetOwnedItems(); const size_t ownedCount = std::min(owned.size(), ShopListLimit); state.U16(uint16_t(ownedCount));
+	auto item = owned.begin(); for (size_t i = 0; i < ownedCount; ++i, ++item) { state.Text(item->first, 192); state.U32(uint32_t(std::max(0, item->second))); }
+	if (state.Data == player.ShopState || (!changed && now - player.ShopStateAt < 250)) return;
+	player.ShopState = state.Data; player.ShopStateAt = now; Net.Send(player.Address, state.Data, Delivery::Control);
+}
+void MultiplayerMan::Impl::ReceiveGuestShop(int slot, MP::Reader& reader) {
+	auto* game = dynamic_cast<GameActivity*>(g_ActivityMan.GetActivity());
+	BuyMenuGUI* menu = game ? game->GetBuyGUI(slot) : nullptr;
+	uint8_t type; if (!menu || menu->GetMultiplayerRole() != BuyMenuGUI::MultiplayerRole::Host || !reader.U8(type)) return;
+	if (type == 2) { if (reader.Done()) menu->SetEnabled(false); return; }
+	if (type != 1) return;
+	auto preset = [&](const SceneObject*& object) {
+		std::string kind, module, name; if (!reader.Text(kind, 64) || !reader.Text(module, 64) || !reader.Text(name, 128)) return false;
+		object = kind.empty() ? nullptr : dynamic_cast<const SceneObject*>(g_PresetMan.GetEntityPreset(kind, name, module)); return true;
+	};
+	const SceneObject* craft = nullptr; uint16_t count;
+	if (!preset(craft) || !reader.U16(count) || count > ShopOrderLimit) return;
+	// Only buyable presets are accepted; the host's menu then applies its own item rules,
+	// funds and craft limits exactly as for a purchase made in that menu.
+	std::vector<const SceneObject*> items;
+	for (uint16_t i = 0; i < count; ++i) { const SceneObject* item; if (!preset(item)) return; if (item && item->IsBuyable() && !dynamic_cast<const ACraft*>(item)) items.push_back(item); }
+	if (!reader.Done()) return;
+	if (!dynamic_cast<const ACraft*>(craft) || !craft->IsBuyable()) craft = nullptr;
+	menu->SetGuestOrder(craft, items);
+	if (Smoke) { SmokeShopOrdered[slot] = true; SmokeShopDeliveries[slot] = game->GetDeliveryCount(game->GetTeamOfPlayer(slot)); Verify("SHOP: player " + std::to_string(slot) + " ordered " + std::to_string(items.size()) + " items"); }
+}
+void MultiplayerMan::Impl::ReceiveShop(MP::Reader& reader) {
+	uint8_t type, open, team, flags; uint32_t openCount; float funds, foreign; std::string module;
+	if (!reader.U8(type) || type != 0 || !reader.U8(open) || open > 1 || !reader.U32(openCount) || !reader.U8(team) || team > 3 || !reader.F32(funds) || !reader.Text(module, 128) || !reader.F32(foreign) || !reader.U8(flags) || flags > 7) return;
+	std::array<std::vector<std::string>, 3> lists;
+	for (auto& list : lists) { uint16_t count; if (!reader.U16(count) || count > ShopListLimit) return; list.resize(count); for (auto& name : list) if (!reader.Text(name, 192)) return; }
+	uint16_t ownedCount; if (!reader.U16(ownedCount) || ownedCount > ShopListLimit) return;
+	std::vector<std::pair<std::string, uint32_t>> owned(ownedCount); for (auto& [name, amount] : owned) if (!reader.Text(name, 192) || !reader.U32(amount)) return;
+	if (!reader.Done()) return;
+	if (!Shop) { Shop = std::make_unique<BuyMenuGUI>(); Shop->SetMultiplayerRole(BuyMenuGUI::MultiplayerRole::Guest); Shop->Create(&ShopController); }
+	ShopController.SetTeam(team); Shop->SetGuestFunds(funds); ShopFunds = funds;
+	// Rules change rarely; applying them rebuilds the catalog and loadouts.
+	std::string rules = module + '\n' + std::to_string(foreign) + '\n' + std::to_string(flags);
+	for (const auto& list : lists) { rules += '\x1f'; for (const auto& name : list) rules += name + '\n'; }
+	for (const auto& [name, amount] : owned) rules += name + '=' + std::to_string(amount) + '\n';
+	if (rules != ShopRules) {
+		ShopRules = std::move(rules);
+		if (const int id = module.empty() ? -1 : g_PresetMan.GetModuleID(module); id > 0) Shop->SetNativeTechModule(id);
+		Shop->SetForeignCostMultiplier(foreign); Shop->SetOnlyShowOwnedItems(flags & 1); Shop->SetEnforceMaxPassengersConstraint(flags & 2); Shop->SetEnforceMaxMassConstraint(flags & 4);
+		Shop->ClearAllowedItems(); for (const auto& name : lists[0]) Shop->AddAllowedItem(name);
+		Shop->ClearAlwaysAllowedItems(); for (const auto& name : lists[1]) Shop->AddAlwaysAllowedItem(name);
+		Shop->ClearProhibitedItems(); for (const auto& name : lists[2]) Shop->AddProhibitedItem(name);
+		Shop->ClearOwnedItems(); for (const auto& [name, amount] : owned) Shop->SetOwnedItemsAmount(name, int(std::min<uint32_t>(amount, 1000000)));
+		Shop->LoadAllLoadoutsFromFile();
+	}
+	if (open && openCount != ShopOpenCount) { ShopOpenCount = openCount; Shop->SetEnabled(true); ShopEnabled = true; if (Smoke) Verify("SHOP: guest opened its own buy menu"); }
+	else if (!open && Shop->IsEnabled()) { Shop->SetEnabled(false); ShopEnabled = false; }
+}
+void MultiplayerMan::Impl::UpdateShop() {
+	if (!Shop) return;
+	if (Smoke && SmokeDeployment && Shop->IsEnabled() && !SmokeShopBought) {
+		if (!SmokeShopOpenedAt) SmokeShopOpenedAt = Now();
+		else if (Now() - SmokeShopOpenedAt > 1400) { SmokeShopBought = true; Shop->PressBuyButtonForVerification(); }
+		else if (Now() - SmokeShopOpenedAt > 700 && !SmokeShopCaptured) { SmokeShopCaptured = true; SmokeCaptureName = "shop"; SmokeCapture = true; }
+	}
+	if (Smoke && SmokeShopBought && SmokeShopOpenedAt && Shop->IsEnabled() && Now() - SmokeShopOpenedAt > 3000) {
+		SmokeShopOpenedAt = 0; const auto* craft = dynamic_cast<const ACraft*>(Shop->GetDeliveryCraftPreset());
+		Verify("SHOP: guest menu refused the purchase: craft=" + std::to_string(craft != nullptr) + " cost=" + std::to_string(int(Shop->GetTotalOrderCost())) + " funds=" + std::to_string(int(ShopFunds)) +
+			" passengers=" + std::to_string(Shop->GetTotalOrderPassengers()) + "/" + std::to_string(craft ? craft->GetMaxPassengers() : -9) + " mass=" + std::to_string(int(Shop->GetTotalOrderMass())) + "/" + std::to_string(int(craft ? craft->GetMaxInventoryMass() : -9)) +
+			" mouse=" + std::to_string(ShopController.IsMouseControlled()));
+	}
+	if (Shop->IsVisible()) { ShopController.Update(); Shop->Update(); }
+	if (Shop->PurchaseMade()) {
+		std::list<const SceneObject*> items; Shop->GetOrderList(items);
+		MP::Writer order(Kind::Shop, Session, Epoch); order.U8(1);
+		auto preset = [&](const SceneObject* object) { order.Text(object ? object->GetClassName() : "", 64); order.Text(object ? object->GetModuleName() : "", 64); order.Text(object ? object->GetPresetName() : "", 128); };
+		preset(Shop->GetDeliveryCraftPreset());
+		const size_t count = std::min(items.size(), ShopOrderLimit); order.U16(uint16_t(count));
+		auto item = items.begin(); for (size_t i = 0; i < count; ++i, ++item) preset(*item);
+		Net.Send(ServerAddress, order.Data, Delivery::Control);
+		// The host checks the order and starts landing-zone selection; the menu closes here at once.
+		Shop->SetEnabled(false); ShopEnabled = false;
+		if (Smoke) Verify("SHOP: guest bought from its own buy menu");
+		return;
+	}
+	if (ShopEnabled && !Shop->IsEnabled()) { MP::Writer close(Kind::Shop, Session, Epoch); close.U8(2); Net.Send(ServerAddress, close.Data, Delivery::Control); }
+	ShopEnabled = Shop->IsEnabled();
+}
+void MultiplayerMan::Impl::DrawShop(ImVec2 position, ImVec2 size) {
+	if (!Shop || !Shop->IsVisible()) return;
+	// The native menu draws palette colours into its own bitmap, shown over this guest's world.
+	const int width = g_WindowMan.GetResX(), height = g_WindowMan.GetResY();
+	if (!ShopBitmap || ShopBitmap->w != width || ShopBitmap->h != height) {
+		if (ShopBitmap) destroy_bitmap(ShopBitmap);
+		if (ShopTexture) rlUnloadTexture(ShopTexture);
+		ShopBitmap = create_bitmap_ex(8, width, height); ShopTexture = rlLoadTexture(nullptr, width, height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+		ShopPixels.assign(size_t(width) * height, 0);
+	}
+	clear_to_color(ShopBitmap, ColorKeys::g_MaskColor); Shop->Draw(ShopBitmap);
+	PALETTE palette; get_palette(palette);
+	for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+		const uint8_t index = ShopBitmap->line[y][x];
+		ShopPixels[size_t(y) * width + x] = index == ColorKeys::g_MaskColor ? 0 : 0xFF000000u | uint32_t(palette[index].b) << 16 | uint32_t(palette[index].g) << 8 | palette[index].r;
+	}
+	int previousTexture, alignment; glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture); glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+	glBindTexture(GL_TEXTURE_2D, ShopTexture); glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, ShopPixels.data());
+	glPixelStorei(GL_UNPACK_ALIGNMENT, alignment); glBindTexture(GL_TEXTURE_2D, previousTexture);
+	ImGui::GetBackgroundDrawList()->AddImage(static_cast<ImTextureID>(ShopTexture), position, ImVec2(position.x + size.x, position.y + size.y));
 }
 
 void MultiplayerMan::Impl::SampleInput() {
 	static_assert(InputElements::INPUT_COUNT <= GUIKeyFirst && GUIKeyFirst + GUIKeys.size() <= InputCount);
 	if (State != Mode::Client || !Playing) return;
-	const bool enabled = !UI && Controls && World.Ready() && !World.Paused() && (g_WindowMan.AnyWindowHasFocus() || Smoke);
+	const bool enabled = !UI && Controls && World.Ready() && !World.Paused() && !ShopOpenNow() && (g_WindowMan.AnyWindowHasFocus() || Smoke);
 	// Retransmissions may run between simulation steps. Accumulate each input
 	// revision once while continuing to send the latest cumulative snapshot.
 	if (LastSampledInputRevision != g_UInputMan.GetInputStateRevision()) {
@@ -1267,6 +1439,13 @@ void MultiplayerMan::Impl::SampleInput() {
 		if (cameraQ) LocalInput.MouseX += 3;
 		if (cameraQ && elapsed > 7000 && !SmokeQCameraCaptured) { SmokeQCameraCaptured = true; SmokeCaptureName = "camera-q"; SmokeCapture = true; }
 	}
+	if (SmokeShopBought && World.Ready() && World.ViewMode() == Activity::LandingZoneSelect && !SmokeLandingConfirmed) {
+		// Release fire first, so confirming the landing zone is a new press.
+		const uint64_t fire = uint64_t(1) << INPUT_FIRE;
+		if (!SmokeLandingAt) { SmokeLandingAt = Now(); ++LocalInput.Releases[INPUT_FIRE]; }
+		if (Now() - SmokeLandingAt < 400) LocalInput.Held &= ~fire;
+		else { SmokeLandingConfirmed = true; ++LocalInput.Presses[INPUT_FIRE]; LocalInput.Held |= fire; Verify("SHOP: guest confirmed its landing zone"); }
+	}
 	if (Smoke && TextActive && !SmokeTextSent) { SmokeTextSent = true; MP::Writer writer(Kind::TextInput, Session, Epoch); writer.U8(0); writer.Text("Shop text test", 64); Net.Send(ServerAddress, writer.Data, Delivery::Control); }
 	if (Smoke && SmokeStage == 1 && TextActive) LocalInput.Held |= uint64_t(1) << (GUIKeyFirst + 1);
 	World.ExportLocalView(LocalInput, enabled);
@@ -1300,7 +1479,7 @@ void MultiplayerMan::Impl::Tick() {
 			if (now - MatchEndedAt >= 5000) ReturnToLobby();
 		} else MatchEndedAt = 0;
 	}
-	if (State == Mode::Client && Playing && g_UInputMan.KeyPressed(SDLK_ESCAPE)) { UI = !UI; g_UInputMan.TrapMousePos(!UI); }
+	if (State == Mode::Client && Playing && g_UInputMan.KeyPressed(SDLK_ESCAPE)) { if (ShopOpenNow()) Shop->SetEnabled(false); else { UI = !UI; g_UInputMan.TrapMousePos(!UI); } }
 	std::erase_if(Sounds, [](const auto& entry) { return !entry.second->IsBeingPlayed(); });
 	for (const auto& event: Net.Poll()) {
 		if (event.Kind == TransportEvent::Type::Data) Receive(event);
@@ -1347,12 +1526,13 @@ void MultiplayerMan::Impl::Tick() {
 		for (int i = FirstRemote(); i < 4; ++i) {
 			auto& player = Players[i];
 			if (!Playing && player.Token && !player.Connected && now >= player.ReservedUntil) { Net.Close(player.Address); player = Player(); Lobby(); }
-			if (Playing && player.Connected) FillResources(player);
+			if (Playing && player.Connected) { SendShopState(i, now); FillResources(player); }
 			PumpWorld(player, now);
 			if (Playing && player.Token) SendAudio(i); else g_AudioMan.ClearSoundEvents(i);
 		}
 		if (!Dedicated) g_AudioMan.ClearSoundEvents(0);
 	}
+	if (State == Mode::Client && Playing) UpdateShop();
 	SampleInput();
 	while (!RecentWorldUpdates.empty() && now >= RecentWorldUpdates.front() && now - RecentWorldUpdates.front() >= 1000) RecentWorldUpdates.pop_front();
 	if (Playing && now - LastNetworkLog >= 2000) {
@@ -1850,7 +2030,10 @@ void MultiplayerMan::Impl::DeploymentTick() {
 	}
 	if (SmokeStage == 3 && now - SmokeStageTime > 6000) { for (int player = 1; player <= SmokeGuests; ++player) game->GetEditorGUI(player)->SetEditorGUIMode(SceneEditorGUI::DONEEDITING); SmokeStage = 4; Verify("DEPLOYMENT: guests ready, waiting for host"); SmokeCapture = true; }
 	if (SmokeStage == 4 && now - SmokeStageTime > 9000) { game->GetEditorGUI(0)->SetEditorGUIMode(SceneEditorGUI::DONEEDITING); SmokeStage = 5; Verify("DEPLOYMENT: all ready, combat"); SmokeCapture = true; }
-	if (SmokeStage == 5 && now - SmokeStageTime > 12000) { bool passed = !SmokeDeploymentFailed && game->GetActivityState() == Activity::Running; for (int player = 1; player <= SmokeGuests; ++player) { Verify("DEPLOYMENT: player=" + std::to_string(player) + " ack=" + std::to_string(Players[player].AckID)); passed &= Players[player].AckID > 20 && g_SceneMan.IsUnseen(10, g_SceneMan.GetSceneHeight() - 20, game->GetTeamOfPlayer(player)); } Verify(passed ? "PASS: deployment completed into combat with fog preserved" : "FAIL: deployment visibility, combat transition or fog preservation"); ReturnToLobby(); SmokeStage = 6; SmokeStageTime = now; }
+	// Combat: every guest buys from its own buy menu and confirms a landing zone.
+	if (SmokeStage == 5 && now - SmokeStageTime > 10500 && game->GetActivityState() == Activity::Running) SmokeShopTick(*game);
+	const bool delivered = std::all_of(SmokeShopDelivered.begin() + 1, SmokeShopDelivered.begin() + 1 + SmokeGuests, [](bool value) { return value; });
+	if (SmokeStage == 5 && now - SmokeStageTime > 12000 && (delivered || now - SmokeStageTime > 24000)) { bool passed = !SmokeDeploymentFailed && game->GetActivityState() == Activity::Running && delivered; for (int player = 1; player <= SmokeGuests; ++player) { Verify("DEPLOYMENT: player=" + std::to_string(player) + " ack=" + std::to_string(Players[player].AckID)); passed &= Players[player].AckID > 20 && g_SceneMan.IsUnseen(10, g_SceneMan.GetSceneHeight() - 20, game->GetTeamOfPlayer(player)); Verify("DEPLOYMENT: player=" + std::to_string(player) + " shop opened=" + std::to_string(SmokeShopRequested[player]) + " ordered=" + std::to_string(SmokeShopOrdered[player]) + " delivered=" + std::to_string(SmokeShopDelivered[player])); } Verify(passed ? "PASS: deployment completed into combat with fog preserved; every guest bought a delivery from its own buy menu" : "FAIL: deployment visibility, combat transition, fog preservation or guest purchase"); ReturnToLobby(); SmokeStage = 6; SmokeStageTime = now; }
 	if (SmokeStage == 6 && now - SmokeStageTime > 1000) { Stop(); System::SetQuit(true); }
 }
 
@@ -2170,7 +2353,7 @@ void MultiplayerMan::Impl::Draw() {
 	}
 	ImGui::GetIO().MouseDrawCursor = false;
 	if (State == Mode::Client && Playing && World.Ready()) {
-		World.SetLocalInput(LocalInput, !UI && Controls && !World.Paused());
+		World.SetLocalInput(LocalInput, !UI && Controls && !World.Paused() && !ShopOpenNow());
 		Texture = World.Render(Now()); TextureWidth = World.Width(); TextureHeight = World.Height();
 		// Spatial audio follows the camera actually rendered this frame, including
 		// local free flight and aim look-ahead, not the last received host camera.
@@ -2183,6 +2366,7 @@ void MultiplayerMan::Impl::Draw() {
 		const auto* viewport = ImGui::GetMainViewport(); const float scale = std::min(viewport->Size.x / TextureWidth, viewport->Size.y / TextureHeight);
 		const ImVec2 size(TextureWidth * scale, TextureHeight * scale), position(viewport->Pos.x + (viewport->Size.x - size.x) * 0.5f, viewport->Pos.y + (viewport->Size.y - size.y) * 0.5f);
 		auto* draw = ImGui::GetBackgroundDrawList(); draw->AddRectFilled(viewport->Pos, ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y), IM_COL32(0, 0, 0, 255)); draw->AddImage(static_cast<ImTextureID>(Texture), position, ImVec2(position.x + size.x, position.y + size.y), ImVec2(0, 1), ImVec2(1, 0));
+		DrawShop(position, size);
 	}
 	const bool visible = UI || WarmingGuests || State == Mode::Connecting || State == Mode::Reconnecting || (!CursorVerification && State == Mode::Client && Playing && (!Texture || World.Paused()));
 	if (!visible) { if (Menu) Menu->Hide(); if (CursorVerification) CursorPreparedStage = static_cast<int>(CursorStage); return; }

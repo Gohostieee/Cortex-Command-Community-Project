@@ -665,6 +665,7 @@ std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const 
 }
 bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !SceneryReady(snapshot)) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
+uint8_t MultiplayerWorld::ViewMode() const { return m_Impl->States.Empty() ? 0 : m_Impl->States.Latest().ViewMode; }
 unsigned MultiplayerWorld::StaleTiles() const { return m_Impl->StaleTiles; }
 unsigned MultiplayerWorld::BlackTiles() const { return m_Impl->BlackTiles; }
 unsigned MultiplayerWorld::BlackFogTiles() const { return m_Impl->BlackFogTiles; }

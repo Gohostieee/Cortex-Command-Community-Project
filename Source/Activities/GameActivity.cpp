@@ -1072,6 +1072,9 @@ void GameActivity::Update() {
 		// Temporary hack to avoid teh buy menu buy button to be pressed immediately after selecting an LZ for a previous order
 		bool skipBuyUpdate = false;
 
+		// A remote multiplayer guest shows and operates its own buy menu; this one keeps its state and checks its orders.
+		m_pBuyGUI[player]->SetMultiplayerRole(g_MultiplayerMan.IsRemotePlayer(player) ? BuyMenuGUI::MultiplayerRole::Host : BuyMenuGUI::MultiplayerRole::Native);
+
 		// Set the team associations with each screen displayed
 		g_CameraMan.SetScreenTeam(team, ScreenOfPlayer(player));
 

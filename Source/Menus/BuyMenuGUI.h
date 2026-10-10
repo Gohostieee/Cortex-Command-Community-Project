@@ -178,6 +178,54 @@ namespace RTE {
 		/// @param drawBitmap The bitmap to draw on.
 		void Draw(BITMAP* drawBitmap) const;
 
+		/// How a multiplayer match uses this menu.
+		enum class MultiplayerRole {
+			Native, //!< Shown and operated where it runs.
+			Host, //!< A remote guest shows and operates this menu. This instance only keeps its open state, and checks and purchases the order the guest submits.
+			Guest //!< Runs on a multiplayer guest, which has no match activity. Team funds come from SetGuestFunds.
+		};
+
+		/// Sets how a multiplayer match uses this menu.
+		/// @param role The menu's role.
+		void SetMultiplayerRole(MultiplayerRole role) { m_MultiplayerRole = role; }
+
+		/// Gets how a multiplayer match uses this menu.
+		/// @return The menu's role.
+		MultiplayerRole GetMultiplayerRole() const { return m_MultiplayerRole; }
+
+		/// Sets the team funds a guest's menu shows and checks purchases against.
+		/// @param funds The team's funds.
+		void SetGuestFunds(float funds) { m_GuestFunds = funds; }
+
+		/// Replaces the cart and delivery craft with an order a guest submitted, keeping only what this menu's item rules allow.
+		/// The next Update checks it exactly like a purchase made in this menu.
+		/// @param craft The delivery craft preset.
+		/// @param items The cart's presets, in cart order.
+		void SetGuestOrder(const SceneObject* craft, const std::vector<const SceneObject*>& items);
+
+		/// Gets the module whose items count as native for pricing.
+		/// @return The native tech module ID.
+		int GetNativeTechModule() const { return m_NativeTechModule; }
+
+		/// Gets the price multiplier for items from other modules.
+		/// @return The foreign cost multiplier.
+		float GetForeignCostMultiplier() const { return m_ForeignCostMult; }
+
+		/// Gets the items this menu limits itself to, if any.
+		const std::map<std::string, bool>& GetAllowedItems() const { return m_AllowedItems; }
+
+		/// Gets the items this menu always shows.
+		const std::map<std::string, bool>& GetAlwaysAllowedItems() const { return m_AlwaysAllowedItems; }
+
+		/// Gets the items this menu never shows.
+		const std::map<std::string, bool>& GetProhibitedItems() const { return m_ProhibitedItems; }
+
+		/// Gets the owned items and their amounts.
+		const std::map<std::string, int>& GetOwnedItems() const { return m_OwnedItems; }
+
+		/// Presses the Buy button, for automated verification.
+		void PressBuyButtonForVerification();
+
 		/// Tells whether passenger count constraints are enforced by this buy menu.
 		/// @return True if passenger constraints are enforced by this menu, false otherwise
 		bool EnforceMaxPassengersConstraint() const { return m_EnforceMaxPassengersConstraint; };
@@ -274,6 +322,9 @@ namespace RTE {
 		/// Sets the amount of specified items to be owned in this buy menu
 		/// @param presetName Full preset name of item to own. Amount of owned items.
 		void SetOwnedItemsAmount(std::string presetName, int amount) { m_OwnedItems[std::move(presetName)] = amount; };
+
+		/// Removes every owned item.
+		void ClearOwnedItems() { m_OwnedItems.clear(); }
 
 		/// Returns the amount of specified items owned in this buy menu
 		/// @param presetName Full preset name of item.
@@ -516,6 +567,20 @@ namespace RTE {
 
 		/// Refresh tab disabled states, so tabs get properly enabled/disabled based on whether or not equipment selection mode is enabled.
 		void RefreshTabDisabledStates();
+
+		MultiplayerRole m_MultiplayerRole; //!< How a multiplayer match uses this menu.
+		float m_GuestFunds; //!< The team funds a guest's menu shows and checks purchases against.
+		bool m_GuestOrderPending; //!< Whether a guest's submitted order waits to be checked and purchased.
+		bool m_PressBuyForVerification; //!< Whether the next Update presses the Buy button, for automated verification.
+
+		/// Gets the funds of the given team, as the match or the host reports them.
+		/// @param team The team.
+		/// @return The team's funds.
+		float TeamFunds(int team) const;
+
+		/// Gets the screen this menu's player uses here.
+		/// @return The screen index.
+		int MenuScreen() const;
 
 		/// Clears all the member variables of this BuyMenuGUI, effectively
 		/// resetting the members of this abstraction level only.

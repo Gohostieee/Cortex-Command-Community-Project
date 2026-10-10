@@ -22,7 +22,7 @@ inline constexpr uint16_t ChunkBytes = 1100, ParityGroup = 8;
 inline constexpr uint32_t InputTimeoutMS = 250;
 
 // Values 5 and 6 belonged to the retired framebuffer stream.
-enum class Kind : uint8_t { Hello = 0, Welcome, Lobby, Ready, Input, Leave = 7, Reject, Sound, Announcement, Chat, TextInput, WorldSnapshot, WorldResource, WorldAck, WorldManifest, RoomControl };
+enum class Kind : uint8_t { Hello = 0, Welcome, Lobby, Ready, Input, Leave = 7, Reject, Sound, Announcement, Chat, TextInput, WorldSnapshot, WorldResource, WorldAck, WorldManifest, RoomControl, Shop };
 inline bool Newer(uint32_t value, uint32_t previous) { return value != previous && uint32_t(value - previous) < 0x80000000u; }
 
 // The wire format is explicit big endian. No engine structures, pointers, hashes,
@@ -61,7 +61,7 @@ struct Header { Kind Type{}; uint64_t Session = 0; uint32_t Epoch = 0; };
 inline bool ReadHeader(Reader& reader, Header& header) {
 	uint8_t id, kind; uint32_t magic; uint16_t version;
 	if (!reader.U8(id) || !reader.U32(magic) || !reader.U16(version) || !reader.U8(kind) || !reader.U64(header.Session) || !reader.U32(header.Epoch)) return false;
-	if (id != PacketID || magic != Magic || version != Version || kind == 5 || kind == 6 || kind > static_cast<uint8_t>(Kind::RoomControl)) return false;
+	if (id != PacketID || magic != Magic || version != Version || kind == 5 || kind == 6 || kind > static_cast<uint8_t>(Kind::Shop)) return false;
 	header.Type = static_cast<Kind>(kind); return true;
 }
 

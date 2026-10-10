@@ -47,6 +47,8 @@ public:
     // Center of the most recently rendered local camera, for the audio listener.
     bool RenderedCenter(Vector& center) const;
     bool Ready() const;
+    // The native view mode of the newest state (Activity::ViewState, or 10 + editor mode).
+    uint8_t ViewMode() const;
     // Scene tiles in the last rendered frame shown from an older revision, and covered black while missing.
     unsigned StaleTiles() const;
     unsigned BlackTiles() const;
