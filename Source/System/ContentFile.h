@@ -124,6 +124,10 @@ namespace RTE {
 		/// Reloads all BITMAPs in the cache from disk, allowing any changes to be reflected at runtime.
 		static void ReloadAllBitmaps();
 
+		/// Gets every BITMAP in the cache, of every bit depth. Ownership of the BITMAPs is NOT transferred!
+		/// @return Pointers to every cached BITMAP.
+		static std::vector<BITMAP*> GetLoadedBitmaps();
+
 		/// Gets the data represented by this ContentFile object as an Allegro BITMAP, loading it into the static maps if it's not already loaded. Note that ownership of the BITMAP is NOT transferred!
 		/// @param conversionMode The Allegro color conversion mode to use when loading this bitmap.
 		/// @param storeBitmap Whether to store the BITMAP in the relevant static map after loading it or not. If this is false, ownership of the BITMAP IS transferred!

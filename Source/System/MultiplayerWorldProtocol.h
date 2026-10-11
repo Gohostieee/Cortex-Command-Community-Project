@@ -74,38 +74,69 @@ struct Snapshot {
     // Shared with the capture pass rather than copied for every guest.
     std::shared_ptr<const std::unordered_set<uint64_t>> CriticalNodes;
     bool Critical(uint64_t id) const { return CriticalNodes && CriticalNodes->contains(id); }
+    // Capture-only rigid debris: sprites of loose rotating bodies such as craft
+    // and actor gibs, which outrank explosion particles when a state is thinned.
+    std::shared_ptr<const std::unordered_set<uint64_t>> DebrisNodes;
+    bool Debris(uint64_t id) const { return DebrisNodes && DebrisNodes->contains(id); }
 };
+// A node's thinning tier. Tier 0 (screen space, scene layers, actors and
+// devices) is always sent; under budget pressure the highest tier goes first.
+inline constexpr size_t TierCount = 5;
+inline size_t NodeTier(const Snapshot& snapshot, const Node& node) {
+    if ((node.Flags & (ScreenSpace | Layer)) || snapshot.Critical(node.ID)) return 0;
+    if (snapshot.Debris(node.ID)) return 1;
+    if (node.Type == Shape::PixelPath) return 2;
+    return node.Type == Shape::Sprite ? 3 : 4;
+}
+inline std::array<uint32_t, TierCount> CountTiers(const Snapshot& snapshot) {
+    std::array<uint32_t, TierCount> counts{};
+    for (const auto& node : snapshot.Nodes) ++counts[NodeTier(snapshot, node)];
+    return counts;
+}
+// A node's position in a fixed pseudo-random order, out of 1024. Thinning by
+// this key instead of by index keeps the same objects selected while the
+// budget holds steady, however many particles come and go around them.
+inline uint32_t StableKey(uint64_t id) {
+    id ^= id >> 33; id *= 0xff51afd7ed558ccdULL; id ^= id >> 33; id *= 0xc4ceb9fe1a85ec53ULL; id ^= id >> 33;
+    return uint32_t(id & 1023);
+}
+// Fits the actual compressed representation to the budget, retaining native
+// painter order. Tiers are kept whole in order; the first that does not fit
+// is thinned by stable key, and the tiers after it are dropped. Tier 0 stays
+// complete even when it alone exceeds the budget. The last state measured is
+// the one returned, since the measure may keep its encoding.
 template <typename Measure>
 inline size_t FitSnapshot(Snapshot& snapshot, size_t packedBudget, Measure measure) {
-    size_t packedSize = measure(snapshot);
+    const size_t packedSize = measure(snapshot);
     if (packedSize <= packedBudget) return packedSize;
-    auto essential = [&](const Node& n) { return (n.Flags & (ScreenSpace | Layer)) || snapshot.Critical(n.ID); };
-    const size_t optional = std::count_if(snapshot.Nodes.begin(), snapshot.Nodes.end(), [&](const Node& n) { return !essential(n); });
-    if (!optional) return packedSize;
-    auto original = std::move(snapshot.Nodes);
-    snapshot.Nodes.clear();
-    for (const auto& node : original) if (essential(node)) snapshot.Nodes.push_back(node);
-    const size_t criticalSize = measure(snapshot);
-    if (criticalSize >= packedBudget) return criticalSize;
-    std::array<size_t, 2> counts{};
-    auto rank = [](const Node& node) { return node.Type == Shape::PixelPath ? 0 : 1; };
-    for (const auto& node : original) if (!essential(node)) ++counts[rank(node)];
-    size_t limit = optional;
-    // Fit the actual compressed representation, retaining native painter order.
-    // Critical state remains complete even when it alone exceeds the budget.
-    for (int attempt = 0; attempt < 6; ++attempt) {
-        const size_t next = size_t(double(limit) * double(packedBudget - criticalSize) / double(packedSize - criticalSize) * 0.85);
-        limit = attempt == 5 ? 0 : std::min(limit - 1, next);
-        snapshot.Nodes.clear(); std::array<size_t, 2> seen{};
-        const std::array<size_t, 2> keepCount{std::min(limit, counts[0]), limit > counts[0] ? limit - counts[0] : 0};
-        for (const auto& node : original) {
-            if (essential(node)) snapshot.Nodes.push_back(node);
-            else { const auto group = rank(node); const bool keep = (seen[group] + 1) * keepCount[group] / counts[group] != seen[group] * keepCount[group] / counts[group]; ++seen[group]; if (keep) snapshot.Nodes.push_back(node); }
+    std::vector<uint8_t> tiers(snapshot.Nodes.size()); std::array<size_t, TierCount> counts{};
+    for (size_t i = 0; i < tiers.size(); ++i) ++counts[tiers[i] = uint8_t(NodeTier(snapshot, snapshot.Nodes[i]))];
+    if (counts[0] == tiers.size()) return packedSize;
+    const auto original = std::move(snapshot.Nodes);
+    // Every node below `tier`, and the nodes of `tier` whose key is below `threshold`.
+    auto select = [&](size_t tier, uint32_t threshold) {
+        snapshot.Nodes.clear();
+        for (size_t i = 0; i < original.size(); ++i) if (tiers[i] < tier || (tiers[i] == tier && StableKey(original[i].ID) < threshold)) snapshot.Nodes.push_back(original[i]);
+        return measure(snapshot);
+    };
+    size_t fitted = select(1, 0);
+    if (fitted >= packedBudget) return fitted;
+    for (size_t tier = 1; tier < TierCount; ++tier) {
+        if (!counts[tier]) continue;
+        const bool last = std::none_of(counts.begin() + tier + 1, counts.end(), [](size_t count) { return count != 0; });
+        const size_t whole = last ? packedSize : select(tier + 1, 0);
+        if (whole <= packedBudget) { fitted = whole; continue; }
+        uint32_t threshold = 1024; size_t over = whole;
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            // Quantized, so a steady budget settles on one threshold.
+            const double share = over > fitted ? double(packedBudget - fitted) / double(over - fitted) * 0.9 : 0.5;
+            threshold = std::min(threshold - 1, uint32_t(threshold * std::clamp(share, 0.0, 1.0))) & ~7u;
+            if (!threshold) break;
+            if ((over = select(tier, threshold)) <= packedBudget) return over;
         }
-        packedSize = measure(snapshot);
-        if (packedSize <= packedBudget || !limit) break;
+        return select(tier, 0);
     }
-    return packedSize;
+    return select(TierCount, 0);
 }
 inline size_t NodeBytes(const Node& node) { return 117 + (node.Type == Shape::PixelPath ? 2 + 5 * node.Pixels.size() : 0); }
 // Under an extreme particle load, preserve the scene and controls instead of

@@ -52,6 +52,16 @@ int ContentFile::Create(const ContentFile& reference) {
 	return 0;
 }
 
+std::vector<BITMAP*> ContentFile::GetLoadedBitmaps() {
+	std::vector<BITMAP*> bitmaps;
+	for (int depth = BitDepths::Eight; depth < BitDepths::BitDepthCount; ++depth) {
+		for (const auto& [bitmapPath, bitmapPtr]: s_LoadedBitmaps[depth]) {
+			bitmaps.push_back(bitmapPtr);
+		}
+	}
+	return bitmaps;
+}
+
 void ContentFile::FreeAllLoaded() {
 	for (int depth = BitDepths::Eight; depth < BitDepths::BitDepthCount; ++depth) {
 		for (const auto& [bitmapPath, bitmapPtr]: s_LoadedBitmaps[depth]) {

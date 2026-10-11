@@ -204,14 +204,12 @@ simulated WAN and same-PC public-server tests do not replace this acceptance.
 - Full local HUD facts, immediate predicted weapon feedback, arbitrary mods and
   physical controller acceptance remain separate follow-ups.
 
-Updater work is outside this checkpoint by the supplied scope: `.gitignore`,
-`README.md`, `Tools/PackageMultiplayer.ps1`, `.github/workflows/updater.yml`,
-`Documentation/AutoUpdater.md`, `Tests/RunUpdaterTests.ps1`, `Tests/UpdaterTests.cs`,
-`Tools/BuildUpdater.ps1`, `Tools/InstallUpdater.ps1` and `Tools/Updater/` remain
-uncommitted. Generated caches, binaries, logs and packages are also excluded.
-Do not use the dirty packaging script to imply a reproducible release from this
-checkpoint; use packaging from the intended committed revision or finish the
-updater work separately.
+Historical checkpoint note: updater work was outside this checkpoint and was
+not committed or included in `mp-2026.10.11`. The next release restores it as
+described in [AutoUpdater.md](AutoUpdater.md), including normal game startup,
+verified installation, recovery, tests, and packaging. Generated caches,
+binaries, logs and packages remain excluded from source commits. Release
+packaging now refuses uncommitted source and includes the matching revision.
 
 ## 8. Continuation commands and validation record
 

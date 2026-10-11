@@ -107,3 +107,8 @@ LogConsole.txt
 Console.dump.log
 Console.input.log
 imgui.ini
+
+# Generated Python caches
+__pycache__/
+*.pyc
+!Tools/BuildUpdater.ps1

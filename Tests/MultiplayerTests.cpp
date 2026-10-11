@@ -174,6 +174,35 @@ void Worlds() {
       for (uint64_t id : {6000ull, 6001ull, 6002ull, 6003ull}) Check(std::any_of(burst.Nodes.begin(), burst.Nodes.end(), [id](const auto& n) { return n.ID == id; }), "explosion bandwidth control removes an actor, terrain, HUD or bullet trail");
       Check(std::is_sorted(burst.Nodes.begin(), burst.Nodes.end(), [](const auto& a, const auto& b) { return a.ID < b.ID; }), "explosion bandwidth control changes native painter order");
     }
+    // A destroyed craft: its rigid hull gibs among thousands of fire sprites and sparks.
+    { auto measure = [](const W::Snapshot& snapshot) { Writer packet(Kind::WorldSnapshot); W::WriteSnapshot(packet, snapshot); return packet.Data.size(); };
+      auto wreck = [&](uint64_t firstFire, uint64_t fires, size_t skip) {
+        W::Snapshot state = first; state.Nodes.clear(); auto debris = std::make_shared<std::unordered_set<uint64_t>>();
+        auto terrain = node; terrain.ID = 1; terrain.Flags = W::Layer | W::ScreenSpace; state.Nodes.push_back(terrain);
+        for (uint64_t i = 0; i < 24; ++i) { auto gib = node; gib.ID = (1000 + i) << 8; gib.X = float(i * 37 % 640); gib.Y = float(i * 13 % 360); gib.Angle = float(i) / 7; state.Nodes.push_back(gib); debris->insert(gib.ID); }
+        for (uint64_t i = 0; i < fires; ++i) { if (skip && i % skip == 0) continue; auto fire = node; fire.ID = (firstFire + i) << 8; fire.Asset = 77 + i % 5; fire.X = float(i * 7 % 640); fire.Y = float(i * 3 % 360); state.Nodes.push_back(fire); }
+        for (uint64_t i = 0; i < 3000; ++i) { W::Node spark; spark.ID = (90000 + i) << 8; spark.Type = W::Shape::Pixel; spark.X = float(i % 640); spark.Y = float(i / 640); spark.Color = 7; state.Nodes.push_back(spark); }
+        state.DebrisNodes = debris; return state;
+      };
+      auto tiers = [](const W::Snapshot& state) { std::array<size_t, W::TierCount> counts{}; for (const auto& n : state.Nodes) ++counts[W::NodeTier(state, n)]; return counts; };
+      auto craft = wreck(5000, 3000, 0);
+      auto debrisOnly = craft; std::erase_if(debrisOnly.Nodes, [&](const auto& n) { return W::NodeTier(craft, n) > 1; });
+      auto withFire = craft; std::erase_if(withFire.Nodes, [&](const auto& n) { return W::NodeTier(craft, n) > 3; });
+      const size_t budget = measure(debrisOnly) + (measure(withFire) - measure(debrisOnly)) / 3;
+      auto fitted = craft; W::FitSnapshot(fitted, budget, measure); const auto kept = tiers(fitted);
+      Check(measure(fitted) <= budget, "a destroyed craft exceeds the update budget");
+      Check(kept[0] == 1 && kept[1] == 24 && kept[3] > 0 && kept[3] < 3000 && kept[4] == 0, "explosion particles displace a destroyed craft's hull gibs");
+      Check(std::is_sorted(fitted.Nodes.begin(), fitted.Nodes.end(), [](const auto& a, const auto& b) { return a.ID < b.ID; }), "debris priority changes native painter order");
+      // The next state: some fire has burnt out and new fire has started.
+      auto next = wreck(5000, 3000, 20); for (uint64_t i = 0; i < 150; ++i) { auto fire = node; fire.ID = (40000 + i) << 8; fire.X = float(i * 11 % 640); next.Nodes.insert(next.Nodes.end() - 3000, fire); }
+      std::unordered_set<uint64_t> before, after, present; for (const auto& n : fitted.Nodes) before.insert(n.ID);
+      for (const auto& n : craft.Nodes) present.insert(n.ID);
+      W::FitSnapshot(next, budget, measure); for (const auto& n : next.Nodes) after.insert(n.ID);
+      size_t common = 0, agree = 0; for (const auto& n : wreck(5000, 3000, 20).Nodes) if (present.contains(n.ID)) { ++common; agree += before.contains(n.ID) == after.contains(n.ID); }
+      Check(agree == common, "a steady budget selects different particles from one state to the next, so kept effects flicker");
+      auto tight = craft; W::FitSnapshot(tight, measure(debrisOnly) - 40, measure); const auto thinned = tiers(tight);
+      Check(thinned[0] == 1 && thinned[1] > 0 && thinned[1] < 24 && !thinned[3] && !thinned[4], "debris beyond the budget displaces essential state or is not thinned");
+    }
     auto second = first; second.ID = 2; second.Time = 1050; second.Nodes[0].X = 10; second.CameraX = 10;
     Check(timeline.Push(second, 1080), "next state rejected"); Check(!timeline.Push(first, 1081), "reordered state accepted");
     auto middle = timeline.Sample(1120); Check(std::abs(middle.Nodes[0].X - 5) < 0.001f && std::abs(middle.CameraX - 5) < 0.001f, "guest did not interpolate camera and entity between 20 Hz updates");

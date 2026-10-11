@@ -46,6 +46,25 @@ def stage_summary(path):
             values = [float(row[key]) for row in playing if row[key] != '']
             result[key + '_p50'] = percentile(values, 50)
             result[key + '_p95'] = percentile(values, 95)
+    result.update(debris_summary(playing))
+    return result
+
+
+# Snapshot thinning by tier (1 rigid debris, 2 trails, 3 particle sprites,
+# 4 pixels and other effects), summed over every guest's captures.
+def debris_summary(rows):
+    if 'tier1_captured' not in rows[0]:
+        return {}
+    total = lambda key: sum(int(row[key]) for row in rows)
+    result = {}
+    for tier in range(1, 5):
+        captured, sent = total(f'tier{tier}_captured'), total(f'tier{tier}_sent')
+        result[f'tier{tier}_captured'] = captured
+        result[f'tier{tier}_sent_share'] = round(sent / captured, 4) if captured else None
+    continuable = total('debris_continuable')
+    result['debris_continuity'] = round(total('debris_continued') / continuable, 4) if continuable else None
+    result['debris_min_share'] = min(float(row['debris_min_share']) for row in rows)
+    result['swept_resources'] = total('swept_resources')
     return result
 
 

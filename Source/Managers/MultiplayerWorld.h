@@ -32,6 +32,31 @@ public:
     bool Install(MP::World::Resource resource);
     bool Install(MP::World::Snapshot snapshot, uint64_t time);
     std::vector<uint64_t> Missing(const MP::World::Snapshot& snapshot) const;
+    // Object sprite references (world-space sprite nodes) in a received state:
+    // all of them, those whose asset was not held, and of those, the ones
+    // installed from this computer's own game data.
+    struct ObjectAssetCounts { uint64_t Nodes = 0, Unheld = 0, Indexed = 0; };
+    // Counts a received state's object sprite references, installs those in the
+    // local sprite index, and notes the object assets first seen in view this
+    // match, for the first-draw measurement.
+    ObjectAssetCounts ResolveObjectAssets(const MP::World::Snapshot& snapshot, uint64_t time);
+    // Each object asset first seen in view this match: when it was first drawn
+    // and how long after that reference, or -1 if not drawn within five seconds.
+    struct FirstDraw { uint64_t Time = 0; int32_t LatencyMS = 0; bool Indexed = false; };
+    std::vector<FirstDraw> TakeFirstDraws();
+    // Object sprites in this computer's own game data, by content hash. A guest
+    // starts the index when a match begins; until hashing finishes, and for
+    // sprites altered at runtime or absent locally, assets download as before.
+    // ResolveObjectAssets installs matching sprites from it, as does this.
+    size_t InstallLocalSprites(const std::unordered_set<uint64_t>& ids);
+    // Lists every bitmap loaded from game data (all preset sprite frames, hand
+    // sprites and glows) and hashes them on a background task, once per process.
+    // CCCP_MP_NO_SPRITE_INDEX=1 disables it, for the download fallback test.
+    static void BuildSpriteIndex();
+    // Replaces the index with these bitmaps, hashed on a background task or at once.
+    static void IndexSprites(std::vector<BITMAP*> bitmaps, bool background);
+    struct SpriteIndexStats { bool Ready = false; size_t Frames = 0, Unique = 0; uint64_t BuildMicros = 0; };
+    static SpriteIndexStats SpriteIndexState();
     bool SceneryReady(const MP::World::Snapshot& snapshot) const;
     // The assets SceneryReady still waits for.
     std::vector<uint64_t> MissingScenery(const MP::World::Snapshot& snapshot) const;

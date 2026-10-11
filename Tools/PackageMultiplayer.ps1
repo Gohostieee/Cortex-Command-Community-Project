@@ -5,6 +5,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
+$dirty = & git -C $taskRoot status --porcelain --untracked-files=normal
+if ($LASTEXITCODE -or $dirty) { throw 'Commit all intended release source before packaging; source and binaries must identify the same revision.' }
+& "$PSScriptRoot/BuildUpdater.ps1"
 $endpointFile = Join-Path $taskRoot 'MultiplayerService.txt'
 if (!(Test-Path -LiteralPath $endpointFile)) { throw 'Configure the bundled MultiplayerService.txt before packaging.' }
 $endpoint = (Get-Content -LiteralPath $endpointFile -Raw).Trim()
@@ -33,6 +36,8 @@ foreach ($path in @('Data','Licences','LICENSE','MultiplayerService.txt')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot $path) -Destination $game -Recurse
 }
 Copy-Item -LiteralPath $exe -Destination (Join-Path $game 'Cortex Command.exe')
+Copy-Item -LiteralPath (Join-Path $taskRoot 'build-mp/updater/CortexUpdater.exe') -Destination $game
+@{schema=1;repository='Gohostieee/Cortex-Command-Community-Project';tag=$Version} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $game 'updater.json') -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $taskRoot 'external/lib/win/fmod.dll') -Destination $game
 Get-ChildItem -LiteralPath $RuntimeDirectory -Filter '*.dll' | Copy-Item -Destination $game
 $commit = & git -C $taskRoot rev-parse HEAD
@@ -44,6 +49,10 @@ if ($LASTEXITCODE) { throw 'Cannot package the matching source revision.' }
 Cortex Command Multiplayer - $Version (Windows x64)
 
 Extract this entire folder, then open Cortex Command.exe.
+The game checks for newer multiplayer releases before starting and installs
+verified updates automatically. This includes published multiplayer prereleases.
+The updater keeps your settings, saves, Mods and ScreenShots. An offline update
+check starts your installed game. Use --no-update to bypass the startup check.
 Choose Multiplayer, set your name, and choose Host or Join.
 Online - AWS hosted runs the match on the dedicated server.
 Host: Create room, copy the code, and share it with your friends.
@@ -69,10 +78,33 @@ Project: https://github.com/Gohostieee/Cortex-Command-Community-Project
 GNU AGPL v3; see LICENSE and Licences for component notices.
 Build source revision: $commit
 "@ | Set-Content -LiteralPath (Join-Path $game 'START-HERE.txt') -Encoding UTF8
+$managed = @(Get-ChildItem -LiteralPath $game -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($game, $_.FullName).Replace('\','/') } | Sort-Object)
+ConvertTo-Json -InputObject $managed | Set-Content -LiteralPath (Join-Path $game 'update-files.json') -Encoding UTF8
 $archive = Join-Path $releaseRoot "CortexCommand-Multiplayer-$Version-Windows-x64.zip"
 if (Test-Path -LiteralPath $archive) { throw 'This version is already packaged; select a new version or move the existing archive.' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $archive, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 $sha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 "$sha  $([System.IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath "$archive.sha256" -Encoding ASCII
-[PSCustomObject]@{ Archive = $archive; Sha256 = $sha; GameDirectory = $game; SourceCommit = $commit }
+$installerStage = Join-Path $stage 'updater-installer-stage'
+New-Item -ItemType Directory -Path $installerStage -Force | Out-Null
+foreach ($path in @('CortexUpdater.exe', 'SOURCE.tar.gz', 'LICENSE', 'Licences')) {
+    Copy-Item -LiteralPath (Join-Path $game $path) -Destination $installerStage -Recurse
+}
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'InstallUpdater.ps1') -Destination $installerStage
+@"
+Add automatic updates to an older Cortex Command multiplayer installation.
+Extract this installer folder. In PowerShell, run:
+  powershell -ExecutionPolicy Bypass -File .\InstallUpdater.ps1 -GameDirectory 'C:\Path\To\CortexCommand-Multiplayer'
+The updater downloads the newest published multiplayer release and starts it.
+Settings, saves, Mods and ScreenShots are preserved. Keep the whole installer
+folder together. Windows 10/11 x64 and .NET Framework 4.8 are required.
+Matching updater source is in SOURCE.tar.gz; see Tools/Updater and LICENSE.
+Source revision: $commit
+"@ | Set-Content -LiteralPath (Join-Path $installerStage 'README.txt') -Encoding UTF8
+$installerArchive = Join-Path $releaseRoot "CortexCommand-Updater-Installer-$Version-Windows-x64.zip"
+if (Test-Path -LiteralPath $installerArchive) { throw 'This updater installer version is already packaged.' }
+[System.IO.Compression.ZipFile]::CreateFromDirectory($installerStage, $installerArchive, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+$installerSha = (Get-FileHash -LiteralPath $installerArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+"$installerSha  $([System.IO.Path]::GetFileName($installerArchive))" | Set-Content -LiteralPath "$installerArchive.sha256" -Encoding ASCII
+[PSCustomObject]@{ Archive = $archive; Sha256 = $sha; GameDirectory = $game; SourceCommit = $commit; InstallerArchive = $installerArchive; InstallerSha256 = $installerSha }

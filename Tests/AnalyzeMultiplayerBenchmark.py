@@ -75,7 +75,46 @@ def analyze(path):
         'motion_correction_px_p50': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 50),
         'motion_correction_px_p95': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 95),
         **motion_frames(selected),
-        **motion_corrections(path, spans)
+        **motion_corrections(path, spans),
+        **object_assets(selected),
+        **first_draws(path, spans)
+    }
+
+
+# Object sprite references in received states during measured combat: how many
+# were held already or installed from local game data instead of downloaded.
+def object_assets(rows):
+    if not rows or 'object_nodes' not in rows[0]:
+        return {}
+    nodes = sum(r['object_nodes'] for r in rows)
+    unheld = sum(r['object_unheld'] for r in rows)
+    indexed = sum(r['object_indexed'] for r in rows)
+    return {
+        'object_nodes': nodes, 'object_nodes_unheld': unheld, 'object_nodes_indexed': indexed,
+        'object_nodes_local_share': round((nodes - unheld + indexed) / nodes, 4) if nodes else None,
+    }
+
+
+# Each object asset first seen in the match: time from its first reference to
+# its first draw. Assets never drawn (usually first referenced off screen) are
+# counted separately. The acceptance bound is the presentation delay plus 50 ms.
+FIRST_DRAW_BOUND_MS = 75 + 50
+
+
+def first_draws(path, spans):
+    trace = path.with_name(path.name.replace('-benchmark.csv', '-assets.csv'))
+    if not trace.exists():
+        return {}
+    rows = [{k: int(v) for k, v in r.items()} for r in csv.DictReader(trace.open())]
+    inside = [r for r in rows if any(start <= r['time_ms'] <= end for start, end in spans.values())]
+    drawn = [r['latency_ms'] for r in inside if r['latency_ms'] >= 0]
+    return {
+        'new_object_assets_drawn': len(drawn),
+        'new_object_assets_undrawn': sum(r['latency_ms'] < 0 for r in inside),
+        'new_object_assets_indexed': sum(r['indexed'] for r in inside),
+        'first_draw_ms_p50': percentile(drawn, 50), 'first_draw_ms_p95': percentile(drawn, 95),
+        'first_draw_ms_max': max(drawn) if drawn else None,
+        'first_draw_within_bound_share': round(sum(d <= FIRST_DRAW_BOUND_MS for d in drawn) / len(drawn), 4) if drawn else None,
     }
 
 

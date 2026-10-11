@@ -23,12 +23,15 @@
 #include "GraphicalPrimitive.h"
 #include "Draw.h"
 #include "PieMenu.h"
+#include "ContentFile.h"
+#include "ThreadMan.h"
 #include "allegro.h"
 #include "allegro/internal/aintern.h"
 #include <unordered_map>
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <future>
 #include <ostream>
 
 using namespace RTE;
@@ -55,6 +58,28 @@ std::atomic<bool> s_Tracking{false};
 constexpr size_t SweepTiles = 32;
 uint64_t WorldNow() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 constexpr size_t ResourceLimit = 128 * 1024 * 1024;
+// Object sprites from this computer's own game data, by content hash, so a
+// guest installs them locally instead of downloading them. The bitmaps stay
+// owned by the ContentFile cache; the index holds only their addresses. It is
+// built once per process on a background task and kept between matches.
+struct SpriteIndex {
+    std::atomic<bool> Started{false}, Ready{false};
+    std::future<void> Task;
+    std::unordered_map<uint64_t, BITMAP*> Bitmaps;
+    size_t Frames = 0; uint64_t BuildMicros = 0;
+};
+SpriteIndex s_Sprites;
+// The content hash MultiplayerWorld::Impl::Asset gives a whole bitmap, computed
+// without copying its pixels.
+uint64_t BitmapHash(BITMAP* bitmap) {
+    const int depth = bitmap_color_depth(bitmap);
+    if ((depth != 8 && depth != 32) || bitmap->w <= 0 || bitmap->h <= 0 || bitmap->w > 4096 || bitmap->h > 4096 || uint64_t(bitmap->w) * bitmap->h * (depth / 8) > MaxPayload - 256) return 0;
+    MP::Writer metadata(MP::Kind::WorldResource); metadata.U16(uint16_t(bitmap->w)); metadata.U16(uint16_t(bitmap->h)); metadata.U8(uint8_t(depth));
+    uint64_t hash = Hash(metadata.Data);
+    const size_t stride = size_t(bitmap->w) * (depth / 8);
+    for (int y = 0; y < bitmap->h; ++y) for (size_t x = 0; x < stride; ++x) { hash ^= bitmap->line[y][x]; hash *= 1099511628211ULL; }
+    return hash ? hash : 1;
+}
 }
 struct MultiplayerWorld::Impl {
     MultiplayerWorld* Owner = nullptr;
@@ -84,6 +109,13 @@ struct MultiplayerWorld::Impl {
     bool LocalInputEnabled = false;
     std::unordered_map<uint64_t, Vector> ObjectAnchors;
     std::shared_ptr<std::unordered_set<uint64_t>> CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>();
+    std::shared_ptr<std::unordered_set<uint64_t>> DebrisNodes = std::make_shared<std::unordered_set<uint64_t>>();
+    // When each object asset first seen in view this match was referenced, until
+    // drawn, and the object assets installed from the local sprite index.
+    std::unordered_set<uint64_t> SeenObjectAssets, IndexedAssets;
+    struct FirstReference { uint64_t Time = 0; bool Indexed = false; };
+    std::unordered_map<uint64_t, FirstReference> FirstReferences;
+    std::vector<MultiplayerWorld::FirstDraw> FirstDraws;
     bool PrimitiveStyle = false;
     Node CurrentStyle;
     std::unordered_map<uint64_t, uint8_t> Ordinals;
@@ -180,6 +212,17 @@ struct MultiplayerWorld::Impl {
         for (int y = 0; y < height; ++y) std::memcpy(resource.Pixels.data() + size_t(y) * width, bitmap->line[sy + y] + sx, width);
         resource.ID = ResourceHash(resource); const uint64_t id = resource.ID; LocalTiles.try_emplace(id, std::move(resource));
     }
+    // Installs an object sprite from the local sprite index, if it holds one with this content.
+    bool InstallLocalSprite(uint64_t id) {
+        if (!s_Sprites.Ready.load(std::memory_order_acquire)) return false;
+        const auto found = s_Sprites.Bitmaps.find(id); if (found == s_Sprites.Bitmaps.end()) return false;
+        BITMAP* bitmap = found->second;
+        Resource resource; resource.Width = uint16_t(bitmap->w); resource.Height = uint16_t(bitmap->h); resource.Depth = uint8_t(bitmap_color_depth(bitmap));
+        const size_t stride = size_t(bitmap->w) * (resource.Depth / 8); resource.Pixels.resize(stride * bitmap->h);
+        for (int y = 0; y < bitmap->h; ++y) std::memcpy(resource.Pixels.data() + y * stride, bitmap->line[y], stride);
+        resource.ID = ResourceHash(resource);
+        return resource.ID == id && Store(std::move(resource));
+    }
     uint64_t StaticAsset(BITMAP* bitmap) {
         if (auto found = StaticAssets.find(bitmap); found != StaticAssets.end() && Resources.contains(found->second)) { LastUsed[found->second] = WorldNow(); return found->second; }
         const auto id = Asset(bitmap); if (id) StaticAssets[bitmap] = id; return id;
@@ -216,6 +259,7 @@ struct MultiplayerWorld::Impl {
         node.ID = (id << 8) | Ordinals[id]++;
         const auto* root = owner.GetRootParent();
         if (root->IsActor() || root->IsDevice()) CriticalNodes->insert(node.ID);
+        else if (node.Type == Shape::Sprite && dynamic_cast<const MOSRotating*>(root)) DebrisNodes->insert(node.ID);
         if (!(node.ID & 255)) ObjectAnchors[node.ID] = Vector(node.X, node.Y);
         if (const auto* parent = owner.GetParent()) node.Parent = uint64_t(parent->GetUniqueID()) << 8;
         if (Objects.size() < MaxNodes && Valid(node)) { Objects.push_back(node); ObjectRoots.push_back(uint64_t(root->GetUniqueID()) << 8); }
@@ -399,13 +443,14 @@ void MultiplayerWorld::ResetPresentation() {
     impl.CameraPrediction.Reset(); impl.Motion.Reset(); impl.MotionFrames = {};
     impl.Pointer.Reset(); impl.SceneLayers.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
+    impl.SeenObjectAssets.clear(); impl.IndexedAssets.clear(); impl.FirstReferences.clear(); impl.FirstDraws.clear();
     impl.Target.reset();
 }
 void MultiplayerWorld::BeginObjects() {
     // Each capture pass moves the verification sweep across every tracked bitmap.
     s_Tracking = true;
     for (auto& [bitmap, tracked] : s_Tracked) if (const size_t tiles = size_t(tracked.Columns) * tracked.Rows) tracked.SweepStart = (tracked.SweepStart + SweepTiles) % tiles;
-    m_Impl->Objects.clear(); m_Impl->ObjectRoots.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); m_Impl->CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>(); objectCollector = this; }
+    m_Impl->Objects.clear(); m_Impl->ObjectRoots.clear(); m_Impl->Ordinals.clear(); m_Impl->ObjectAnchors.clear(); m_Impl->CriticalNodes = std::make_shared<std::unordered_set<uint64_t>>(); m_Impl->DebrisNodes = std::make_shared<std::unordered_set<uint64_t>>(); objectCollector = this; }
 void MultiplayerWorld::BeginTrails() {
     auto& impl = *m_Impl; const uint64_t now = WorldNow(); std::lock_guard lock(impl.TrailMutex);
     if (!++impl.TrailGeneration) { impl.CurrentTrailPixels.reset(); impl.CurrentTrailBuckets.reset(); ++impl.TrailGeneration; }
@@ -587,7 +632,7 @@ Snapshot MultiplayerWorld::EndView(int player, uint32_t id, uint32_t inputSequen
         n.Flags = Additive | Discontinuous; n.TintR = n.TintG = n.TintB = uint8_t(std::clamp(effect.m_Strength, 0, 255)); if (Valid(n)) snapshot.Nodes.push_back(n);
     }
     lap(times[4]);
-    snapshot.CriticalNodes = impl.CriticalNodes;
+    snapshot.CriticalNodes = impl.CriticalNodes; snapshot.DebrisNodes = impl.DebrisNodes;
     BoundSnapshot(snapshot);
     lap(times[5]);
     return snapshot;
@@ -674,6 +719,56 @@ std::vector<uint64_t> MultiplayerWorld::Missing(const Snapshot& snapshot) const 
     std::unordered_set<uint64_t> visible; m_Impl->SceneLayers.VisibleAssets(snapshot, visible);
     for (auto id : visible) if (!m_Impl->Resources.contains(id)) ids.insert(id);
     return {ids.begin(), ids.end()};
+}
+MultiplayerWorld::ObjectAssetCounts MultiplayerWorld::ResolveObjectAssets(const Snapshot& snapshot, uint64_t time) {
+    auto& impl = *m_Impl; ObjectAssetCounts counts;
+    for (const auto& node : snapshot.Nodes) {
+        if (node.Type != Shape::Sprite || !node.Asset || (node.Flags & (ScreenSpace | MP::World::Layer))) continue;
+        ++counts.Nodes;
+        if (!impl.Resources.contains(node.Asset)) { ++counts.Unheld; if (impl.InstallLocalSprite(node.Asset)) { ++counts.Indexed; impl.IndexedAssets.insert(node.Asset); } }
+        // The first-draw clock starts once the node is in view, by the renderer's culling test.
+        const bool inView = std::abs(Displacement(snapshot.CameraX + snapshot.Width / 2, node.X, snapshot.SceneWidth, snapshot.Wrap & 1)) <= snapshot.Width / 2 + node.Width + node.Height &&
+            std::abs(Displacement(snapshot.CameraY + snapshot.Height / 2, node.Y, snapshot.SceneHeight, snapshot.Wrap & 2)) <= snapshot.Height / 2 + node.Width + node.Height;
+        if (inView && impl.SeenObjectAssets.insert(node.Asset).second) impl.FirstReferences[node.Asset] = {time, impl.IndexedAssets.contains(node.Asset)};
+    }
+    // The local camera can leave a node out of view, so it may never be drawn.
+    std::erase_if(impl.FirstReferences, [&](const auto& entry) {
+        if (time < entry.second.Time + 5000) return false;
+        impl.FirstDraws.push_back({time, -1, entry.second.Indexed}); return true;
+    });
+    return counts;
+}
+std::vector<MultiplayerWorld::FirstDraw> MultiplayerWorld::TakeFirstDraws() { return std::exchange(m_Impl->FirstDraws, {}); }
+size_t MultiplayerWorld::InstallLocalSprites(const std::unordered_set<uint64_t>& ids) {
+    size_t installed = 0; for (const uint64_t id : ids) if (!m_Impl->Resources.contains(id)) installed += m_Impl->InstallLocalSprite(id); return installed;
+}
+void MultiplayerWorld::BuildSpriteIndex() {
+    if (s_Sprites.Started.load()) return;
+    if (const char* disabled = std::getenv("CCCP_MP_NO_SPRITE_INDEX"); disabled && *disabled && *disabled != '0') { s_Sprites.Started = true; return; }
+    // Every preset's sprite frames, hand sprites and glows load through the
+    // ContentFile cache, including gibs, attachables and emissions defined
+    // inline rather than as named presets. The cache is listed here on the
+    // main thread; only hashing runs in the background.
+    IndexSprites(ContentFile::GetLoadedBitmaps(), true);
+}
+void MultiplayerWorld::IndexSprites(std::vector<BITMAP*> bitmaps, bool background) {
+    if (s_Sprites.Task.valid()) s_Sprites.Task.wait();
+    s_Sprites.Started = true; s_Sprites.Ready = false;
+    std::erase(bitmaps, nullptr); std::sort(bitmaps.begin(), bitmaps.end()); bitmaps.erase(std::unique(bitmaps.begin(), bitmaps.end()), bitmaps.end());
+    auto build = [bitmaps = std::move(bitmaps)] {
+        const auto start = std::chrono::steady_clock::now();
+        std::unordered_map<uint64_t, BITMAP*> index; index.reserve(bitmaps.size());
+        for (BITMAP* bitmap : bitmaps) if (const uint64_t id = BitmapHash(bitmap)) index.try_emplace(id, bitmap);
+        s_Sprites.Bitmaps = std::move(index); s_Sprites.Frames = bitmaps.size();
+        s_Sprites.BuildMicros = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        s_Sprites.Ready.store(true, std::memory_order_release);
+    };
+    if (background) s_Sprites.Task = g_ThreadMan.GetBackgroundThreadPool().submit(std::move(build));
+    else { s_Sprites.Task = {}; build(); }
+}
+MultiplayerWorld::SpriteIndexStats MultiplayerWorld::SpriteIndexState() {
+    if (!s_Sprites.Ready.load(std::memory_order_acquire)) return {};
+    return {true, s_Sprites.Frames, s_Sprites.Bitmaps.size(), s_Sprites.BuildMicros};
 }
 bool MultiplayerWorld::Install(Snapshot snapshot, uint64_t time) { if ((!Ready() && !SceneryReady(snapshot)) || !m_Impl->States.Push(std::move(snapshot), time)) return false; m_Impl->SceneLayers.Update(m_Impl->States.Latest()); ++m_Impl->UpdateCount; return true; }
 bool MultiplayerWorld::Ready() const { return !m_Impl->States.Empty(); }
@@ -888,6 +983,9 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
         const bool trueColor = n.Type == Shape::Sprite && resource->second.Depth == 32;
         if (n.Asset) impl.LastUsed[n.Asset] = time;
         if (n.Type == Shape::Sprite) { if (!impl.Textures.contains(n.Asset)) rlDrawRenderBatchActive(); texture = impl.Texture(n.Asset); if (!texture.id) continue; }
+        if (n.Type == Shape::Sprite && !(n.Flags & ScreenSpace) && !impl.FirstReferences.empty()) if (const auto first = impl.FirstReferences.find(n.Asset); first != impl.FirstReferences.end()) {
+            impl.FirstDraws.push_back({time, int32_t(std::min<uint64_t>(time - std::min(time, first->second.Time), INT32_MAX)), first->second.Indexed}); impl.FirstReferences.erase(first);
+        }
         float x = n.X, y = n.Y;
         float dx = 0, dy = 0;
         if ((n.Flags & ScreenSpace) && n.Parent) {

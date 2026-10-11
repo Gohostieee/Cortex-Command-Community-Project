@@ -1,0 +1,25 @@
+name: Windows auto updater
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/multiplayer-rebuild]
+    paths:
+      - Tools/Updater/**
+      - Tools/BuildUpdater.ps1
+      - Tests/Updater*
+      - Tests/RunUpdaterTests.ps1
+      - .github/workflows/updater.yml
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test updater installation and recovery
+        shell: pwsh
+        run: ./Tests/RunUpdaterTests.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CortexUpdater-windows-x64
+          path: build-mp/updater/CortexUpdater.exe

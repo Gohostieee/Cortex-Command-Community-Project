@@ -63,6 +63,7 @@
 
 #ifdef _WIN32
 #include "windows.h"
+#include "GameUpdater.h"
 #endif
 
 extern "C" {
@@ -465,6 +466,9 @@ static const bool RTESetExceptionHandlers = []() {
 /// Implementation of the main function.
 /// </summary>
 int main(int argc, char** argv) {
+#ifdef _WIN32
+	if (StartGameUpdater(argc, argv)) return EXIT_SUCCESS;
+#endif
 	std::string dedicatedConfig;
 	for (int i = 1; i < argc; ++i) {
 		const std::string argument = argv[i];
