@@ -13,7 +13,8 @@ function Wait-RoomServiceReady($Process, [string]$LogPath) {
 Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Path build-mp -Force | Out-Null
-    $devShell = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat'
+    . "$taskRoot/Tests/VisualStudio.ps1"
+    $devShell = $VsDevCmd
     $common = ' /nologo /std:c++20 /EHsc /O2 /MD /DNOMINMAX /I Source\System /I external\sources\RakNet\include '
     $link = ' /link external\sources\RakNet\_Bin\raknet-release.lib ws2_32.lib winmm.lib'
     & cmd /c ('call "' + $devShell + '" -arch=x64 -host_arch=x64 > nul && cl' + $common + 'Services\RoomService\RoomService.cpp /Fo:build-mp\ /Fe:build-mp\cc-room-service.exe' + $link)

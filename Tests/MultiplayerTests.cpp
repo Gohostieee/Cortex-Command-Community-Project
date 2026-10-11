@@ -80,6 +80,12 @@ void Worlds() {
     Check(credits.Receipt(1, 0) && !credits.Receipt(1, 0) && credits.CanSend(1131), "duplicate guest receipts inflated delivery credits");
     credits.Sent(1, 0, 1131); Check(credits.Bytes() == outstanding && credits.Contains(1), "resource receipt did not admit exactly its next fragment");
     credits.Reset(); Check(credits.Bytes() == 0 && !credits.Contains(1) && !credits.Receipt(1, 1) && !credits.CanSend(1401), "match reset retained stale resource credits");
+    // A guest that discarded fragments (before it knew the match had started)
+    // never answers them; their credits return instead of blocking every resource.
+    for (uint16_t i = 0; i < 100; ++i) credits.Sent(9, i, 1131, 1000);
+    credits.Sent(10, 0, 1131, 15000);
+    Check(credits.Expire(20999, W::ResourceWindow::ReceiptTimeoutMS) == 0 && credits.Expire(21000, W::ResourceWindow::ReceiptTimeoutMS) == 100, "unanswered resource credits never expired, or expired too early");
+    Check(credits.Bytes() == 1131 && credits.Contains(10) && !credits.Contains(9), "credit expiry released a fragment that was still recent"); credits.Reset();
     W::ResourceRequests repairs; std::unordered_set<uint64_t> missingTiles, requestedTiles;
     for (uint64_t id = 1; id <= 4096; ++id) missingTiles.insert(id);
     for (uint64_t time = 1000; time <= 64000; time += 1000) {
@@ -419,6 +425,7 @@ void Motion() {
     float x = 0, y = 0; uint64_t now = 5000; uint32_t sequence = 1;
     auto frames = [&](const W::LocalMotion::Control& control, int count) { for (int i = 0; i < count; ++i) { now += 16; motion.Update(host, now, sequence, control, solid, x, y); } };
     motion.Update(host, now, sequence, still, solid, x, y);
+    host.ID = 20; host.Time = 1025; now += 16; motion.Update(host, now, sequence, still, solid, x, y);
     host.ID = 2; host.Time = 1050; now += 16;
     Check(motion.Update(host, now, sequence, still, solid, x, y) && std::abs(x - 50) < .01f && std::abs(y - 70) < .01f, "own-movement prediction does not start from a standing host state");
     // The host shows the actor walking at 90 px/s while right is held: that gait's speed.
@@ -436,10 +443,64 @@ void Motion() {
     frames(right, 200); Check(x > 185 && x < 194, "own movement walks through a wall");
     // Falling from a height lands on the floor.
     W::LocalMotion fall; host.ID = 10; host.ControlledActor = 8 << 8; host.ActorX = 50; host.ActorY = 70; host.ActorVelX = host.ActorVelY = 0; host.InputSequence = 3; sequence = 3;
-    fall.Update(host, now, sequence, still, solid, x, y);
-    host.ID = 11; host.ActorY = 0; host.Time = 1200; host.InputAge = 0;
+    for (uint32_t standing = 0; standing < 3; ++standing) { host.ID = 10 + standing; host.Time = 1150 + standing * 10; now += 16; fall.Update(host, now, sequence, still, solid, x, y); }
+    host.ID = 20; host.ActorY = 0; host.Time = 1200; host.InputAge = 0;
     for (int i = 0; i < 90; ++i) { now += 16; fall.Update(host, now, sequence, still, solid, x, y); }
     Check(std::abs(y - 70) < 1, "own movement falls through the floor or never lands");
+    // A player who starts walking at once never stands still: the walking body
+    // bobs up and down by tens of pixels per second, yet prediction must begin.
+    W::LocalMotion walker; host.ControlledActor = 9 << 8; host.ActorX = 50; host.ActorVelX = 45; host.InputAge = 10; sequence = 50;
+    bool predicted = false;
+    for (int state = 0; state < 8; ++state) {
+        host.ID = 100 + state; host.Time = 2000 + state * 50; host.InputSequence = sequence; host.ActorX = 50 + state * 2.25f;
+        host.ActorY = 70 + 2 * std::sin(state * 1.3f); host.ActorVelY = 30 * std::cos(state * 1.3f);
+        for (int frame = 0; frame < 3; ++frame) { now += 16; ++sequence; predicted = walker.Update(host, now, sequence, right, solid, x, y); }
+    }
+    Check(predicted && walker.LastStatus() == W::LocalMotion::Status::Predicting, "a walking actor never gains own-movement prediction because it never stands still");
+
+    // Terrain under a fighting player changes constantly; a revision announced
+    // before its pixels arrive must not make the ground unknown.
+    { W::Resource ground; ground.Width = ground.Height = 64; ground.Pixels.assign(64 * 64, 0);
+      for (int py = 32; py < 64; ++py) for (int px = 0; px < 64; ++px) ground.Pixels[py * 64 + px] = 5;
+      ground.ID = W::ResourceHash(ground);
+      W::Node tile; tile.ID = (uint64_t(1) << 62) | (uint64_t(W::ForegroundLayer) << 48); tile.Flags = W::ScreenSpace | W::Layer; tile.Asset = ground.ID;
+      tile.Width = tile.SourceWidth = tile.Height = tile.SourceHeight = 64; tile.X3 = tile.Y3 = 1;
+      W::SceneMap map; map.Nodes = {tile}; W::RetainedLayers layers; layers.Install(map);
+      const std::unordered_map<uint64_t, W::Resource> held{{ground.ID, ground}};
+      auto find = [&](uint64_t id) -> const W::Resource* { const auto found = held.find(id); return found == held.end() ? nullptr : &found->second; };
+      Check(layers.Solid(10, 40, 0, false, find) == 1 && layers.Solid(10, 10, 0, false, find) == 0 && layers.Solid(100, 40, 0, false, find) == -1, "guest terrain collision misreads held, open or absent tiles");
+      W::Snapshot damaged; tile.Asset = 999; damaged.Nodes = {tile}; layers.Update(damaged);
+      Check(layers.Solid(10, 40, 0, false, find) == 1, "a terrain revision still on its way makes the ground under the player unknown");
+      // Captures place tiles at the camera's sub-pixel offset; every tile's first
+      // row and column must still be known, or each tile seam reads as unknown.
+      tile.Asset = ground.ID; tile.X = .4f; tile.Y = .4f; map.Nodes = {tile}; layers.Install(map);
+      Check(layers.Solid(0, 32, 0, false, find) == 1 && layers.Solid(5, 0, 0, false, find) == 0 && layers.Solid(63, 63, 0, false, find) == 1, "terrain tile seams read as unknown when the capture camera had a sub-pixel offset");
+      // A tile under fire changes faster than its revisions arrive; the revision
+      // the player last saw keeps the ground known.
+      for (uint64_t revision = 1; revision <= 8; ++revision) { tile.Asset = 5000 + revision; damaged.Nodes = {tile}; layers.Update(damaged); }
+      const auto drawn = [&](uint64_t id) { return id == W::RetainedLayers::ForegroundTileID(0, 0) ? ground.ID : uint64_t(0); };
+      Check(layers.Solid(10, 40, 0, false, find) == -1 && layers.Solid(10, 40, 0, false, find, drawn) == 1, "the ground under a player firing at it becomes unknown");
+      Check(layers.Solid(10, 10, 0, false, find, drawn) == 0 && layers.Solid(100, 40, 0, false, find, drawn) == -1, "drawn-terrain fallback invents solids or fills an absent tile");
+      tile.Asset = 0; damaged.Nodes = {tile}; layers.Update(damaged);
+      Check(layers.Solid(10, 40, 0, false, find, drawn) == 0, "an empty current tile retains solid pixels from its last drawn revision"); }
+
+    // Unknown terrain is not invented: the model stops claiming a position
+    // rather than climbing out of a tile it cannot see.
+    { const W::LocalMotion::Solid partly = [](float px, float py) { return px >= 100 ? -1 : py >= 100 ? 1 : 0; };
+      W::LocalMotion edge; W::Snapshot state = host; state.ControlledActor = 10 << 8; state.ActorX = 60; state.ActorY = 72; state.ActorVelX = 0; state.ActorVelY = 0; state.InputAge = 0;
+      for (uint32_t i = 0; i < 4; ++i) { state.ID = 300 + i; state.Time = 3000 + i * 50; state.InputSequence = ++sequence; now += 16; edge.Update(state, now, sequence, still, partly, x, y); }
+      Check(edge.LastStatus() == W::LocalMotion::Status::Predicting, "own movement does not start on known terrain");
+      state.ActorVelX = 90; state.ID = 310; state.Time = 3250; state.InputSequence = ++sequence; now += 16; edge.Update(state, now, sequence, right, partly, x, y);
+      for (int i = 0; i < 60; ++i) { now += 16; ++sequence; edge.Update(state, now, sequence, right, partly, x, y); }
+      Check(edge.LastStatus() == W::LocalMotion::Status::NoFooting && y > 60, "own movement invents terrain it does not hold instead of showing the host's position"); }
+
+    // Something only the host knows (another actor) stops the player: the
+    // model stops there too instead of walking into it.
+    { W::LocalMotion pushing; W::Snapshot state = host; state.ControlledActor = 11 << 8; state.ActorY = 72; state.ActorVelY = 0; state.InputAge = 0;
+      for (uint32_t i = 0; i < 6; ++i) { state.ID = 400 + i; state.Time = 4000 + i * 50; state.InputSequence = ++sequence; state.ActorX = 50 + i * 2.25f; state.ActorVelX = 45; for (int f = 0; f < 3; ++f) { now += 16; pushing.Update(state, now, sequence, right, solid, x, y); } }
+      for (uint32_t i = 0; i < 6; ++i) { state.ID = 410 + i; state.Time = 4300 + i * 50; state.InputSequence = ++sequence; state.ActorVelX = 0; for (int f = 0; f < 3; ++f) { now += 16; pushing.Update(state, now, sequence, right, solid, x, y); } }
+      const float held = x; for (int f = 0; f < 30; ++f) { now += 16; ++sequence; pushing.Update(state, now, sequence, right, solid, x, y); }
+      Check(std::abs(x - state.ActorX) < 1.5f && std::abs(x - held) < 1.5f, "own movement walks through an obstacle that holds the player on the host"); }
 }
 int main() {
 	try { Wire(); Inputs(); Worlds(); Deltas(); Adaptation(); Motion(); TransportLoopback(); std::cout << "PASS: retained world resources, 60 Hz interpolation from 20 Hz state, camera and scene wrapping, lifecycle, bounded loss continuation, malformed scene packets, all controls, real UDP, password rejection, discovery, full rooms and reconnect\n"; return 0; }

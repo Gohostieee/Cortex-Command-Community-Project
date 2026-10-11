@@ -1,6 +1,8 @@
 # Multiplayer continuation specification
 
 Status: development checkpoint, 2026-10-10. Branch: `codex/multiplayer-rebuild`.
+Remaining work as of 2026-10-11: see [the remaining-work specification](MultiplayerRemainingWorkSpec.md),
+which supersedes sections 4-8 below.
 Accepted baseline before this checkpoint: `0d5cb267c` (gameplay protocol v9).
 Prediction checkpoint: `d7f857a55` (native acceptance still pending).
 The experimental movement snapshot format now uses gameplay protocol **v10**.
@@ -255,3 +257,90 @@ separate-PC player session is included in this documentation-and-checkpoint task
 
 Next action: reproduce and explain the creator's scene-transfer stall, then fix
 prediction coverage and repeat focused native acceptance before any rollout.
+
+## 10. Drawn-terrain continuation, 2026-10-11
+
+The terrain fallback now uses the last displayed foreground tile when every
+entry in its bounded revision history refers to pixels still in transit.
+`lastDrawn` names the resource lookup separately from the rendered-position
+`drawn` flag, resolving the reported C2371 compile failure. The benchmark CSV
+records unknown lookups by reason, and the analyzer now includes their totals.
+The Linux compile also exposed a missing direct `<utility>` include for
+`std::exchange`; that header is now included explicitly.
+The regression covers more pending revisions than the history retains, open
+pixels in the fallback, absent tiles, and a newly cleared tile overriding the
+old solid visual.
+
+Fresh Windows validation passed the protocol/motion/real-UDP unit suite, Final
+x64 game build, and native HUD/presentation checks. The four-client hosted WAN
+fixture `drawn-wan-finish-01` also passed both matches, automatic reconnects,
+creator Leave/room-code Join with restored controls, owner transfer, and explicit
+room closure. It used the stock load fixture (no extra AI or explosion burst),
+3 Mbps per player, 60 ms one-way delay, 20 ms jitter and 3% seeded packet loss.
+All clients and the Windows dedicated worker used the same rebuilt executable.
+
+Measured rematch combat after the analyzer's two-second settling interval:
+
+| Client | Resolution | Walking frames | Walking drawn | Actor frames drawn | Unknown lookups | Correction p95 / max, px | Median state Hz |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Creator | 960x540 | 2,112 | 87.3% | 60.6% | 0 | 4.46 / 12.09 | 20 |
+| Guest 1 | 640x360 | 3,441 | 100% | 78.8% | 0 | 3.29 / 11.01 | 19 |
+| Guest 2 | 960x540 | 902 | 100% | 55.2% | 0 | 10.51 / 68.24 | 18 |
+| Guest 3 | 1280x720 | 2,026 | 100% | 74.9% | 0 | 6.81 / 19.82 | 19 |
+
+The preceding `reason-wan-01` run recorded 23,874 / 6,775 / 18,833 / 3,068
+unknown lookups for creator / guests 1–3 respectively; all were unheld revisions,
+with no absent-tile or outside-pixel cases. The fresh run eliminated all three
+unknown categories. This is a repeated stock combat fixture, not a deterministic
+replay of the same battle: deaths, supported actor time, particle load and host
+simulation speed differed. The current server measured 97.34% of real time,
+with 15 peak actors and no added stress actors; this does not qualify the 64-AI
+target.
+
+Walking coverage uses the model's grounded walking frames, not an independent
+classification of every frame a human considered eligible. Actor-frame coverage
+excludes actor-less frames but includes unsupported views/status and model
+fallbacks. `no_footing` also includes unlearned footing and unsuccessful replay
+steps, so zero unknown lookups does not imply zero model fallbacks.
+Correction percentiles use matched host states with learned footing,
+including air/replay fallbacks; no correction over the 96-pixel teleport threshold
+occurred in those measured traces. Median ping was 153–203 ms. Creator walking
+coverage and three correction p95 results still miss the proposed targets; this
+run does not establish full prediction acceptance, separate-PC play or AWS
+performance. Brief black terrain/fog streaming samples also remain in the raw
+traces even though prediction's collision lookups were all known.
+
+Evidence is retained outside Git in
+`%LOCALAPPDATA%/CortexCommandBenchmarks/drawn-wan-finish-01/`, including
+`source-receipt.json`, client benchmark/motion/smoke traces, dedicated smoke and
+server profiles, summaries and proxy logs. Repository-local ignored records are
+`build-mp/finish-source-receipt.json`, `build-mp/finish-source.patch`,
+`build-mp/finish-game-build.log`, `build-mp/finish-presentation.txt` and
+`build-mp/drawn-wan-finish-01.txt`.
+
+Linux validation also completed locally in the Ubuntu 24.04 Docker build with
+GCC 13.3.0. The native game and broker built, the protocol/motion/UDP suite
+passed, and the relay, hosted-child lifecycle, missing-executable and stalled
+startup checks passed. The package was then extracted in a temporary container:
+every bundled data checksum passed, and its real gameplay executable started
+without a display and published `ready=1` and `headless=1` before its idle exit.
+This validates Linux startup and broker behavior; the four-client combat
+measurements above used the Windows dedicated worker.
+
+The local validation package is
+`build-mp/dedicated-finish-package/cc-dedicated-ubuntu24-x86_64.tar.gz`, SHA-256
+`0dec13f7a4141d44b1ebab77ab29e7613266f0db71e0a2c103133393d745b687`.
+Its 524 common source inputs were independently checked against the Linux build
+digests and the final Windows/Linux source receipt. Docker excludes `.git`, so
+the package's existing `release.json` format reports `sourceRevision=unknown`;
+`source-verification.json` and `source-receipt.json` beside the archive identify
+this dirty-worktree validation snapshot. A committed release and cloud rollout
+remain separate acceptance work.
+
+The final Windows rebuild and unit suite passed after the `<utility>` include.
+That portability-only include followed the WAN run; the original WAN receipt
+remains intact, and `build-mp/finish-portable-source-receipt.json` records the
+final source/binary hashes. Additional evidence is
+`build-mp/finish-game-build-portable.log`, `build-mp/finish-unit-portable.txt`,
+`build-mp/finish-linux-build.log`, `build-mp/finish-linux-smoke-result.txt` and
+the extracted Linux test, data-checksum and startup logs beside the archive.

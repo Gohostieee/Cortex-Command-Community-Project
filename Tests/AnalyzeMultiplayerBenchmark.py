@@ -73,7 +73,53 @@ def analyze(path):
         # Own-movement prediction: share of samples predicting, and host corrections (pixels).
         'motion_active_share': round(sum(r.get('motion_active', 0) for r in samples) / max(1, len(samples)), 2),
         'motion_correction_px_p50': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 50),
-        'motion_correction_px_p95': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 95)
+        'motion_correction_px_p95': percentile([r.get('motion_correction_px', 0) / 10 for r in samples if r.get('motion_active', 0)], 95),
+        **motion_frames(selected),
+        **motion_corrections(path, spans)
+    }
+
+
+# Rendered frames by prediction status during measured combat. Rows carry the
+# frames since the previous row, so the measured rows sum to the interval.
+MOTION_STATUS = ['no_actor', 'unsupported', 'no_footing', 'disagrees', 'predicting']
+
+
+def motion_frames(rows):
+    if not rows or 'motion_predicting' not in rows[0]:
+        return {}
+    totals = {name: sum(r[f'motion_{name}'] for r in rows) for name in MOTION_STATUS + ['drawn', 'walking', 'walking_drawn']}
+    frames = sum(totals[name] for name in MOTION_STATUS)
+    actor = frames - totals['no_actor']
+    unknown = ['no_tile', 'not_held', 'outside']
+    diagnostics = {'motion_unknown_lookups_by_reason': {
+        name: sum(r[f'unknown_{name}'] for r in rows) for name in unknown
+    }} if all(f'unknown_{name}' in rows[0] for name in unknown) else {}
+    return {
+        'motion_frames': frames,
+        'motion_frames_by_status': {name: totals[name] for name in MOTION_STATUS},
+        # Frames with a controlled actor that drew the predicted position.
+        'motion_drawn_share': round(totals['drawn'] / actor, 3) if actor else None,
+        # Frames the model had the actor walking under input, and their coverage.
+        'motion_walking_frames': totals['walking'],
+        'motion_walking_coverage': round(totals['walking_drawn'] / totals['walking'], 3) if totals['walking'] else None,
+        **diagnostics,
+    }
+
+
+def motion_corrections(path, spans):
+    trace = path.with_name(path.name.replace('-benchmark.csv', '-motion.csv'))
+    if not trace.exists():
+        return {}
+    rows = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(trace.open())]
+    inside = [r for r in rows if any(start <= r['time_ms'] <= end for start, end in spans.values()) and r['foot_known'] and r['matched']]
+    distances = [r['correction_px'] for r in inside if r['correction_px'] <= 96]
+    return {
+        'motion_corrections': len(inside),
+        'motion_correction_trace_px_p50': percentile(distances, 50),
+        'motion_correction_trace_px_p95': percentile(distances, 95),
+        'motion_correction_trace_px_max': max(distances) if distances else None,
+        'motion_teleports': sum(r['correction_px'] > 96 for r in inside),
+        'motion_input_age_ms_p50': percentile([r['input_age_ms'] for r in inside], 50),
     }
 
 

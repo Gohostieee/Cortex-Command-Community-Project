@@ -1,11 +1,12 @@
 param([string]$GameExecutable = 'Cortex Command.exe', [switch]$SkipBuild)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot/VisualStudio.ps1"
 Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Path build-mp -Force | Out-Null
     if (!$SkipBuild) {
-        & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/presentation-build.log;verbosity=minimal'
+        & $MSBuild RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/presentation-build.log;verbosity=minimal'
         if ($LASTEXITCODE) { throw 'Game build failed.' }
     }
     $previousSettings = $env:CCCP_SETTINGSPATH

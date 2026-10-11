@@ -68,7 +68,9 @@ std::string Transport::RoomCode() const { return m_Impl->Code; }
 void Transport::Stop() {
 	if (m_Impl->Peer) {
 		if (m_Impl->Relay && m_Impl->Ready) { Relay::Writer w(Relay::Kind::Leave); m_Impl->Peer->Send(reinterpret_cast<const char*>(w.Data.data()), static_cast<int>(w.Data.size()), HIGH_PRIORITY, RELIABLE_ORDERED, 0, ParseAddress(m_Impl->Central), false); }
-		m_Impl->Peer->Shutdown(100); RakNet::RakPeerInterface::DestroyInstance(m_Impl->Peer); m_Impl->Peer = nullptr;
+		// Allow a lossy route time to deliver the last reliable messages (a Leave)
+		// and the disconnection notice; it returns as soon as they are acknowledged.
+		m_Impl->Peer->Shutdown(500); RakNet::RakPeerInterface::DestroyInstance(m_Impl->Peer); m_Impl->Peer = nullptr;
 	}
 	m_Impl->Relay = m_Impl->Ready = m_Impl->Retrying = m_Impl->HostedRequest = false; m_Impl->Code.clear(); m_Impl->Token.clear(); m_Impl->Peers = {};
 }

@@ -1,12 +1,13 @@
 param([string]$GameDirectory = '', [ValidatePattern('^[^\\/]+\.exe$')][string]$GameExecutable = 'Cortex Command.exe', [ValidateSet('960x540', '640x360', '1280x720')][string]$Resolution = '960x540')
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot/VisualStudio.ps1"
 $gameRoot = if ($GameDirectory) { (Resolve-Path -LiteralPath $GameDirectory).Path } else { $taskRoot }
 Push-Location $taskRoot
 try {
     New-Item -ItemType Directory -Path (Join-Path $gameRoot 'build-mp') -Force | Out-Null
     if (!$GameDirectory) {
-        & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/cursor-build.log;verbosity=minimal'
+        & $MSBuild RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/cursor-build.log;verbosity=minimal'
         if ($LASTEXITCODE) { throw 'Game build failed.' }
         if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
     }

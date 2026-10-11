@@ -9,6 +9,7 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace RTE::MP::World {
 // The wire contains retained scene resources and presentation state, never a
@@ -59,9 +60,11 @@ struct Snapshot {
     uint8_t ViewMode = 0;
     float CameraTargetX = 0, CameraTargetY = 0, MouseScale = 0, ScrollSpeed = 0.1f;
     // The controlled actor's movement, for the guest's own-movement prediction:
-    // flags, position and velocity (pixels, pixels per second), scene gravity,
-    // the time the host has simulated since applying InputSequence, and the
-    // host's simulation speed in percent of real time.
+    // flags, position and velocity (pixels, pixels per simulated second), scene
+    // gravity, the real time in milliseconds since the host first applied
+    // InputSequence, and the host's simulation speed in percent of real time.
+    // InputAge is real time because the guest matches it against its own frame
+    // clock; the guest scales each replayed frame by SimSpeed instead.
     uint8_t MotionFlags = 0;
     float ActorX = 0, ActorY = 0, ActorVelX = 0, ActorVelY = 0, Gravity = 0;
     uint16_t InputAge = 0;
@@ -372,7 +375,7 @@ inline constexpr uint8_t PhaseEditing = 2;
 // travelling farther never discards already known tiles.
 class RetainedLayers {
 public:
-    void Reset() { m_Nodes.clear(); m_Foreground.clear(); }
+    void Reset() { m_Nodes.clear(); m_ForegroundRevisions.clear(); }
     void Install(const SceneMap& map) { Reset(); for (const auto& n : map.Nodes) Store(n, map.CameraX, map.CameraY); }
     void Update(const Snapshot& snapshot) { for (const auto& n : snapshot.Nodes) Store(n, snapshot.CameraX, snapshot.CameraY); }
     std::unordered_set<uint64_t> Resources() const { std::unordered_set<uint64_t> assets; for (const auto& [id, n] : m_Nodes) if (n.Asset) assets.insert(n.Asset); return assets; }
@@ -381,16 +384,46 @@ public:
     // battle may have changed (and the host discarded) since the manifest.
     // Whether the guest's copy of the foreground terrain is solid at a world point:
     // 1 solid, 0 open, -1 unknown (outside the map or pixels not yet held).
+    // Combat changes terrain tiles constantly, and a state announces a tile's new
+    // revision before its pixels arrive; the newest revision held answers until
+    // then. A tile under fire can change faster than its revisions arrive, so
+    // the revision the guest last drew (`drawn`, by tile node ID, or 0) answers
+    // after that: the player then collides with the terrain they see.
     template <typename Find>
-    int Solid(float x, float y, float sceneWidth, bool wrapX, Find&& find) const {
+    int Solid(float x, float y, float sceneWidth, bool wrapX, Find&& find) const { return Solid(x, y, sceneWidth, wrapX, find, [](uint64_t) { return uint64_t(0); }); }
+    template <typename Find, typename Drawn>
+    int Solid(float x, float y, float sceneWidth, bool wrapX, Find&& find, Drawn&& drawn) const {
         if (wrapX && sceneWidth > 0) { x = std::fmod(x, sceneWidth); if (x < 0) x += sceneWidth; }
-        const auto tile = m_Foreground.find(TileKey(int(std::floor(x / TileSize)), int(std::floor(y / TileSize))));
-        if (tile == m_Foreground.end()) return -1;
-        const Node& n = m_Nodes.at(tile->second); if (!n.Asset) return 0;
-        const Resource* resource = find(n.Asset); if (!resource || resource->Depth != 8) return -1;
-        const int px = int(std::floor(x - n.X)), py = int(std::floor(y - n.Y));
-        if (px < 0 || py < 0 || px >= resource->Width || py >= resource->Height) return -1;
-        return resource->Pixels[size_t(py) * resource->Width + px] != ColorKeys::g_MaskColor ? 1 : 0;
+        // Pixels are addressed by the tile's own index, not its stored position,
+        // which carries the capture camera's sub-pixel offset: subtracting that
+        // left every tile's first row and column unknown.
+        const int column = int(std::floor(x)), row = int(std::floor(y));
+        const int tileX = column >= 0 ? column / TileSize : (column - TileSize + 1) / TileSize, tileY = row >= 0 ? row / TileSize : (row - TileSize + 1) / TileSize;
+        const uint64_t key = TileKey(tileX, tileY);
+        const auto revisions = m_ForegroundRevisions.find(key);
+        if (revisions == m_ForegroundRevisions.end()) return -1;
+        const int px = column - tileX * TileSize, py = row - tileY * TileSize;
+        auto sample = [&](const Resource& resource) { return px >= resource.Width || py >= resource.Height ? -1 : resource.Pixels[size_t(py) * resource.Width + px] != ColorKeys::g_MaskColor ? 1 : 0; };
+        for (auto asset = revisions->second.rbegin(); asset != revisions->second.rend(); ++asset) {
+            if (!*asset) return 0;
+            if (const Resource* resource = find(*asset); resource && resource->Depth == 8) return sample(*resource);
+        }
+        if (const uint64_t asset = drawn(ForegroundTileID(tileX, tileY))) if (const Resource* resource = find(asset); resource && resource->Depth == 8) return sample(*resource);
+        return -1;
+    }
+    // The node ID a foreground terrain tile carries, from its column and row.
+    static uint64_t ForegroundTileID(int column, int row) { return (uint64_t(1) << 62) | (uint64_t(ForegroundLayer) << 48) | (uint64_t(uint32_t(row) & 0xffffff) << 24) | uint16_t(column); }
+    // Why Solid answered unknown, for diagnostics: 1 no such tile in the map,
+    // 2 no revision of the tile held, 3 outside the tile's pixels.
+    template <typename Find>
+    int UnknownReason(float x, float y, float sceneWidth, bool wrapX, Find&& find) const {
+        if (wrapX && sceneWidth > 0) { x = std::fmod(x, sceneWidth); if (x < 0) x += sceneWidth; }
+        const int column = int(std::floor(x)), row = int(std::floor(y));
+        const int tileX = column >= 0 ? column / TileSize : (column - TileSize + 1) / TileSize, tileY = row >= 0 ? row / TileSize : (row - TileSize + 1) / TileSize;
+        const auto revisions = m_ForegroundRevisions.find(TileKey(tileX, tileY));
+        if (revisions == m_ForegroundRevisions.end()) return 1;
+        for (auto asset : revisions->second) if (const Resource* resource = find(asset); resource && resource->Depth == 8) return 3;
+        return 2;
     }
     void VisibleAssets(const Snapshot& snapshot, std::unordered_set<uint64_t>& assets) const {
         std::unordered_set<uint64_t> replaced; for (const auto& n : snapshot.Nodes) if (LayerOrdinal(n)) replaced.insert(n.ID);
@@ -431,11 +464,16 @@ private:
     void Store(Node n, float cameraX, float cameraY) {
         const unsigned ordinal = LayerOrdinal(n); if (!ordinal || ordinal > FogLayer) return;
         n.X += cameraX * n.X3; n.Y += cameraY * n.Y3;
-        if (ordinal == ForegroundLayer && n.Type == Shape::Sprite) m_Foreground[TileKey(int(std::floor((n.X + 1) / TileSize)), int(std::floor((n.Y + 1) / TileSize)))] = n.ID;
+        // Terrain tile IDs carry the tile's column and row in the terrain bitmap.
+        if (ordinal == ForegroundLayer && n.Type == Shape::Sprite && (n.ID & (uint64_t(1) << 62))) {
+            auto& revisions = m_ForegroundRevisions[TileKey(int(n.ID & 0xffff), int((n.ID >> 24) & 0xffffff))];
+            if (revisions.empty() || revisions.back() != n.Asset) { revisions.push_back(n.Asset); if (revisions.size() > 4) revisions.erase(revisions.begin()); }
+        }
         m_Nodes[n.ID] = std::move(n);
     }
     static uint64_t TileKey(int x, int y) { return (uint64_t(uint32_t(x)) << 32) | uint32_t(y); }
-    std::unordered_map<uint64_t, uint64_t> m_Foreground;
+    // Recent assets of each foreground terrain tile by column and row, newest last.
+    std::unordered_map<uint64_t, std::vector<uint64_t>> m_ForegroundRevisions;
     struct Order {
         bool operator()(uint64_t a, uint64_t b) const {
             const auto ordinal = [](uint64_t id) { return id & (uint64_t(1) << 62) ? (id >> 48) & 0x3fff : (id >> 32) & 0xffff; };
@@ -480,6 +518,14 @@ public:
         m_Bytes -= packet->second.Bytes; m_Packets.erase(packet); return true;
     }
     bool Contains(uint32_t message) const { return std::any_of(m_Packets.begin(), m_Packets.end(), [message](const auto& p) { return p.first >> 16 == message; }); }
+    // The transport is reliable, so a fragment unanswered this long reached a
+    // guest that discarded it; its credit would otherwise never return.
+    static constexpr uint64_t ReceiptTimeoutMS = 20000;
+    size_t Expire(uint64_t now, uint64_t age) {
+        const size_t before = m_Packets.size();
+        std::erase_if(m_Packets, [&](const auto& p) { if (now - p.second.Time < age) return false; m_Bytes -= p.second.Bytes; return true; });
+        return before - m_Packets.size();
+    }
     size_t Bytes() const { return m_Bytes; }
     void Reset() { m_Packets.clear(); m_Bytes = 0; }
 private:
@@ -787,26 +833,45 @@ public:
     struct Control { float Move = 0; bool Jet = false, Fast = false, Crouch = false; };
     using Solid = std::function<int(float x, float y)>; // 1 solid, 0 open, -1 unknown
     static constexpr float GroundAcceleration = 1600, StepUp = 8, StepDown = 12, HalfWidth = 7, HeadHeight = 24, TrustedError = 12;
+    // Why the last rendered frame did or did not predict: no controlled actor;
+    // the host does not offer it (unsupported actor, view or status); the
+    // terrain under the actor is not yet known; the model disagrees with the
+    // host; or predicting.
+    enum class Status : uint8_t { NoActor, Unsupported, NoFooting, Disagrees, Predicting, Count };
+    // One host state's comparison with the prediction, for diagnostics.
+    struct Correction {
+        uint32_t State = 0; uint16_t InputAge = 0; uint8_t Replayed = 0; bool Matched = false, Ground = false, FootKnown = false;
+        float HostX = 0, HostY = 0, HostVX = 0, HostVY = 0, PredictedX = 0, PredictedY = 0, Distance = 0, Error = 0, Foot = 0, Walk = 0, Move = 0;
+        // What lies below the host's feet: 1 terrain, -1 unknown, 0 nothing within 64 pixels, and how far down.
+        int8_t Below = 0; float BelowGap = 0; bool ReplayKnown = true;
+    };
     void Reset() { *this = LocalMotion(); }
     // Advances one rendered frame. Returns whether (x, y) is the predicted
     // position of the actor (its host position, as Snapshot::ActorX/Y).
     bool Update(const Snapshot& latest, uint64_t now, uint32_t sequence, const Control& control, const Solid& solid, float& x, float& y) {
-        if (!(latest.MotionFlags & MotionPredictable) || !latest.ControlledActor) { if (m_Actor) Reset(); return false; }
+        if (!latest.ControlledActor) { if (m_Actor) Reset(); m_Status = Status::NoActor; return false; }
+        if (!(latest.MotionFlags & MotionPredictable)) { if (m_Actor) Reset(); m_Status = Status::Unsupported; return false; }
         m_Width = latest.Wrap & 1 ? float(latest.SceneWidth) : 0;
-        if (latest.ControlledActor != m_Actor) { Reset(); m_Actor = latest.ControlledActor; m_Width = latest.Wrap & 1 ? float(latest.SceneWidth) : 0; m_StateID = latest.ID; Learn(latest, Control{}, solid); m_State = Host(latest, solid); }
+        if (latest.ControlledActor != m_Actor) { Reset(); m_Actor = latest.ControlledActor; m_Width = latest.Wrap & 1 ? float(latest.SceneWidth) : 0; m_StateID = latest.ID; Learn(latest, Control{}, solid); m_State = Host(latest, Control{}, solid); }
         const float dt = m_LastTime && now > m_LastTime ? float(std::min<uint64_t>(now - m_LastTime, 100)) * .001f * std::max(.05f, latest.SimSpeed * .01f) : 0;
-        m_LastTime = now;
-        Step(m_State, control, dt, solid);
+        m_LastTime = now; m_LastControl = control;
+        const bool known = Step(m_State, control, dt, solid);
         m_Frames.push_back({now, sequence, dt, control});
         while (m_Frames.size() > 1 && now - m_Frames.front().Time > 2000) m_Frames.pop_front();
         if (latest.ID != m_StateID) Reconcile(latest, solid);
         const float fade = std::exp(-dt / .1f); m_OffsetX *= fade; m_OffsetY *= fade;
         x = Wrapped(m_State.X + m_OffsetX); y = m_State.Y + m_OffsetY;
-        return m_FootKnown && m_Error < TrustedError;
+        m_Status = !m_FootKnown || !known || !m_ReplayKnown ? Status::NoFooting : m_Error >= TrustedError ? Status::Disagrees : Status::Predicting;
+        return m_Status == Status::Predicting;
     }
     // The last correction a host state made, in pixels.
     float LastCorrection() const { return m_LastCorrection; }
-    bool Active() const { return m_Actor && m_FootKnown && m_Error < TrustedError; }
+    bool Active() const { return m_Status == Status::Predicting; }
+    Status LastStatus() const { return m_Status; }
+    // Whether the model has the actor walking on the ground under player input.
+    bool Walking() const { return m_Actor && m_State.Ground && m_LastControl.Move != 0 && !m_LastControl.Jet; }
+    // Comparisons made since the last call, oldest first.
+    std::vector<Correction> TakeCorrections() { return std::exchange(m_Corrections, {}); }
 private:
     struct State { float X = 0, Y = 0, VX = 0, VY = 0; bool Ground = false; };
     struct Frame { uint64_t Time; uint32_t Sequence; float Dt; Control Input; };
@@ -814,60 +879,108 @@ private:
     static float Approach(float value, float target, float step) { return value < target ? std::min(target, value + step) : std::max(target, value - step); }
     static void Blend(float& value, float sample) { value = value > 0 ? value * .7f + sample * .3f : sample; }
     float Wrapped(float x) const { if (m_Width > 0) { x = std::fmod(x, m_Width); if (x < 0) x += m_Width; } return x; }
-    // The first point at or below fromY, within range, that is not open terrain.
-    static bool Surface(float x, float fromY, float range, const Solid& solid, float& surface) {
-        for (float y = std::floor(fromY); y <= fromY + range; ++y) if (solid(x, y) != 0) { surface = y; return true; }
-        return false;
+    // The first point at or below fromY, within range, that is not open: 1 if it
+    // is terrain, -1 if the guest does not know it, 0 if the whole range is open.
+    static int Surface(float x, float fromY, float range, const Solid& solid, float& surface) {
+        for (float y = std::floor(fromY); y <= fromY + range; ++y) if (const int found = solid(x, y)) { surface = y; return found; }
+        return 0;
     }
-    bool Wall(float x, float y, float vx, const Solid& solid) const {
-        if (vx == 0) return false;
+    // Terrain ahead of the moving body: 1 a wall, -1 unknown, 0 clear.
+    static int Wall(float x, float y, float vx, float foot, const Solid& solid) {
+        if (vx == 0) return 0;
         const float edge = x + (vx > 0 ? HalfWidth : -HalfWidth);
-        return solid(edge, y + m_Foot - StepUp - 2) == 1 || solid(edge, y) == 1;
+        const int knee = solid(edge, y + foot - StepUp - 2), body = solid(edge, y);
+        return knee == 1 || body == 1 ? 1 : knee < 0 || body < 0 ? -1 : 0;
     }
-    State Host(const Snapshot& latest, const Solid& solid) const {
+    // The distance from the actor's position down to its footing in this gait;
+    // crouching lowers the body. A gait not yet seen uses the standing one.
+    float Foot(const Control& c) const { return m_Foot[Gait(c)] > 0 ? m_Foot[Gait(c)] : m_Foot[0] > 0 ? m_Foot[0] : std::max({m_Foot[1], m_Foot[2]}); }
+    State Host(const Snapshot& latest, const Control& c, const Solid& solid) const {
         State s{latest.ActorX, latest.ActorY, latest.ActorVelX, latest.ActorVelY, false};
-        float ground; s.Ground = m_FootKnown && std::abs(s.VY) < 40 && Surface(s.X, s.Y + m_Foot - 3, 7, solid, ground);
+        float ground; s.Ground = m_FootKnown && std::abs(s.VY) < 60 && Surface(s.X, s.Y + Foot(c) - 3, 7, solid, ground) == 1;
         return s;
     }
-    void Step(State& s, const Control& c, float dt, const Solid& solid) const {
-        if (dt <= 0 || !m_FootKnown) return;
+    // Returns false when the step depended on terrain the guest does not hold;
+    // the model then makes no claim and the host's movement is shown.
+    bool Step(State& s, const Control& c, float dt, const Solid& solid) const {
+        if (dt <= 0 || !m_FootKnown) return true;
+        const float foot = Foot(c);
         if (s.Ground && !c.Jet) {
             // Walking at the speed the host showed for this gait, or stopping.
             const float walk = m_Walk[Gait(c)];
-            const float target = c.Move != 0 ? (walk > 0 ? c.Move * walk : s.VX) : 0;
+            float target = c.Move != 0 ? (walk > 0 ? c.Move * walk : s.VX) : 0;
+            // Held in place by something only the host knows: do not walk on through it.
+            if (m_Blocked && target * float(m_Blocked) > 0) target = 0;
             s.VX = Approach(s.VX, target, GroundAcceleration * dt); s.VY = 0;
             const float x = s.X + s.VX * dt;
-            if (Wall(x, s.Y, s.VX, solid)) { s.VX = 0; return; }
-            float ground;
-            if (Surface(x, s.Y + m_Foot - StepUp, StepUp + StepDown, solid, ground)) s.Y = ground - m_Foot; else s.Ground = false;
+            const int wall = Wall(x, s.Y, s.VX, foot, solid);
+            if (wall > 0) { s.VX = 0; return true; }
+            float ground; const int found = Surface(x, s.Y + foot - StepUp, StepUp + StepDown, solid, ground);
+            if (found < 0) return false;
+            // A step has open space above it. Terrain already at the top of the
+            // scan is a wall to this body (or terrain the guest still holds after
+            // the host destroyed it); climbing it rose by a step every frame.
+            if (found > 0 && ground <= std::floor(s.Y + foot - StepUp)) { s.VX = 0; return true; }
+            if (found) s.Y = ground - foot; else s.Ground = false;
             s.X = x;
-            return;
+            return wall == 0;
         }
         s.VY += m_Gravity * dt;
         if (c.Jet && m_Jet > 0) s.VY -= m_Jet * dt;
         if (c.Move != 0 && m_Air > 0) s.VX += c.Move * m_Air * dt;
         const float x = s.X + s.VX * dt;
-        if (Wall(x, s.Y, s.VX, solid)) s.VX = 0; else s.X = x;
+        const int wall = Wall(x, s.Y, s.VX, foot, solid);
+        if (wall > 0) s.VX = 0; else s.X = x;
         const float y = s.Y + s.VY * dt;
         float ground;
-        if (s.VY > 0 && Surface(s.X, s.Y + m_Foot, y - s.Y + 1, solid, ground)) { s.Y = ground - m_Foot; s.VY = 0; s.Ground = true; return; }
-        if (s.VY < 0 && solid(s.X, y - HeadHeight) == 1) { s.VY = 0; return; }
+        if (s.VY > 0) { const int found = Surface(s.X, s.Y + foot, y - s.Y + 1, solid, ground); if (found < 0) return false; if (found) { s.Y = ground - foot; s.VY = 0; s.Ground = true; return wall == 0; } }
+        if (s.VY < 0) { const int head = solid(s.X, y - HeadHeight); if (head < 0) return false; if (head) { s.VY = 0; return wall == 0; } }
         s.Y = y;
+        return wall == 0;
     }
     void Learn(const Snapshot& latest, const Control& c, const Solid& solid) {
         const float vx = latest.ActorVelX, vy = latest.ActorVelY;
         m_Gravity = latest.Gravity;
-        // At rest vertically, the terrain just below is where the actor stands.
-        if (std::abs(vy) < 6 && (!m_HostTime || std::abs(m_HostVY) < 6)) {
-            // A hovering or jumping actor can also be still; only a plausible, consistent distance counts.
-            float ground; if (Surface(latest.ActorX, latest.ActorY + 4, 64, solid, ground) && solid(latest.ActorX, ground) == 1) {
-                const float foot = ground - latest.ActorY;
-                if (foot >= 8 && foot <= 60 && (!m_FootKnown || std::abs(foot - m_Foot) < 12)) { m_Foot = m_FootKnown ? m_Foot * .5f + foot * .5f : foot; m_FootKnown = true; }
+        // Unless the host shows it jumping or falling, the terrain just below is
+        // where the actor stands. A walking body bobs and the ground under its
+        // centre can dip between its feet, so the median of recent samples counts,
+        // and only once most of them agree. Waiting for the actor to stand still
+        // left a walking player without prediction for most of a match.
+        if (!c.Jet && std::abs(vy) < 60) {
+            float ground; if (Surface(latest.ActorX, latest.ActorY + 4, 64, solid, ground) == 1 && ground - latest.ActorY >= 8 && ground - latest.ActorY <= 60) {
+                auto& samples = m_FootSamples[Gait(c)];
+                samples[m_FootNext[Gait(c)]++ % samples.size()] = ground - latest.ActorY;
+                std::array<float, 9> sorted{}; const size_t count = std::min<size_t>(m_FootNext[Gait(c)], samples.size());
+                std::copy_n(samples.begin(), count, sorted.begin()); std::sort(sorted.begin(), sorted.begin() + count);
+                const float median = sorted[count / 2];
+                const size_t agree = size_t(std::count_if(sorted.begin(), sorted.begin() + count, [median](float foot) { return std::abs(foot - median) <= 4; }));
+                if (count >= 3 && agree * 2 > count) { m_Foot[Gait(c)] = median; m_FootKnown = true; }
             }
         }
-        const State host = Host(latest, solid);
+        const State host = Host(latest, c, solid);
         const float elapsed = m_HostTime && latest.Time > m_HostTime ? float(latest.Time - m_HostTime) * .001f : 0;
-        if (host.Ground && !c.Jet && std::abs(c.Move) > .5f && vx * c.Move > 10) Blend(m_Walk[Gait(c)], std::abs(vx));
+        // A walking body's speed swings widely within each stride, so the walking
+        // speed is the host's progress over the last few states, not one velocity.
+        // Pushing on without progress means something only the host knows (another
+        // actor, a door, a crate) holds the actor; the model then stops there too.
+        const int direction = c.Move > .5f ? 1 : c.Move < -.5f ? -1 : 0;
+        if (host.Ground && !c.Jet && direction) {
+            if (direction != m_TrackDirection || Gait(c) != m_TrackGait) { m_TrackCount = 0; m_TrackDirection = direction; m_TrackGait = Gait(c); }
+            // Until progress has been measured, the first walking velocity seen stands in.
+            if (!m_Walk[Gait(c)] && vx * float(direction) > 10) m_Walk[Gait(c)] = std::abs(vx);
+            m_Track[m_TrackCount++ % m_Track.size()] = {latest.Time, latest.ActorX};
+            if (m_TrackCount >= 3) {
+                const auto& newest = m_Track[(m_TrackCount - 1) % m_Track.size()];
+                const auto& oldest = m_Track[(m_TrackCount - std::min(m_TrackCount, m_Track.size())) % m_Track.size()];
+                const float span = float(newest.Time - oldest.Time) * .001f * std::max(.05f, latest.SimSpeed * .01f);
+                if (span >= .12f) {
+                    const float speed = Displacement(oldest.X, newest.X, m_Width, m_Width > 0) * float(direction) / span;
+                    float& walk = m_Walk[Gait(c)];
+                    if (speed > std::max(5.0f, walk * .25f)) { Blend(walk, speed); m_Blocked = 0; }
+                    else if (walk > 0) m_Blocked = direction;
+                }
+            }
+        } else { m_TrackCount = 0; m_TrackDirection = 0; m_Blocked = 0; }
         if (!host.Ground && m_HostAir && elapsed > .02f && elapsed < .25f) {
             const float ay = (vy - m_HostVY) / elapsed, ax = (vx - m_HostVX) / elapsed;
             if (c.Jet && m_HostJet && m_Gravity - ay > 0) Blend(m_Jet, m_Gravity - ay);
@@ -881,24 +994,43 @@ private:
         const auto sent = std::find_if(m_Frames.begin(), m_Frames.end(), [&](const Frame& f) { return !Newer(latest.InputSequence, f.Sequence); });
         Learn(latest, sent != m_Frames.end() ? sent->Input : Control{}, solid);
         const State before = m_State;
-        State state = Host(latest, solid);
-        if (sent != m_Frames.end()) { const uint64_t match = sent->Time + latest.InputAge; for (const auto& frame : m_Frames) if (frame.Time > match) Step(state, frame.Input, frame.Dt, solid); }
+        State state = Host(latest, sent != m_Frames.end() ? sent->Input : Control{}, solid);
+        unsigned replayed = 0; m_ReplayKnown = true;
+        if (sent != m_Frames.end()) { const uint64_t match = sent->Time + latest.InputAge; for (const auto& frame : m_Frames) if (frame.Time > match) { m_ReplayKnown &= Step(state, frame.Input, frame.Dt, solid); ++replayed; } }
         m_State = state;
         const float dx = Displacement(m_State.X, before.X, m_Width, m_Width > 0), dy = before.Y - m_State.Y;
         m_LastCorrection = std::hypot(dx, dy);
         // A teleport or respawn is shown as it is.
         if (m_LastCorrection > 96) m_OffsetX = m_OffsetY = 0; else { m_OffsetX += dx; m_OffsetY += dy; }
         if (m_FootKnown) m_Error = m_Error * .8f + std::min(m_LastCorrection, 96.0f) * .2f;
+        if (m_Corrections.size() < 256) {
+            const auto& c = sent != m_Frames.end() ? sent->Input : Control{};
+            float below = 0; const int found = Surface(latest.ActorX, latest.ActorY + Foot(c) - 8, 72, solid, below);
+            m_Corrections.push_back({latest.ID, latest.InputAge, uint8_t(std::min(replayed, 255u)), sent != m_Frames.end(), state.Ground, m_FootKnown,
+                latest.ActorX, latest.ActorY, latest.ActorVelX, latest.ActorVelY, before.X, before.Y, m_LastCorrection, m_Error, Foot(c), m_Walk[Gait(c)], c.Move,
+                int8_t(found), found ? below - (latest.ActorY + Foot(c)) : 0, m_ReplayKnown});
+        }
     }
     std::deque<Frame> m_Frames;
     State m_State;
     uint64_t m_Actor = 0, m_LastTime = 0, m_HostTime = 0;
     uint32_t m_StateID = 0;
-    float m_Width = 0, m_Gravity = 0, m_Foot = 0, m_Jet = 0, m_Air = 0;
-    std::array<float, 3> m_Walk{};
+    float m_Width = 0, m_Gravity = 0, m_Jet = 0, m_Air = 0;
+    std::array<float, 3> m_Walk{}, m_Foot{};
+    std::array<std::array<float, 9>, 3> m_FootSamples{};
+    std::array<size_t, 3> m_FootNext{};
+    // The host's recent positions while walking one way in one gait.
+    struct Track { uint64_t Time = 0; float X = 0; };
+    std::array<Track, 4> m_Track{};
+    size_t m_TrackCount = 0;
+    int m_TrackDirection = 0, m_TrackGait = 0, m_Blocked = 0;
+    bool m_ReplayKnown = true;
     bool m_FootKnown = false, m_HostAir = false, m_HostJet = false;
     float m_HostVX = 0, m_HostVY = 0;
     float m_OffsetX = 0, m_OffsetY = 0, m_Error = 0, m_LastCorrection = 0;
+    Control m_LastControl;
+    Status m_Status = Status::NoActor;
+    std::vector<Correction> m_Corrections;
 };
 inline LocalMotion::Control MotionControl(const Input& input) {
     const auto held = [&](unsigned bit) { return bool(input.Held & (uint64_t(1) << bit)); };
@@ -909,10 +1041,11 @@ inline LocalMotion::Control MotionControl(const Input& input) {
     return c;
 }
 // Moves a drawn actor and everything attached to it so its host position is at (x, y).
-inline void PlaceActor(Snapshot& scene, const Snapshot& latest, float x, float y) {
+// Returns whether the actor was drawn this frame and so could be placed.
+inline bool PlaceActor(Snapshot& scene, const Snapshot& latest, float x, float y) {
     const Node* hostRoot = nullptr; for (const auto& n : latest.Nodes) if (n.ID == latest.ControlledActor) { hostRoot = &n; break; }
     const Node* root = nullptr; for (const auto& n : scene.Nodes) if (n.ID == latest.ControlledActor) { root = &n; break; }
-    if (!hostRoot || !root) return;
+    if (!hostRoot || !root) return false;
     // The drawn root keeps its offset from the host position.
     const float dx = Displacement(root->X, x + (hostRoot->X - latest.ActorX), latest.SceneWidth, latest.Wrap & 1), dy = y + (hostRoot->Y - latest.ActorY) - root->Y;
     std::unordered_map<uint64_t, uint64_t> parents; for (const auto& n : scene.Nodes) if (!(n.Flags & ScreenSpace)) parents[n.ID] = n.Parent;
@@ -921,6 +1054,7 @@ inline void PlaceActor(Snapshot& scene, const Snapshot& latest, float x, float y
         uint64_t id = n.ID; for (unsigned depth = 0; id && id != latest.ControlledActor && depth < 32; ++depth) { const auto up = parents.find(id); id = up == parents.end() ? 0 : up->second; }
         if (id == latest.ControlledActor) Translate(n, dx, dy);
     }
+    return true;
 }
 // The presentation delay follows measured delivery instead of a fixed 75 ms:
 // it must cover one update interval plus the arrival jitter, or presentation

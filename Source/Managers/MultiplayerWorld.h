@@ -54,6 +54,16 @@ public:
     // Whether the guest predicts its own actor's movement, and the last correction a host state made (pixels).
     bool MotionActive() const;
     float MotionCorrection() const;
+    // Rendered frames since the match began, by prediction status, and how many
+    // drew the predicted actor; the same for frames the model had it walking.
+    struct MotionFrames {
+        std::array<uint64_t, size_t(MP::World::LocalMotion::Status::Count)> Status{};
+        uint64_t Drawn = 0, Walking = 0, WalkingDrawn = 0;
+        // Terrain lookups that answered unknown: no such tile, no revision held, outside its pixels.
+        std::array<uint64_t, 3> Unknown{};
+    };
+    const MotionFrames& MotionCounts() const;
+    std::vector<MP::World::LocalMotion::Correction> TakeMotionCorrections();
     unsigned BlackTiles() const;
     unsigned BlackFogTiles() const;
     bool Paused() const;

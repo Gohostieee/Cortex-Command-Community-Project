@@ -432,6 +432,10 @@ namespace RTE {
 
 		/// Asynchronously enforces a GC run to occur.
 		void StartAsyncGarbageCollection();
+
+		/// Waits for an asynchronous GC run, which holds every script state, to finish.
+		/// Code outside the simulation step must call this before creating scripted objects.
+		void WaitForGarbageCollection();
 #pragma endregion
 
 		/// Clears Script Timings.

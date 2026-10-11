@@ -78,6 +78,7 @@ struct MultiplayerWorld::Impl {
     MP::Input LocalInput;
     LocalCamera CameraPrediction;
     LocalMotion Motion;
+    MultiplayerWorld::MotionFrames MotionFrames;
     LocalPointer Pointer;
     RetainedLayers SceneLayers;
     bool LocalInputEnabled = false;
@@ -395,7 +396,7 @@ void MultiplayerWorld::Reset() {
 void MultiplayerWorld::ResetPresentation() {
     auto& impl = *m_Impl;
     impl.States.Reset(); impl.LastSample = {}; impl.LastVisuals.clear(); impl.TileRevisions.clear(); impl.SceneAssets.clear();
-    impl.CameraPrediction.Reset(); impl.Motion.Reset();
+    impl.CameraPrediction.Reset(); impl.Motion.Reset(); impl.MotionFrames = {};
     impl.Pointer.Reset(); impl.SceneLayers.Reset();
     impl.RenderCount = impl.UpdateCount = impl.IntermediateCount = 0;
     impl.Target.reset();
@@ -680,6 +681,8 @@ uint8_t MultiplayerWorld::ViewMode() const { return m_Impl->States.Empty() ? 0 :
 unsigned MultiplayerWorld::StaleTiles() const { return m_Impl->StaleTiles; }
 bool MultiplayerWorld::MotionActive() const { return m_Impl->Motion.Active(); }
 float MultiplayerWorld::MotionCorrection() const { return m_Impl->Motion.LastCorrection(); }
+const MultiplayerWorld::MotionFrames& MultiplayerWorld::MotionCounts() const { return m_Impl->MotionFrames; }
+std::vector<LocalMotion::Correction> MultiplayerWorld::TakeMotionCorrections() { return m_Impl->Motion.TakeCorrections(); }
 unsigned MultiplayerWorld::BlackTiles() const { return m_Impl->BlackTiles; }
 unsigned MultiplayerWorld::BlackFogTiles() const { return m_Impl->BlackFogTiles; }
 bool MultiplayerWorld::RenderedCenter(Vector& center) const {
@@ -802,10 +805,18 @@ unsigned MultiplayerWorld::Render(uint64_t time) {
     // The player's own movement shows at once; host states correct it.
     if (const auto& latest = impl.States.Latest(); latest.ControlledActor) {
         const auto find = [&](uint64_t id) -> const Resource* { const auto found = impl.Resources.find(id); return found == impl.Resources.end() ? nullptr : &found->second; };
-        const LocalMotion::Solid solid = [&](float x, float y) { return impl.SceneLayers.Solid(x, y, latest.SceneWidth, latest.Wrap & 1, find); };
+        // The terrain the player last saw, when none of a tile's recent revisions has arrived.
+        const auto lastDrawn = [&](uint64_t tile) { const auto found = impl.LastVisuals.find(tile); return found == impl.LastVisuals.end() ? uint64_t(0) : found->second.Asset; };
+        const LocalMotion::Solid solid = [&](float x, float y) {
+            const int value = impl.SceneLayers.Solid(x, y, latest.SceneWidth, latest.Wrap & 1, find, lastDrawn);
+            if (value < 0) ++impl.MotionFrames.Unknown[size_t(impl.SceneLayers.UnknownReason(x, y, latest.SceneWidth, latest.Wrap & 1, find) - 1)];
+            return value;
+        };
         float x, y;
-        if (impl.Motion.Update(latest, time, impl.LocalInput.Sequence, impl.LocalInputEnabled ? MotionControl(impl.LocalInput) : LocalMotion::Control{}, solid, x, y)) PlaceActor(scene, latest, x, y);
-    }
+        const bool drawn = impl.Motion.Update(latest, time, impl.LocalInput.Sequence, impl.LocalInputEnabled ? MotionControl(impl.LocalInput) : LocalMotion::Control{}, solid, x, y) && PlaceActor(scene, latest, x, y);
+        auto& frames = impl.MotionFrames; ++frames.Status[size_t(impl.Motion.LastStatus())]; frames.Drawn += drawn;
+        if (impl.Motion.Walking()) { ++frames.Walking; frames.WalkingDrawn += drawn; }
+    } else ++impl.MotionFrames.Status[size_t(LocalMotion::Status::NoActor)];
     if (impl.LocalInput.Device == DEVICE_MOUSE_KEYB) impl.Pointer.Apply(scene, impl.States.Latest(), impl.LocalInput, impl.LocalInputEnabled);
     impl.CameraPrediction.Apply(scene, impl.States.Latest(), impl.LocalInput, time, impl.LocalInputEnabled);
     if (impl.LocalInputEnabled) {

@@ -7,11 +7,11 @@ if ($NativeBaseline -and !$Encounter) { throw 'Use -Encounter with -NativeBaseli
 if ($ServiceAddress -and !$Relay) { throw 'Use -Relay with -ServiceAddress for a live room-service test.' }
 if ($GuestResolutions.Count -gt 1 -and $GuestResolutions.Count -ne $Guests) { throw 'GuestResolutions must specify one size for all guests or one size per guest.' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot/VisualStudio.ps1"
 $gameRoot = if ($GameDirectory) { (Resolve-Path -LiteralPath $GameDirectory).Path } else { $taskRoot }
 Push-Location $taskRoot
 try {
-    $devShell = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat'
-    if (!(Test-Path -LiteralPath $devShell)) { throw 'Install Visual Studio 2022 C++ tools, or adjust devShell in this script.' }
+    $devShell = $VsDevCmd
     New-Item -ItemType Directory -Path build-mp -Force | Out-Null
     $compile = 'call "' + $devShell + '" -arch=x64 -host_arch=x64 > nul && cl /nologo /std:c++20 /EHsc /O2 /MD /DNOMINMAX /I Source\System /I external\sources\RakNet\include Tests\MultiplayerTests.cpp Source\System\MultiplayerTransport.cpp /Fo:build-mp\ /Fe:build-mp\MultiplayerTests.exe /link external\sources\RakNet\_Bin\raknet-release.lib ws2_32.lib winmm.lib'
     if (!$SkipTransportTests) {
@@ -23,7 +23,7 @@ try {
     if ($Smoke) {
         if ($Relay -and !$SkipTransportTests) { & ./Services/RoomService/Build.ps1 -Test }
         if (!$GameDirectory) {
-            & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
+            & $MSBuild RTEA.sln /m:4 /p:Configuration=Final /p:Platform=x64 "/p:TargetName=$([IO.Path]::GetFileNameWithoutExtension($GameExecutable))" "/p:ForceImportAfterCppTargets=$PSScriptRoot\MultiplayerBuild.props" /v:quiet '/flp:logfile=build-mp/restoration.log;verbosity=minimal'
             if ($LASTEXITCODE) { throw 'Game build failed.' }
             if (!(Test-Path -LiteralPath fmod.dll)) { Copy-Item -LiteralPath external/lib/win/fmod.dll -Destination fmod.dll }
         }

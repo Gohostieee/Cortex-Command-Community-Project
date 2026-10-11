@@ -12,7 +12,8 @@ if ($endpoint -notmatch '^[A-Za-z0-9.-]+:[0-9]+$') { throw 'The bundled server a
 $exe = Join-Path $taskRoot $GameExecutable
 if (!(Test-Path -LiteralPath $exe)) { throw 'Build the Final x64 game before packaging.' }
 if (!$RuntimeDirectory) {
-    $redist = 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC'
+    . "$taskRoot/Tests/VisualStudio.ps1"
+    $redist = Join-Path $VisualStudioRoot 'VC/Redist/MSVC'
     $runtimeVersion = Get-ChildItem -LiteralPath $redist -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
     if (!$runtimeVersion) { throw 'Provide the Visual C++ x64 redistributable RuntimeDirectory.' }
     $RuntimeDirectory = Join-Path $runtimeVersion.FullName 'x64/Microsoft.VC143.CRT'

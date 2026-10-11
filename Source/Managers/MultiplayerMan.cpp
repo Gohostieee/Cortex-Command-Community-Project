@@ -109,7 +109,7 @@ struct MultiplayerMan::Impl {
 		// Snapshots follow a fixed real-time schedule; re-arming from the capture
 		// time instead lost a 16.7 ms tick in every other interval (about 17 Hz).
 		uint64_t NextWorld = 0;
-		uint64_t LastPump = 0, LastObsoleteSweep = 0;
+		uint64_t LastPump = 0, LastObsoleteSweep = 0, LastCreditSweep = 0;
 		uint64_t BytesSent = 0;
 		// The configured upload is a ceiling; the actual rate follows the link.
 		MP::World::SendRate Rate;
@@ -126,6 +126,7 @@ struct MultiplayerMan::Impl {
 		std::array<MP::World::Snapshot, 32> SentStates;
 		bool SnapshotStarted = false;
 		bool SceneSent = false;
+		uint32_t ManifestMessage = 0;
 		std::deque<uint64_t> SceneQueue;
 		// Tiles the guest's current view lacks overtake the rest of the map.
 		std::deque<uint64_t> UrgentQueue;
@@ -167,10 +168,24 @@ struct MultiplayerMan::Impl {
 		if (!Benchmark) return;
 		if (!BenchmarkLog.is_open()) {
 			BenchmarkLog.open(SmokeLogDirectory + "/" + SmokeRole + "-benchmark.csv");
-			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps,stale_tiles,black_tiles,black_fog_tiles,motion_active,motion_correction_px\n";
+			BenchmarkLog << "event,time_ms,epoch,stage,playing,ready,paused,delta_ms,updates,rendered,ping_ms,world_hz,upload_mbps,stale_tiles,black_tiles,black_fog_tiles,motion_active,motion_correction_px,"
+				"motion_no_actor,motion_unsupported,motion_no_footing,motion_disagrees,motion_predicting,motion_drawn,motion_walking,motion_walking_drawn,unknown_no_tile,unknown_not_held,unknown_outside\n";
+			MotionLog.open(SmokeLogDirectory + "/" + SmokeRole + "-motion.csv");
+			MotionLog << "time_ms,state,input_age_ms,replayed,matched,ground,foot_known,host_x,host_y,host_vx,host_vy,predicted_x,predicted_y,correction_px,error_px,foot_px,walk_px_s,move,below,below_gap_px,replay_known\n";
 		}
-		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << ',' << World.StaleTiles() << ',' << World.BlackTiles() << ',' << World.BlackFogTiles() << ',' << World.MotionActive() << ',' << int(std::lround(World.MotionCorrection() * 10)) << '\n';
+		// Prediction frame counts are recorded per row, since the previous row.
+		const auto& counts = World.MotionCounts();
+		auto since = [](uint64_t current, uint64_t& previous) { const uint64_t delta = current >= previous ? current - previous : current; previous = current; return delta; };
+		BenchmarkLog << event << ',' << now << ',' << Epoch << ',' << SmokeStage << ',' << Playing << ',' << World.Ready() << ',' << World.Paused() << ',' << delta << ',' << World.Updates() << ',' << World.Rendered() << ',' << Net.Ping(ServerAddress) << ',' << RecentWorldUpdates.size() << ',' << BandwidthMbps << ',' << World.StaleTiles() << ',' << World.BlackTiles() << ',' << World.BlackFogTiles() << ',' << World.MotionActive() << ',' << int(std::lround(World.MotionCorrection() * 10));
+		for (size_t i = 0; i < counts.Status.size(); ++i) BenchmarkLog << ',' << since(counts.Status[i], MotionLogged.Status[i]);
+		BenchmarkLog << ',' << since(counts.Drawn, MotionLogged.Drawn) << ',' << since(counts.Walking, MotionLogged.Walking) << ',' << since(counts.WalkingDrawn, MotionLogged.WalkingDrawn);
+		for (size_t i = 0; i < counts.Unknown.size(); ++i) BenchmarkLog << ',' << since(counts.Unknown[i], MotionLogged.Unknown[i]);
+		BenchmarkLog << '\n';
+		for (const auto& c : World.TakeMotionCorrections())
+			MotionLog << now << ',' << c.State << ',' << c.InputAge << ',' << int(c.Replayed) << ',' << c.Matched << ',' << c.Ground << ',' << c.FootKnown << ',' << c.HostX << ',' << c.HostY << ',' << c.HostVX << ',' << c.HostVY << ',' << c.PredictedX << ',' << c.PredictedY << ',' << c.Distance << ',' << c.Error << ',' << c.Foot << ',' << c.Walk << ',' << c.Move << ',' << int(c.Below) << ',' << c.BelowGap << ',' << c.ReplayKnown << '\n';
 	}
+	std::ofstream MotionLog;
+	MultiplayerWorld::MotionFrames MotionLogged;
 	// Per-second attribution of the authority's single main loop. Every stage
 	// that competes with simulation time is measured separately.
 	struct ServerProfile {
@@ -298,7 +313,7 @@ struct MultiplayerMan::Impl {
 	bool SceneReceived = false;
 	uint64_t SceneReceivedAt = 0;
 	MP::World::ResourceRequests ResourceRequests;
-	void ResetSceneTransfer() { SceneManifest.clear(); SceneMissing.clear(); SceneReceived = false; ResourceRequests.Reset(); RecentWorldUpdates.clear(); LastFrameReceived = 0; DecodedStates = {}; }
+	void ResetSceneTransfer() { SceneManifest.clear(); SceneMissing.clear(); SceneReceived = false; SceneRequestedAt = 0; ResourceRequests.Reset(); RecentWorldUpdates.clear(); LastFrameReceived = 0; DecodedStates = {}; }
 	uint64_t LastRender = 0;
 	uint64_t LastResourceRequest = 0;
 	unsigned Texture = 0;
@@ -363,6 +378,8 @@ struct MultiplayerMan::Impl {
 	bool SmokeHostedLeft = false, SmokeHostedReturned = false;
 	bool SmokeHostedIndependent = false;
 	bool SmokeHostedCombatCaptured = false;
+	// The creator's last input when it left during the rematch, however the host learned of it.
+	void NoteCreatorLeft(int slot) { if (Smoke && Dedicated && slot == 0 && SmokeStage == 3 && !SmokeHostedLeaveSequence) SmokeHostedLeaveSequence = Players[0].Inputs.LastSequence(); }
 	uint64_t SmokeHostedLeaveAt = 0;
 	uint32_t SmokeHostedLeaveSequence = 0;
 	uint32_t SmokeHostedOtherFrame = 0;
@@ -416,7 +433,7 @@ struct MultiplayerMan::Impl {
 		// A guest keeps its content-addressed resources, so leaving and rejoining
 		// a room reuses the downloaded map instead of loading it again.
 		const bool hosting = State == Mode::Host;
-		Pending.clear(); Chat.clear(); ClearSounds(); if (hosting) World.Reset(); else World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); LocalInput = {}; Session = ReconnectToken = 0; OwnerCredential.clear(); OwnerSlot = 0; Epoch = 0; MouseRemainderX = MouseRemainderY = 0;
+		Pending.clear(); Chat.clear(); ClearSounds(); if (hosting) World.Reset(); else World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); EarlyWorld.clear(); MissingResources.clear(); ReportedResources.clear(); LocalInput = {}; Session = ReconnectToken = 0; OwnerCredential.clear(); OwnerSlot = 0; Epoch = 0; MouseRemainderX = MouseRemainderY = 0;
 		Texture = 0; TextureWidth = TextureHeight = 0;
 		RecentWorldUpdates.clear(); LastFrameReceived = LastNetworkLog = 0; NetworkLogSamples = 0;
 		State = Mode::Idle; Playing = Launch = Played = false; MatchEndedAt = 0; Notice.clear(); g_AudioMan.SetMultiplayerMode(false); g_UInputMan.TrapMousePos(false);
@@ -588,6 +605,12 @@ struct MultiplayerMan::Impl {
 	void ReceiveWorld(Kind kind, MP::Reader& reader);
 	void PresentWorld(MP::World::Snapshot snapshot);
 	void PresentPendingWorlds();
+	// Reliable world data that arrived before the Welcome or Lobby starting its match.
+	static constexpr size_t EarlyWorldLimit = 8192;
+	std::vector<std::vector<uint8_t>> EarlyWorld;
+	void ReplayEarlyWorld();
+	// When the guest last asked the host to send the scene manifest again.
+	uint64_t SceneRequestedAt = 0;
 	bool VerifyWorldFlow(std::ostream& log);
 	void Draw();
 };
@@ -814,7 +837,7 @@ void MultiplayerMan::EndGuestView(int player) {
 		const auto assets = MP::World::ManifestResources(impl.SceneManifest, map);
 		MP::Writer manifest(Kind::WorldManifest); MP::World::WriteManifest(manifest, assets, map);
 		if (impl.QueueWorld(peer, Kind::WorldManifest, manifest.Data, Delivery::WorldResource)) {
-			peer.SceneSent = true; const auto ordered = MP::World::NearestResources(assets, map, snapshot.Width, snapshot.Height); peer.SceneQueue = {ordered.begin(), ordered.end()};
+			peer.SceneSent = true; peer.ManifestMessage = peer.WorldMessage; const auto ordered = MP::World::NearestResources(assets, map, snapshot.Width, snapshot.Height); peer.SceneQueue = {ordered.begin(), ordered.end()};
 			// The reliable manifest delivers the whole map; it is the guest's layer baseline.
 			peer.AckedLayers.clear(); for (const auto& node : map.Nodes) peer.AckedLayers[node.ID] = node.Asset;
 		}
@@ -1055,6 +1078,16 @@ void MultiplayerMan::Impl::ReceiveWorld(Kind kind, MP::Reader& reader) {
 		else PresentWorld(std::move(snapshot));
 	}
 }
+void MultiplayerMan::Impl::ReplayEarlyWorld() {
+	if (State != Mode::Client || !Playing || EarlyWorld.empty()) return;
+	auto packets = std::move(EarlyWorld); EarlyWorld.clear();
+	for (auto& data : packets) {
+		MP::Reader reader(data); Header header;
+		if (!ReadHeader(reader, header) || header.Session != Session) continue;
+		if (header.Epoch == Epoch) ReceiveWorld(header.Type, reader);
+		else if (Newer(header.Epoch, Epoch)) EarlyWorld.push_back(std::move(data));
+	}
+}
 void MultiplayerMan::Impl::PresentPendingWorlds() {
 	if (!SceneReceived) return;
 	for (size_t i = PendingWorlds.size(); i > 0; --i) if (World.SceneryReady(PendingWorlds[i - 1])) {
@@ -1129,6 +1162,37 @@ bool MultiplayerMan::Impl::VerifyWorldFlow(std::ostream& log) {
 	const bool warmed = World.Ready() && SceneMissing.empty(); passed &= warmed;
 	log << (waiting && streaming && warmed ? "OK: " : "FAIL: ") << "guest waits for the scene map and its view, then streams the remaining scenery\n";
 	log << (streaming && warmed ? "OK: " : "FAIL: ") << "reconnect map includes changed terrain resources absent from the original manifest\n";
+	// A rejoining guest's manifest can overtake the Lobby that tells it the match
+	// is running. It must be kept and installed once the Lobby arrives.
+	{
+		World.Reset(); PendingWorlds.clear(); ResetSceneTransfer(); EarlyWorld.clear();
+		const auto state = State; const auto address = ServerAddress; const auto session = Session; const auto epoch = Epoch; const bool playing = Playing;
+		State = Mode::Client; ServerAddress = "verification"; Session = 77; Epoch = 5; Playing = false; sender = Player();
+		MP::Writer early(Kind::WorldManifest); MP::World::WriteManifest(early, sceneAssets, map);
+		passed &= QueueWorld(sender, Kind::WorldManifest, early.Data, Delivery::WorldResource);
+		while (!sender.WorldPackets.empty()) {
+			TransportEvent event; event.Kind = TransportEvent::Type::Data; event.Address = ServerAddress; event.Data = std::move(sender.WorldPackets.front().first);
+			sender.WorldPackets.pop_front(); Receive(event);
+		}
+		const bool held = !SceneReceived && !EarlyWorld.empty();
+		Playing = true; ReplayEarlyWorld();
+		const bool installed = held && SceneReceived && EarlyWorld.empty();
+		passed &= installed;
+		log << (installed ? "OK: " : "FAIL: ") << "a scene manifest that overtakes the match's Lobby is kept and installed when the Lobby arrives\n";
+		State = state; ServerAddress = address; Session = session; Epoch = epoch; Playing = playing; EarlyWorld.clear();
+	}
+	// A player whose Leave was lost returns on a new connection while the host
+	// still holds the old one open; the reconnect token reclaims the slot at once.
+	{
+		const auto state = State; const bool playing = Playing; auto saved = std::move(Players[1]); Players[1] = Player();
+		State = Mode::Host; Playing = true; Players[1].Token = 0x5eed; Players[1].Connected = true; Players[1].Address = "old-route"; Pending["new-route"] = Now();
+		MP::Writer hello(Kind::Hello); hello.Text("returning", 31); hello.U64(0x5eed); hello.Text(c_GameVersion.str()); hello.U16(960); hello.U16(540); hello.Text("", Relay::TokenLength);
+		TransportEvent event; event.Kind = TransportEvent::Type::Data; event.Address = "new-route"; event.Data = hello.Data; Receive(event);
+		const bool reclaimed = Players[1].Connected && Players[1].Address == "new-route" && Players[1].Token == 0x5eed;
+		passed &= reclaimed;
+		log << (reclaimed ? "OK: " : "FAIL: ") << "a returning player's token reclaims a slot whose old connection the host still holds open\n";
+		Players[1] = std::move(saved); Pending.clear(); State = state; Playing = playing;
+	}
 	World.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear();
 	ResetSceneTransfer();
 	return passed;
@@ -1143,13 +1207,18 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			if (!reader.Text(name, 31) || name.empty() || !reader.U64(token) || !reader.Text(version) || !reader.U16(width) || width < 320 || width > 3840 || !reader.U16(height) || height < 180 || height > 2160 || !reader.Text(owner, Relay::TokenLength) || !reader.Done()) { Reject(event.Address, "Invalid player registration."); return; }
 			if (version != c_GameVersion.str()) { Reject(event.Address, "Game version differs from the host. Install the same build."); return; }
 			int slot = -1;
-			if (token) for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Token == token && !Players[i].Connected && Players[i].ReservedUntil > Now()) slot = i;
+			// The reconnect token proves the slot is this player's. A new connection
+			// presenting it replaces one the host still believes is open: a player
+			// whose Leave was lost, or whose computer dropped off the network, was
+			// otherwise refused for the transport's timeout.
+			if (token) for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Token == token && (Players[i].Connected ? Players[i].Address != event.Address : Players[i].ReservedUntil > Now())) slot = i;
 			if (slot < 0 && !Playing) {
 				if (Dedicated && !OwnerRegistered && !owner.empty() && owner == OwnerCredential && !Players[0].Token) { slot = 0; OwnerRegistered = true; }
 				else for (int i = Dedicated && OwnerRegistered ? 0 : 1; i < 4; ++i) if (!Players[i].Token) { slot = i; break; }
 			}
 			if (slot < 0) { Reject(event.Address, Playing ? "Match already started. Rejoin with your original player slot or wait for the lobby." : "All player slots are occupied or reserved for reconnecting players."); return; }
 			if (Smoke && token && Players[slot].Token == token) { ++SmokeRejoins; Verify("REJOIN: player " + std::to_string(slot + 1)); }
+			if (Players[slot].Connected) { NoteCreatorLeft(slot); Net.Close(Players[slot].Address); g_UInputMan.ClearRemoteInput(slot); }
 			auto& player = Players[slot]; player.Address = event.Address; player.Name = name; player.Connected = true; player.Ready = Dedicated && slot == OwnerSlot; player.ReservedUntil = 0;
 			if (!player.Token) player.Token = Token();
 			player.ViewWidth = width; player.ViewHeight = height; if (Playing && token == player.Token) player.Inputs.ReleaseControls(); else player.Inputs.Reset(); ClearWorldPackets(player); player.WorldResources.clear(); player.PendingResources.clear(); player.LastWorld = 0; player.LastAck = Now(); player.AudioReady = false; player.ReplayLoops = true; Pending.erase(event.Address); Welcome(slot); return;
@@ -1171,6 +1240,14 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			uint8_t type; if (!reader.U8(type)) return;
 			if (type == 1) { uint64_t id; if (reader.U64(id) && reader.Done() && World.FindResource(id)) { player.PendingResources.erase(id); player.WorldResources.insert(id); } }
 			else if (type == 4) { uint16_t count; if (reader.U16(count) && count <= ReportBatch && reader.Remaining() == size_t(count) * 8) for (uint16_t i = 0; i < count; ++i) { uint64_t id; reader.U64(id); if (World.FindResource(id)) { player.PendingResources.erase(id); player.WorldResources.insert(id); } } }
+			else if (type == 5) { if (reader.Done() && player.SceneSent) {
+				// The guest is receiving states without the manifest they depend on.
+				// Send a fresh one unless the last is still on its way.
+				const uint32_t message = player.ManifestMessage;
+				const bool pending = player.ResourceFlight.Contains(message) || std::any_of(player.WorldPackets.begin(), player.WorldPackets.end(), [message](const auto& packet) {
+					MP::Reader reader(packet.first); Header header; MP::World::Chunk chunk; return packet.second == Delivery::WorldResource && ReadHeader(reader, header) && header.Type == Kind::WorldManifest && MP::World::ReadChunk(reader, chunk) && chunk.ID == message; });
+				if (!pending) { player.SceneSent = false; Verify("SCENE: player " + std::to_string(slot) + " requested the scene manifest again"); }
+			} }
 			else if (type == 3) { uint32_t message; uint16_t index; uint64_t sent = 0; if (reader.U32(message) && reader.U16(index) && reader.Done() && player.ResourceFlight.Receipt(message, index, &sent) && sent) player.Rate.Sample(Now() - sent); }
 			else if (type == 2) { uint64_t id; if (reader.U64(id) && reader.Done() && World.FindResource(id)) {
 				// A guest requests only what its view lacks, so it goes first, unless it is already on its way.
@@ -1192,10 +1269,18 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 				if (control != "Close" && Players[slot].Connected) Lobby();
 			}
 		}
-		else if (header.Type == Kind::Leave && reader.Done()) { if (Smoke && Dedicated && slot == 0 && SmokeStage == 3) SmokeHostedLeaveSequence = player.Inputs.LastSequence(); Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Dedicated || Playing ? Now() + 60000 : 0; player.Inputs.ReleaseControls(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
+		else if (header.Type == Kind::Leave && reader.Done()) { NoteCreatorLeft(slot); Net.Close(event.Address); player.Connected = false; player.Ready = false; player.ReservedUntil = Dedicated || Playing ? Now() + 60000 : 0; player.Inputs.ReleaseControls(); g_UInputMan.ClearRemoteInput(slot); Lobby(); }
 		return;
 	}
 	if (event.Address != ServerAddress) return;
+	// World data travels on its own reliable channel and can overtake the Welcome
+	// or Lobby that starts the match when either is retransmitted. Dropping it
+	// lost the one scene manifest, so the guest never finished loading.
+	if ((header.Type == Kind::WorldSnapshot || header.Type == Kind::WorldResource || header.Type == Kind::WorldManifest) && !(State == Mode::Client && Playing && header.Session == Session && header.Epoch == Epoch)) {
+		const bool expected = State == Mode::Connecting || State == Mode::Reconnecting || (State == Mode::Client && header.Session == Session && (header.Epoch == Epoch || Newer(header.Epoch, Epoch)));
+		if (expected && header.Type != Kind::WorldSnapshot && EarlyWorld.size() < EarlyWorldLimit) EarlyWorld.push_back(event.Data);
+		return;
+	}
 	if (header.Type == Kind::Reject && (State == Mode::Connecting || State == Mode::Reconnecting)) { std::string message; if (reader.Text(message) && reader.Done()) { Error = message; Stop(); UI = true; } return; }
 	if (header.Type == Kind::Welcome && (State == Mode::Connecting || State == Mode::Reconnecting)) {
 		uint8_t slot, dedicated; uint64_t token; std::string version;
@@ -1207,7 +1292,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 			for (size_t i = 0; i < 3; ++i) if (LocalInput.MouseHeld & (1 << i)) ++LocalInput.MouseReleases[i];
 			LocalInput.Held = 0; LocalInput.MouseHeld = 0; LocalInput.AimX = LocalInput.AimY = LocalInput.MoveX = LocalInput.MoveY = 0;
 		} else LocalInput = {};
-		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; PendingEdits.clear(); EditSequence = 0; Draft = {}; ResetShop(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); return;
+		Hosted = dedicated != 0; Session = header.Session; Epoch = header.Epoch; LocalSlot = slot; ReconnectToken = token; State = Mode::Client; PendingEdits.clear(); EditSequence = 0; Draft = {}; ResetShop(); World.ResetPresentation(); ResetSceneTransfer(); SnapshotAssembly.Reset(); ResourceAssembly.Reset(); PendingWorlds.clear(); MissingResources.clear(); ReportedResources.clear(); Texture = 0; LastRender = 0; ClearSounds(); UI = !Playing; Error.clear(); LastFrameReceived = Now(); ReplayEarlyWorld(); return;
 	}
 	if (State != Mode::Client || header.Session != Session) return;
 	if (header.Type == Kind::Chat) { uint8_t player; std::string message; if (reader.U8(player) && player < 4 && reader.Text(message, 192) && reader.Done()) AddChat(player, message); return; }
@@ -1244,7 +1329,7 @@ void MultiplayerMan::Impl::Receive(const TransportEvent& event) {
 		// Build the scene's pristine terrain while the host is still loading it,
 		// so the manifest finds it ready instead of stalling the loading screen.
 		if (changedMatch && Playing) if (const auto* preset = dynamic_cast<const Scene*>(g_PresetMan.GetEntityPreset("Scene", SceneName))) World.PrimeScene(*preset, {});
-		g_UInputMan.TrapMousePos(Playing && !UI); return;
+		g_UInputMan.TrapMousePos(Playing && !UI); ReplayEarlyWorld(); return;
 	}
 	if (header.Epoch != Epoch) return;
 	if (header.Type == Kind::TextInput && Playing) { uint8_t direction, active; if (reader.U8(direction) && direction == 1 && reader.U8(active) && active <= 1 && reader.Done()) TextActive = active != 0; return; }
@@ -1515,7 +1600,7 @@ void MultiplayerMan::Impl::Tick() {
 		else if (event.Kind == TransportEvent::Type::Disconnected) {
 			if (State == Mode::Host) {
 				Pending.erase(event.Address);
-				for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Address == event.Address && Players[i].Connected) { Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); g_UInputMan.ClearRemoteInput(i); Lobby(); }
+				for (int i = FirstRemote(); i < 4; ++i) if (Players[i].Address == event.Address && Players[i].Connected) { NoteCreatorLeft(i); Players[i].Connected = Players[i].Ready = false; Players[i].ReservedUntil = now + 60000; Players[i].Inputs.ReleaseControls(); ClearWorldPackets(Players[i]); g_UInputMan.ClearRemoteInput(i); Lobby(); }
 			} else if (State == Mode::Client && event.Address == ServerAddress) { State = Mode::Reconnecting; ConnectStarted = now; NextRetry = now + 1000; UI = true; Error = "Connection interrupted. Reconnecting to your player slot..."; g_UInputMan.TrapMousePos(false); ClearSounds(); }
 		}
 	}
@@ -1556,6 +1641,11 @@ void MultiplayerMan::Impl::Tick() {
 		} else log << " render_fps=" << FPS << " world_hz=" << RecentWorldUpdates.size() << " update_age_ms=" << (LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0) << " transport_ping_ms=" << Net.Ping(ServerAddress) << " snapshot_chunks=" << SnapshotChunksReceived << " assembled=" << SnapshotsAssembled << ' ' << Net.Diagnostics(ServerAddress);
 		log << '\n';
 	}
+	// States held for a manifest that has not come ask for it again.
+	if (State == Mode::Client && Playing && !SceneReceived) {
+		if (!SceneRequestedAt) SceneRequestedAt = now;
+		else if (!PendingWorlds.empty() && now - SceneRequestedAt >= 5000) { SceneRequestedAt = now; MP::Writer request(Kind::WorldAck, Session, Epoch); request.U8(5); Net.Send(ServerAddress, request.Data, Delivery::Control); Verify("SCENE: requested the scene manifest again"); }
+	}
 	if (State == Mode::Client && Playing && (!PendingWorlds.empty() || !MissingResources.empty() || !SceneMissing.empty()) && now - LastResourceRequest > 1000) {
 		LastResourceRequest = now;
 		std::unordered_set<uint64_t> missing = MissingResources, scenery;
@@ -1575,7 +1665,7 @@ void MultiplayerMan::Impl::Tick() {
 	if (Benchmark && now - BenchmarkLastSample >= 100) {
 		BenchmarkLastSample = now;
 		BenchmarkRecord("sample", now, LastFrameReceived && now >= LastFrameReceived ? now - LastFrameReceived : 0);
-		BenchmarkLog.flush();
+		BenchmarkLog.flush(); MotionLog.flush();
 	}
 	if (!CursorVerification && g_MenuMan.GetIsInMenuScreen()) UpdateMenu();
 }
@@ -1590,6 +1680,7 @@ void MultiplayerMan::Impl::PumpWorld(Player& player, uint64_t now) {
 	const double cap = BandwidthMbps * 125000.0 * .85;
 	if (!player.Rate.Cap()) player.Rate.Reset(cap, now); else player.Rate.SetCap(cap);
 	player.Rate.Update(now, Net.PacketLoss(player.Address));
+	if (now - player.LastCreditSweep >= 1000) { player.LastCreditSweep = now; player.ResourceFlight.Expire(now, MP::World::ResourceWindow::ReceiptTimeoutMS); }
 	const double worldRate = player.Rate.Rate();
 	const double elapsed = player.LastPump ? std::min<uint64_t>(100, now - player.LastPump) / 1000.0 : .020;
 	player.LastPump = now;
@@ -1621,7 +1712,11 @@ void MultiplayerMan::Impl::PumpWorld(Player& player, uint64_t now) {
 }
 
 void MultiplayerMan::Impl::SmokeTick() {
-	if (!Smoke) return; if (Dedicated || Hosted) { HostedSmokeTick(); return; } const auto now = Now();
+	if (!Smoke) return;
+	// The host's fixtures create scripted objects between simulation steps, while
+	// the previous step's asynchronous Lua collection may still hold every state.
+	if (State == Mode::Host) g_LuaMan.WaitForGarbageCollection();
+	if (Dedicated || Hosted) { HostedSmokeTick(); return; } const auto now = Now();
 	if (SmokeDeployment) { DeploymentTick(); return; }
 	if (SmokeEncounter) { EncounterTick(); return; }
 	if (State == Mode::Host && Playing && WarmingGuests) SmokeStageTime = now;
@@ -1773,7 +1868,12 @@ void MultiplayerMan::Impl::HostedSmokeTick() {
 				Verify("REMOTE PLAYER: " + std::to_string(player) + " input=" + std::to_string(Players[player].Inputs.LastSequence()) + " moved=" + std::to_string(SmokeActorMoved[player]) + " fired=" + std::to_string(SmokeFireSeen[player]));
 				Verify("REMOTE CONTROLS: " + std::to_string(player) + " GUI key=" + std::to_string(SmokeGUIKeySeen[player]) + " text=" + std::to_string(peer.SmokeTextSeen) + " digital radial=" + std::to_string(peer.SmokeRadialKeyboardSeen) + " mouse radial=" + std::to_string(peer.SmokeRadialMouseSeen) + " Q selection=" + std::to_string(peer.SmokeQCameraSeen) + " Q camera moved=" + std::to_string(peer.SmokeQCameraMoved));
 			}
-			if (!passed) { Verify("FAIL: dedicated runtime, remote controls or combat simulation"); System::SetQuit(true); return; }
+			if (!passed) {
+				std::string facts = "headless=" + std::to_string(g_WindowMan.IsHeadless() && g_WindowMan.GetWindow() == nullptr) + " owner=" + std::to_string(OwnerSlot) + " owner_connected=" + std::to_string(Players[OwnerSlot].Connected) +
+					" rejoins=" + std::to_string(SmokeRejoins) + " leave_input=" + std::to_string(SmokeHostedLeaveSequence) + " creator_input=" + std::to_string(Players[0].Inputs.LastSequence());
+				for (int player = 0; player <= SmokeGuests; ++player) facts += " p" + std::to_string(player) + "=connected:" + std::to_string(Players[player].Connected) + ",ack:" + std::to_string(Players[player].AckID);
+				Verify("FAIL: dedicated runtime, remote controls or combat simulation: " + facts); System::SetQuit(true); return;
+			}
 			g_ActivityMan.EndActivity(); SmokeStage = 4; SmokeStageTime = now;
 		}
 		if (SmokeStage == 4 && !Playing) { Verify("PASS: headless dedicated authority, all remote inputs, combat, owner transfer, reconnect and two-match lobby lifecycle"); SmokeStage = 5; }
