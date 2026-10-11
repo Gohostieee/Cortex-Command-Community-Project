@@ -11,7 +11,8 @@ The initial fixes below were committed as `e3c325015` and published in
 `mp-2026.10.11`. Its matching Linux worker was deployed to AWS and passed the
 four-client native lifecycle check. Subsequent debris delivery, sprite indexing,
 diagnostics, and Windows auto-updater changes are included in preparation for
-`mp-2026.10.11.1`. The acceptance work in section 3 remains a specification;
+`mp-2026.10.11.2`, including the deep-path fix found during the real updater
+download test. The acceptance work in section 3 remains a specification;
 publication alone does not complete those gates.
 
 | Area | State | Evidence |

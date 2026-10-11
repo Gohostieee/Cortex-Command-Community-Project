@@ -27,7 +27,15 @@ namespace CortexUpdater {
     }
     public static class UpdateCore {
         public const string Repository = "Gohostieee/Cortex-Command-Community-Project";
-        public static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 };
+        public static readonly JavaScriptSerializer Json;
+        static UpdateCore() {
+            // Enable modern .NET 4.8 path handling before any filesystem API
+            // caches its compatibility defaults. Game assets can exceed MAX_PATH.
+            AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
+            AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
+            Json = new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 };
+        }
+        public static void Initialize() { }
         public static string Hash(string path) { using (var stream = File.OpenRead(path)) using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant(); }
         public static Version TagVersion(string tag) {
             Version version;
@@ -93,11 +101,16 @@ namespace CortexUpdater {
             var first = relative.Split('/')[0];
             return new[] { "Userdata", "Mods", "ScreenShots", "Settings.ini" }.Contains(first, StringComparer.OrdinalIgnoreCase);
         }
+        static string Extended(string path) {
+            if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path;
+            return path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path.Substring(2) : @"\\?\" + path;
+        }
         public static string Destination(string root, string relative) {
             if (String.IsNullOrEmpty(relative) || relative.Contains("\\") || relative.Contains(":") || relative.StartsWith("/") || relative.Split('/').Any(p => p == ".." || p == "." || p.EndsWith(" ") || p.EndsWith(".") || Regex.IsMatch(p, @"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", RegexOptions.IgnoreCase))) throw new InvalidDataException("Unsafe package path.");
             var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             var destination = Path.GetFullPath(Path.Combine(fullRoot, relative.Replace('/', Path.DirectorySeparatorChar)));
             if (!destination.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Package escapes its installation folder.");
+            fullRoot = Extended(fullRoot); destination = Extended(destination);
             for (var path = destination; path != null && path.TrimEnd(Path.DirectorySeparatorChar) != fullRoot.TrimEnd(Path.DirectorySeparatorChar); path = Path.GetDirectoryName(path))
                 if ((File.Exists(path) || Directory.Exists(path)) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Update target contains a linked file or folder.");
             return destination;
@@ -195,7 +208,7 @@ namespace CortexUpdater {
                 var journal = Json.Deserialize<Journal>(File.ReadAllText(path));
                 if (!String.Equals(Path.GetFullPath(journal.Ticket.Root), Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) || Path.GetFullPath(journal.Ticket.Stage) != Path.Combine(directory, "stage")) throw new InvalidDataException("Recovery belongs to a different installation.");
                 if (!journal.Complete) Rollback(journal);
-                try { Directory.Delete(directory, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                try { Directory.Delete(Extended(directory), true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             }
         }
         public static string Quote(string argument) {

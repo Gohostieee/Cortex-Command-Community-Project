@@ -15,6 +15,7 @@ Downloads use HTTPS and are checked against the published size and SHA-256
 before extraction. Extraction rejects paths that escape the package, duplicate
 paths, linked entries and invalid Windows paths. Only release-managed files are
 installed; settings, saves, `Userdata`, `Mods`, and `ScreenShots` are preserved.
+Deep paths in bundled game data are supported without a Windows settings change.
 Files removed from a newer release are deleted only if the previous release
 listed them as managed. Unmanaged files are kept.
 
@@ -54,7 +55,7 @@ Windows C# compiler and does not require a separate .NET SDK or NuGet packages.
 ```powershell
 .\Tools\BuildUpdater.ps1
 .\Tests\RunUpdaterTests.ps1
-.\Tools\PackageMultiplayer.ps1 -Version mp-2026.10.11.1
+.\Tools\PackageMultiplayer.ps1 -Version mp-2026.10.11.2
 ```
 
 Commit all intended source and build the Final x64 game before packaging. The

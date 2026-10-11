@@ -8,6 +8,7 @@ using CortexUpdater;
 
 class UpdaterTests {
     static int Count;
+    static readonly string DeepAsset = "Data/" + new string('a', 64) + "/" + new string('b', 64) + "/" + new string('c', 64) + "/sprite.bmp";
     static void Check(bool result, string name) { if (!result) throw new Exception(name); ++Count; Console.WriteLine("PASS: " + name); }
     static void Reject(Action action, string name) { bool rejected = false; try { action(); } catch (InvalidDataException) { rejected = true; } Check(rejected, name); }
     static void Entry(ZipArchive archive, string name, string value) { using (var output = new StreamWriter(archive.CreateEntry("CortexCommand-Multiplayer/" + name).Open())) output.Write(value); }
@@ -16,7 +17,7 @@ class UpdaterTests {
         var files = new Dictionary<string, string> {
             { "Cortex Command.exe", "new-game" }, { "CortexUpdater.exe", "new-updater" },
             { "updater.json", UpdateCore.Json.Serialize(new { schema = 1, repository = UpdateCore.Repository, tag = "mp-2026.10.11.1" }) },
-            { "SOURCE.tar.gz", "matching-source" }, { "LICENSE", "license" }, { "Data/version.txt", "new-data" }
+            { "SOURCE.tar.gz", "matching-source" }, { "LICENSE", "license" }, { "Data/version.txt", "new-data" }, { DeepAsset, "long-path-data" }
         };
         using (var zip = ZipFile.Open(path, ZipArchiveMode.Create)) {
             foreach (var item in files) Entry(zip, item.Key, item.Value);
@@ -30,6 +31,7 @@ class UpdaterTests {
     static void Personal(string root) { Write(root, "Userdata/save.dat", "my-save"); Write(root, "Userdata/Settings.ini", "my-settings"); Write(root, "Mods/Personal.rte/file.ini", "my-mod"); Write(root, "ScreenShots/keep.png", "my-shot"); }
     static void Preserved(string root) { Check(File.ReadAllText(Path.Combine(root, "Userdata/save.dat")) == "my-save" && File.ReadAllText(Path.Combine(root, "Userdata/Settings.ini")) == "my-settings" && File.ReadAllText(Path.Combine(root, "Mods/Personal.rte/file.ini")) == "my-mod" && File.ReadAllText(Path.Combine(root, "ScreenShots/keep.png")) == "my-shot", "personal data survives update"); }
     static void Main(string[] args) {
+        UpdateCore.Initialize();
         string task = Path.GetFullPath(args[0]); Directory.CreateDirectory(task);
         string digest = new string('a', 64);
         Func<string, bool, string, object> release = (tag, draft, sha) => new {
@@ -50,6 +52,7 @@ class UpdaterTests {
         var ticket = UpdateCore.Stage(archive, package, install, Path.Combine(transaction, "stage"), new string[0]);
         UpdateCore.Apply(ticket, delegate(int _) { });
         Check(File.ReadAllText(Path.Combine(install, "Cortex Command.exe")) == "new-game" && File.ReadAllText(Path.Combine(install, "Data/version.txt")) == "new-data", "real ZIP extraction and installation replace managed game files");
+        Check(File.ReadAllText(UpdateCore.Destination(install, DeepAsset)) == "long-path-data", "deep game-data paths beyond MAX_PATH install successfully");
         Check(!File.Exists(Path.Combine(install, "Data/obsolete.txt")), "obsolete managed files are removed"); Preserved(install);
         string failure = Path.Combine(task, "failure"), failedInstall = Path.Combine(task, "failed-install"); Directory.CreateDirectory(failure); Directory.CreateDirectory(failedInstall);
         Write(failedInstall, "Cortex Command.exe", "old-game"); Personal(failedInstall);

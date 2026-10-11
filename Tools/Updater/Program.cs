@@ -33,6 +33,7 @@ namespace CortexUpdater {
         }
         [STAThread]
         static int Main(string[] args) {
+            UpdateCore.Initialize();
             string root = AppDomain.CurrentDomain.BaseDirectory, ticket = null; int parent = 0;
             bool checkOnly = false, updateOnly = false; var forwarded = new List<string>();
             for (int i = 0; i < args.Length; ++i) {
