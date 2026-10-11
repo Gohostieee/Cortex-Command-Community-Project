@@ -20,7 +20,9 @@ Files removed from a newer release are deleted only if the previous release
 listed them as managed. Unmanaged files are kept.
 
 The running updater copies a helper outside the game folder so that it can
-replace both itself and the game. It backs up affected files before writing,
+replace both itself and the game. Files with identical contents are left in
+place, and brief Windows replacement locks are retried for up to five seconds.
+It backs up changed files before writing,
 records a recovery journal, and restores the previous installation on an
 installation failure. A later startup recovers an interrupted journal before
 checking for another update. The helper starts the updated game after successful
@@ -55,7 +57,7 @@ Windows C# compiler and does not require a separate .NET SDK or NuGet packages.
 ```powershell
 .\Tools\BuildUpdater.ps1
 .\Tests\RunUpdaterTests.ps1
-.\Tools\PackageMultiplayer.ps1 -Version mp-2026.10.11.2
+.\Tools\PackageMultiplayer.ps1 -Version mp-2026.10.11.3
 ```
 
 Commit all intended source and build the Final x64 game before packaging. The

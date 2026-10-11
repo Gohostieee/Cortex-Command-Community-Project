@@ -11,8 +11,9 @@ The initial fixes below were committed as `e3c325015` and published in
 `mp-2026.10.11`. Its matching Linux worker was deployed to AWS and passed the
 four-client native lifecycle check. Subsequent debris delivery, sprite indexing,
 diagnostics, and Windows auto-updater changes are included in preparation for
-`mp-2026.10.11.2`, including the deep-path fix found during the real updater
-download test. The acceptance work in section 3 remains a specification;
+`mp-2026.10.11.3`, including deep-path support, unchanged-file preservation,
+and bounded retries for Windows replacement locks found during updater
+qualification. The acceptance work in section 3 remains a specification;
 publication alone does not complete those gates.
 
 | Area | State | Evidence |
@@ -26,14 +27,14 @@ publication alone does not complete those gates.
 | AWS deployment | v10 deployed to `cortex-hosted` in `us-east-1`, endpoint `34.231.191.247:8001`. | `mp-2026.10.11` release verification |
 | Separate-PC playtest | **Not done.** | — |
 | Craft and gib debris on guests | Priority tiers, stable selection, local sprite indexing and resource retention implemented. Acceptance measurements remain separate (§3.4). | `MultiplayerDebrisSpec.md`; debris benchmark logs |
+| Windows automatic updates | Implemented; full-package installation and recovery are qualified separately from multiplayer acceptance. Older installations need the full package or updater installer once. | `AutoUpdater.md`; release verification |
 
 The full list of fixes, with their causes, is in §2. Benchmark evidence lives
 in `%LOCALAPPDATA%/CortexCommandBenchmarks/<label>/`, outside Git.
 
-## 2. Changes awaiting commit
+## 2. Committed reliability changes
 
-Commit these as reviewable units, in this order, each building and passing
-`RunMultiplayerTests.ps1`:
+These changes were committed in `e3c325015` and included in `mp-2026.10.11`:
 
 1. **Tooling.** `Tests/VisualStudio.ps1` locates any Visual Studio 2022 edition,
    including Build Tools; the test, build and packaging scripts use it.
@@ -57,8 +58,8 @@ Commit these as reviewable units, in this order, each building and passing
    - New analyzer metrics.
 
 Protocol: the snapshot layout is unchanged. `WorldAck` type 5 is new, and v10
-hosts ignore unknown acknowledgement types. v10 was never deployed, so no
-version bump is required. All clients and workers must still match.
+hosts ignore unknown acknowledgement types. The release retains v10.
+All clients and workers must still match.
 
 ## 3. Remaining work
 
@@ -218,7 +219,6 @@ players judge normal combat usable. Local tests do not replace this.
 - Heavy-fight performance at 24 and 64 AI, measured on the real AWS host. The long-term target is ≥95% of real time.
 - Local HUD facts and predicted weapon feedback.
 - Arbitrary mods and physical controllers.
-- Updater work.
 
 ## 4. Test environment notes
 

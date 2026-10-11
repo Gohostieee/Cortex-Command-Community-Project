@@ -45,6 +45,8 @@ class UpdaterTests {
         foreach (string unsafePath in new[] { "../escape", "Data/../../escape", "C:/escape", "/escape", "Data\\escape", "Data/NUL", "Data/file:stream", "Data/alias." }) Reject(() => UpdateCore.Destination(task, unsafePath), "unsafe path rejected: " + unsafePath);
         string install = Path.Combine(task, "install"), transaction = Path.Combine(task, "transaction"); Directory.CreateDirectory(install); Directory.CreateDirectory(transaction);
         Write(install, "Cortex Command.exe", "old-game"); Write(install, "Data/obsolete.txt", "old-data"); Write(install, "update-files.json", "[\"Cortex Command.exe\",\"Data/obsolete.txt\"]"); Personal(install);
+        string oldDeep = UpdateCore.Destination(install, DeepAsset);
+        Directory.CreateDirectory(Path.GetDirectoryName(oldDeep)); File.WriteAllText(oldDeep, "old-long-path-data");
         var package = Package(transaction, null);
         string archive = Path.Combine(transaction, "release.zip");
         var invalid = new Release { Tag = package.Tag, Bytes = package.Bytes, Sha256 = digest };
@@ -54,12 +56,27 @@ class UpdaterTests {
         Check(File.ReadAllText(Path.Combine(install, "Cortex Command.exe")) == "new-game" && File.ReadAllText(Path.Combine(install, "Data/version.txt")) == "new-data", "real ZIP extraction and installation replace managed game files");
         Check(File.ReadAllText(UpdateCore.Destination(install, DeepAsset)) == "long-path-data", "deep game-data paths beyond MAX_PATH install successfully");
         Check(!File.Exists(Path.Combine(install, "Data/obsolete.txt")), "obsolete managed files are removed"); Preserved(install);
+        string lockedTx = Path.Combine(task, "locked-transaction"), lockedRoot = Path.Combine(task, "locked-install");
+        Directory.CreateDirectory(lockedTx); Directory.CreateDirectory(lockedRoot); Write(lockedRoot, "Cortex Command.exe", "new-game");
+        var lockedPackage = Package(lockedTx, null);
+        var lockedTicket = UpdateCore.Stage(Path.Combine(lockedTx, "release.zip"), lockedPackage, lockedRoot, Path.Combine(lockedTx, "stage"), new string[0]);
+        using (var held = File.Open(Path.Combine(lockedRoot, "Cortex Command.exe"), FileMode.Open, FileAccess.Read, FileShare.Read)) UpdateCore.Apply(lockedTicket, delegate(int _) { });
+        Check(File.ReadAllText(Path.Combine(lockedRoot, "Data/version.txt")) == "new-data", "an unchanged file can remain open while other managed files update");
+        string retryTx = Path.Combine(task, "retry-transaction"), retryRoot = Path.Combine(task, "retry-install");
+        Directory.CreateDirectory(retryTx); Directory.CreateDirectory(retryRoot); Write(retryRoot, "Cortex Command.exe", "old-game");
+        var retryPackage = Package(retryTx, null);
+        var retryTicket = UpdateCore.Stage(Path.Combine(retryTx, "release.zip"), retryPackage, retryRoot, Path.Combine(retryTx, "stage"), new string[0]);
+        var temporaryLock = File.Open(Path.Combine(retryRoot, "Cortex Command.exe"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        var unlock = System.Threading.Tasks.Task.Run(() => { System.Threading.Thread.Sleep(200); temporaryLock.Dispose(); });
+        UpdateCore.Apply(retryTicket, delegate(int _) { }); unlock.Wait();
+        Check(File.ReadAllText(Path.Combine(retryRoot, "Cortex Command.exe")) == "new-game", "temporary replacement locks are retried before installation fails");
         string failure = Path.Combine(task, "failure"), failedInstall = Path.Combine(task, "failed-install"); Directory.CreateDirectory(failure); Directory.CreateDirectory(failedInstall);
-        Write(failedInstall, "Cortex Command.exe", "old-game"); Personal(failedInstall);
+        Write(failedInstall, "Cortex Command.exe", "old-game"); Write(failedInstall, "Data/version.txt", "new-data"); Personal(failedInstall);
         var failedPackage = Package(failure, null);
         var failedTicket = UpdateCore.Stage(Path.Combine(failure, "release.zip"), failedPackage, failedInstall, Path.Combine(failure, "stage"), new string[0]);
         bool failed = false; try { UpdateCore.Apply(failedTicket, i => { if (i == 2) throw new IOException("Injected interrupted write"); }); } catch (IOException) { failed = true; }
         Check(failed && File.ReadAllText(Path.Combine(failedInstall, "Cortex Command.exe")) == "old-game" && !File.Exists(Path.Combine(failedInstall, "CortexUpdater.exe")), "failed installation restores old executable and removes new files"); Preserved(failedInstall);
+        Check(File.ReadAllText(Path.Combine(failedInstall, "Data/version.txt")) == "new-data", "rollback preserves unchanged managed files without backups");
         string crash = Path.Combine(task, "crash-cache"), crashTx = Path.Combine(crash, "transaction"), crashRoot = Path.Combine(task, "crash-install"); Directory.CreateDirectory(crashTx); Directory.CreateDirectory(crashRoot);
         Write(crashRoot, "Cortex Command.exe", "partial-game"); Write(crashTx, "backup/Cortex Command.exe", "old-game"); Directory.CreateDirectory(Path.Combine(crashTx, "stage"));
         var interrupted = new Journal { Ticket = new Ticket { Root = crashRoot, Stage = Path.Combine(crashTx, "stage"), Files = new[] { "Cortex Command.exe" }, DeleteFiles = new string[0] }, Existing = new[] { "Cortex Command.exe" }, Complete = false };

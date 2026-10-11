@@ -154,23 +154,45 @@ namespace CortexUpdater {
             string temporary = destination + ".cc-update-" + Guid.NewGuid().ToString("N");
             try {
                 File.Copy(source, temporary, false);
-                if (File.Exists(destination)) File.Replace(temporary, destination, null); else File.Move(temporary, destination);
+                for (int attempt = 0; ; ++attempt) {
+                    try {
+                        if (File.Exists(destination)) File.Replace(temporary, destination, null); else File.Move(temporary, destination);
+                        break;
+                    } catch (IOException error) {
+                        int code = error.HResult & 0xffff;
+                        // Virus scanners and other readers can briefly prevent replacement.
+                        // Keep the original backup and fail normally after a bounded wait.
+                        if (attempt >= 50 || (code != 32 && code != 33 && code != 1175 && code != 1176 && code != 1177)) throw;
+                        System.Threading.Thread.Sleep(100);
+                    }
+                }
+            } catch (IOException error) {
+                throw new IOException("Could not replace " + destination + ": " + error.Message, error);
             } finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
         public static void Apply(Ticket ticket, Action<int> beforeWrite) {
             string backup = Path.Combine(Path.GetDirectoryName(ticket.Stage), "backup"); Directory.CreateDirectory(backup);
             var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var affected = ticket.Files.Concat(ticket.DeleteFiles ?? new string[0]).ToArray();
+            var changed = new List<string>();
+            foreach (string file in ticket.Files) {
+                if (Protected(file)) throw new InvalidDataException("Update attempts to replace personal files.");
+                string destination = Destination(ticket.Root, file), source = Destination(ticket.Stage, file);
+                if (!File.Exists(destination) || new FileInfo(destination).Length != new FileInfo(source).Length || Hash(destination) != Hash(source)) changed.Add(file);
+            }
+            // Recovery must cover only the files we actually change; unchanged files
+            // have no backup and must never be removed during rollback.
+            var changes = new Ticket { Root = ticket.Root, Stage = ticket.Stage, Arguments = ticket.Arguments, Files = changed.ToArray(), DeleteFiles = ticket.DeleteFiles };
+            var affected = changes.Files.Concat(changes.DeleteFiles ?? new string[0]).ToArray();
             foreach (string file in affected) {
                 if (Protected(file)) throw new InvalidDataException("Update attempts to replace personal files.");
                 string destination = Destination(ticket.Root, file);
                 if (File.Exists(destination)) { string saved = Destination(backup, file); Directory.CreateDirectory(Path.GetDirectoryName(saved)); File.Copy(destination, saved, false); existing.Add(file); }
             }
-            var journal = new Journal { Ticket = ticket, Existing = existing.ToArray(), Complete = false };
+            var journal = new Journal { Ticket = changes, Existing = existing.ToArray(), Complete = false };
             WriteJournal(journal);
             try {
-                for (int i = 0; i < ticket.Files.Length; ++i) {
-                    string file = ticket.Files[i]; beforeWrite(i);
+                for (int i = 0; i < changes.Files.Length; ++i) {
+                    string file = changes.Files[i]; beforeWrite(i);
                     Replace(Destination(ticket.Stage, file), Destination(ticket.Root, file));
                 }
                 foreach (string file in ticket.DeleteFiles ?? new string[0]) { var destination = Destination(ticket.Root, file); if (File.Exists(destination)) File.Delete(destination); }
